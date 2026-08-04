@@ -2,12 +2,13 @@ import { useEffect, useState } from 'react';
 import BottomSheet from './BottomSheet.jsx';
 import PhotoInput from './PhotoInput.jsx';
 import { PhotoThumb, Spinner } from './ui.jsx';
-import { api } from '../lib/api.js';
+import { api, bustCache } from '../lib/api.js';
+import { useToast } from './Toast.jsx';
 import { saveDraft, loadDraft, clearDraft, queueEntry } from '../lib/queue.js';
 
 // M6 — Item entry bottom sheet. Non-liquor and liquor layouts.
 // M7 — Duplicate prompt when adding a second entry (warn, never block).
-// Photo control is upload-only on desktop admin (uploadOnly prop).
+// On success the sheet CLOSES and the caller returns to the list (#6).
 export default function ItemEntry({ auditId, item, onClose, onSaved, uploadOnly = false, canVoid = true }) {
   const empty = { qty: '', bottles: '', open_ml: '', location_text: '', remarks: '', photo_url: null };
   const [form, setForm] = useState(() => loadDraft(auditId, item.id) || empty);
@@ -15,6 +16,7 @@ export default function ItemEntry({ auditId, item, onClose, onSaved, uploadOnly 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [dupPrompt, setDupPrompt] = useState(false);
+  const toast = useToast();
 
   const activeEntries = (entries || []).filter((e) => e.status === 'active');
 
@@ -51,6 +53,16 @@ export default function ItemEntry({ auditId, item, onClose, onSaved, uploadOnly 
     return '';
   }
 
+  // Human-readable summary for the toast, e.g. "Refined Oil, 2.000 Ltr".
+  function describe(payload) {
+    if (item.is_liquor) {
+      const parts = [`${payload.bottles ?? 0} btl`];
+      if (payload.open_ml) parts.push(`${payload.open_ml} ml`);
+      return `${item.name}, ${parts.join(' · ')}`;
+    }
+    return `${item.name}, ${Number(payload.qty).toFixed(3)} ${item.unit}`;
+  }
+
   async function doSave() {
     setError('');
     const v = validate();
@@ -58,17 +70,23 @@ export default function ItemEntry({ auditId, item, onClose, onSaved, uploadOnly 
     setBusy(true);
     const payload = buildPayload();
     try {
-      await api.post(`/audits/${auditId}/entries`, payload);
+      const saved = await api.post(`/audits/${auditId}/entries`, payload);
       clearDraft(auditId, item.id);
       setForm(empty);
-      await loadEntries();
-      onSaved?.();
+      toast(`Saved — ${describe(payload)}`);
+      if (saved?.photo_outcome === 'pending_review') {
+        toast('Photo sent to admin for review (item already has a photo)', 'warn', 3400);
+      }
+      // Refresh the list, then close and return to it (#6).
+      await onSaved?.();
+      onClose();
     } catch (err) {
-      if (!err.status) {
-        // Network failure — queue and keep the form intact. NEVER clear on fail.
+      if (err.isNetwork) {
+        // Offline — queue and keep the form intact. NEVER clear on failure.
         queueEntry(auditId, payload);
         setError('No connection — entry queued and will retry automatically.');
-        onSaved?.();
+        toast('Queued — will sync when back online', 'warn');
+        await onSaved?.();
       } else {
         setError(err.message || 'Could not save');
       }
@@ -91,7 +109,8 @@ export default function ItemEntry({ auditId, item, onClose, onSaved, uploadOnly 
     if (!reason || !reason.trim()) return;
     await api.post(`/entries/${entry.id}/void`, { reason: reason.trim() });
     await loadEntries();
-    onSaved?.();
+    toast('Entry voided');
+    await onSaved?.();
   }
 
   const firstActive = activeEntries[0];
@@ -103,9 +122,9 @@ export default function ItemEntry({ auditId, item, onClose, onSaved, uploadOnly 
 
   return (
     <BottomSheet open onClose={onClose} title={item.name}>
-      {/* Large photo */}
+      {/* Large photo — cache-busted so a fresh upload shows immediately. */}
       <div className="flex justify-center mb-3">
-        <PhotoThumb src={item.photo_url} size={140} />
+        <PhotoThumb src={bustCache(item.photo_url, item.photo_version)} size={140} />
       </div>
       <div className="flex items-center justify-between mb-3">
         <div className="font-bold text-lg">{item.name}</div>

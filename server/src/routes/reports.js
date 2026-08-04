@@ -1,6 +1,9 @@
 import { Router } from 'express';
 import { requireAuth, requireRole } from '../middleware/auth.js';
-import { getAudit, physicalSummary, itemDetail, liquorReport, varianceReport, consolidated, exceptionReport } from '../lib/reports.js';
+import {
+  getAudit, physicalSummary, itemDetailTotals, liquorReport,
+  varianceReport, consolidated, exceptionReport,
+} from '../lib/reports.js';
 import { buildWorkbook, buildPdf } from '../lib/exporters.js';
 
 const router = Router();
@@ -9,6 +12,9 @@ router.use(requireAuth, requireRole('admin'));
 
 const LIQUOR_FOOTNOTE = 'Open bottle quantities are recorded by visual estimation.';
 const n = (v) => (v == null ? '' : v);
+
+// Reports given to the client show TOTALS ONLY — one line per item. The
+// per-entry breakdown lives on the admin count screen, never in a report.
 
 function sendXlsx(res, filename, sheets) {
   const buf = buildWorkbook(sheets);
@@ -22,6 +28,7 @@ async function sendPdf(res, filename, doc) {
   res.setHeader('Content-Disposition', `attachment; filename="${filename}.pdf"`);
   res.send(buf);
 }
+const slug = (s) => String(s || 'store').replace(/[^A-Za-z0-9]+/g, '_').replace(/^_|_$/g, '');
 
 // ── R1 Physical Stock Summary ────────────────────────────────────────────────
 router.get('/physical-summary/:auditId', async (req, res) => {
@@ -30,8 +37,9 @@ router.get('/physical-summary/:auditId', async (req, res) => {
   const data = await physicalSummary(req.params.auditId);
   const format = req.query.format;
   const sub = `${audit.store_name} — ${audit.audit_date}`;
+  const fname = `R1_physical_summary_${slug(audit.store_name)}`;
   if (format === 'xlsx') {
-    return sendXlsx(res, `R1_physical_summary_${audit.store_code}`, [
+    return sendXlsx(res, fname, [
       { name: 'By Section', aoa: [['Section', 'Items', 'Quantity', 'Value'],
         ...data.sections.map((s) => [s.section, s.items, s.qty, s.value])] },
       { name: 'By Category', aoa: [['Section', 'Category', 'Items', 'Quantity', 'Value'],
@@ -39,7 +47,7 @@ router.get('/physical-summary/:auditId', async (req, res) => {
     ]);
   }
   if (format === 'pdf') {
-    return sendPdf(res, `R1_physical_summary_${audit.store_code}`, {
+    return sendPdf(res, fname, {
       title: 'R1 — Physical Stock Summary', subtitle: sub,
       blocks: [
         { title: 'By Section', columns: ['Section', 'Items', 'Quantity', 'Value'],
@@ -52,43 +60,30 @@ router.get('/physical-summary/:auditId', async (req, res) => {
   res.json({ audit, ...data });
 });
 
-// ── R2 Item Detail with entry breakdown ──────────────────────────────────────
+// ── R2 Item Detail — TOTALS ONLY, with Section and Category ─────────────────
 router.get('/item-detail/:auditId', async (req, res) => {
   const audit = await getAudit(req.params.auditId);
   if (!audit) return res.status(404).json({ error: 'Not found' });
-  const data = await itemDetail(req.params.auditId);
+  const rows = await itemDetailTotals(req.params.auditId);
   const format = req.query.format;
+  const fname = `R2_item_detail_${slug(audit.store_name)}`;
+  const cols = ['Item', 'Section', 'Category', 'Unit', 'Total Qty', 'Open (ml)'];
+  const toRow = (r) => [
+    r.name, r.section, r.category, r.unit,
+    r.not_applicable ? 'N/A' : (r.is_liquor ? r.total_bottles : r.total_qty),
+    r.is_liquor ? r.total_open_ml : '',
+  ];
   if (format === 'xlsx') {
-    const aoa = [['Code', 'Item', 'Unit', 'Entry Qty/Bottles', 'Open ml', 'Location', 'By', 'Time', 'Status']];
-    for (const it of data) {
-      for (const e of it.entries) {
-        aoa.push([it.code, it.name, it.unit,
-          it.is_liquor ? n(e.bottles) : n(e.qty), it.is_liquor ? n(e.open_ml) : '',
-          n(e.location_text), e.counted_by_name, new Date(e.counted_at).toLocaleString(),
-          e.status === 'void' ? `VOID: ${e.void_reason || ''}` : 'active']);
-      }
-      aoa.push(['', `${it.name} TOTAL`, it.unit,
-        it.is_liquor ? it.total_bottles : it.total_qty, it.is_liquor ? it.total_open_ml : '', '', '', '', '']);
-    }
-    return sendXlsx(res, `R2_item_detail_${audit.store_code}`, [{ name: 'Item Detail', aoa }]);
+    return sendXlsx(res, fname, [{ name: 'Item Detail', aoa: [cols, ...rows.map(toRow)] }]);
   }
   if (format === 'pdf') {
-    return sendPdf(res, `R2_item_detail_${audit.store_code}`, {
+    return sendPdf(res, fname, {
       title: 'R2 — Item Detail', subtitle: `${audit.store_name} — ${audit.audit_date}`,
-      blocks: data.map((it) => ({
-        title: `${it.name} (${it.unit})`,
-        columns: ['Qty', 'Location', 'By', 'Time', 'Status'],
-        widths: [70, 180, 90, 120, 63],
-        rows: it.entries.map((e) => [
-          it.is_liquor ? `${n(e.bottles)} btl / ${n(e.open_ml)} ml` : n(e.qty),
-          n(e.location_text), e.counted_by_name,
-          new Date(e.counted_at).toLocaleTimeString(),
-          e.status === 'void' ? 'VOID' : 'active',
-        ]).concat([[`Total ${it.is_liquor ? it.total_bottles + ' btl' : it.total_qty}`, '', '', '', '']]),
-      })),
+      blocks: [{ title: 'Totals by item', columns: cols,
+        widths: [150, 110, 110, 50, 60, 50], rows: rows.map(toRow), note: LIQUOR_FOOTNOTE }],
     });
   }
-  res.json({ audit, items: data });
+  res.json({ audit, rows });
 });
 
 // ── R3 Liquor Report ─────────────────────────────────────────────────────────
@@ -97,15 +92,16 @@ router.get('/liquor/:auditId', async (req, res) => {
   if (!audit) return res.status(404).json({ error: 'Not found' });
   const data = await liquorReport(req.params.auditId);
   const format = req.query.format;
+  const fname = `R3_liquor_${slug(audit.store_name)}`;
   if (format === 'xlsx') {
-    return sendXlsx(res, `R3_liquor_${audit.store_code}`, [{
+    return sendXlsx(res, fname, [{
       name: 'Liquor', aoa: [['Brand', 'Sealed Bottles', 'Open (ml)'],
         ...data.map((d) => [d.brand, d.sealed_bottles, d.open_ml]),
         [], ['Note:', LIQUOR_FOOTNOTE]],
     }]);
   }
   if (format === 'pdf') {
-    return sendPdf(res, `R3_liquor_${audit.store_code}`, {
+    return sendPdf(res, fname, {
       title: 'R3 — Liquor Report', subtitle: `${audit.store_name} — ${audit.audit_date}`,
       blocks: [{ title: 'Liquor', columns: ['Brand', 'Sealed Bottles', 'Open (ml)'],
         widths: [280, 120, 123],
@@ -116,27 +112,37 @@ router.get('/liquor/:auditId', async (req, res) => {
 });
 
 // ── R4 Variance Report ───────────────────────────────────────────────────────
+// An export from an OPEN audit is stamped PROVISIONAL in the file header.
 router.get('/variance/:auditId', async (req, res) => {
   const audit = await getAudit(req.params.auditId);
   if (!audit) return res.status(404).json({ error: 'Not found' });
-  const data = await varianceReport(req.params.auditId);
+  const countedOnly = req.query.filter === 'counted';
+  const { rows, provisional, progress } = await varianceReport(req.params.auditId, { countedOnly });
   const format = req.query.format;
-  const cols = ['Code', 'Item', 'Unit', 'Physical', 'System', 'Variance', 'Variance %', 'Status'];
+  const fname = `${provisional ? 'PROVISIONAL_' : ''}R4_variance_${slug(audit.store_name)}`;
+  const stamp = provisional
+    ? `PROVISIONAL — count in progress. ${progress.uncounted} of ${progress.total} items not yet counted.`
+    : null;
+  const cols = ['Item', 'Unit', 'Physical', 'System', 'Variance', 'Variance %', 'Counted', 'Status'];
+  const toRow = (d) => [d.name, d.unit, d.physical_qty, n(d.system_qty), n(d.variance),
+                        n(d.variance_pct), d.counted ? 'Yes' : 'No', d.status];
   if (format === 'xlsx') {
-    return sendXlsx(res, `R4_variance_${audit.store_code}`, [{
-      name: 'Variance', aoa: [cols, ...data.map((d) => [d.code, d.name, d.unit,
-        d.physical_qty, n(d.system_qty), n(d.variance), n(d.variance_pct), d.status])],
+    const header = [];
+    if (stamp) header.push(['PROVISIONAL'], [stamp], []);
+    return sendXlsx(res, fname, [{
+      name: 'Variance', aoa: [...header, cols, ...rows.map(toRow)],
     }]);
   }
   if (format === 'pdf') {
-    return sendPdf(res, `R4_variance_${audit.store_code}`, {
-      title: 'R4 — Variance Report', subtitle: `${audit.store_name} — ${audit.audit_date}`,
+    return sendPdf(res, fname, {
+      title: `R4 — Variance Report${provisional ? ' (PROVISIONAL)' : ''}`,
+      subtitle: `${audit.store_name} — ${audit.audit_date}`,
+      banner: stamp,
       blocks: [{ title: 'Variance (Physical − System)', columns: cols,
-        widths: [55, 150, 40, 55, 55, 55, 55, 58],
-        rows: data.map((d) => [d.code, d.name, d.unit, d.physical_qty, n(d.system_qty), n(d.variance), n(d.variance_pct), d.status]) }],
+        widths: [150, 45, 55, 55, 55, 55, 45, 63], rows: rows.map(toRow) }],
     });
   }
-  res.json({ audit, rows: data });
+  res.json({ audit, rows, provisional, progress });
 });
 
 // ── R5 Consolidated (all stores) ─────────────────────────────────────────────
@@ -144,23 +150,28 @@ router.get('/consolidated', async (req, res) => {
   const ids = String(req.query.audit_ids || '').split(',').map((s) => parseInt(s, 10)).filter(Boolean);
   if (!ids.length) return res.status(400).json({ error: 'audit_ids required (comma separated)' });
   const data = await consolidated(ids);
+  const anyProvisional = data.some((d) => d.provisional);
   const format = req.query.format;
-  const cols = ['Store', 'Date', 'Status', 'Items', 'Physical Value', 'Total Variance Qty', 'Critical Items'];
+  const fname = `${anyProvisional ? 'PROVISIONAL_' : ''}R5_consolidated`;
+  const stamp = anyProvisional
+    ? 'PROVISIONAL — one or more audits are still in progress.' : null;
+  const cols = ['Store', 'Date', 'Status', 'Items', 'Uncounted', 'Physical Value', 'Total Variance Qty', 'Critical Items'];
+  const toRow = (d) => [d.store_name, d.audit_date, d.status, d.items, d.uncounted,
+                        d.physical_value, d.total_variance_qty, d.critical_items];
   if (format === 'xlsx') {
-    return sendXlsx(res, 'R5_consolidated', [{
-      name: 'Consolidated', aoa: [cols, ...data.map((d) => [d.store_name, d.audit_date, d.status,
-        d.items, d.physical_value, d.total_variance_qty, d.critical_items])],
-    }]);
+    const header = stamp ? [['PROVISIONAL'], [stamp], []] : [];
+    return sendXlsx(res, fname, [{ name: 'Consolidated', aoa: [...header, cols, ...data.map(toRow)] }]);
   }
   if (format === 'pdf') {
-    return sendPdf(res, 'R5_consolidated', {
-      title: 'R5 — Consolidated Report', subtitle: 'All selected stores',
+    return sendPdf(res, fname, {
+      title: `R5 — Consolidated Report${anyProvisional ? ' (PROVISIONAL)' : ''}`,
+      subtitle: 'All selected stores', banner: stamp,
       blocks: [{ title: 'Comparative', columns: cols,
-        rows: data.map((d) => [d.store_name, d.audit_date, d.status, d.items,
+        rows: data.map((d) => [d.store_name, d.audit_date, d.status, d.items, d.uncounted,
           (d.physical_value || 0).toFixed(2), d.total_variance_qty, d.critical_items]) }],
     });
   }
-  res.json({ rows: data });
+  res.json({ rows: data, provisional: anyProvisional });
 });
 
 // ── R6 Exception Report ──────────────────────────────────────────────────────
@@ -169,34 +180,35 @@ router.get('/exceptions/:auditId', async (req, res) => {
   if (!audit) return res.status(404).json({ error: 'Not found' });
   const data = await exceptionReport(req.params.auditId);
   const format = req.query.format;
+  const fname = `R6_exceptions_${slug(audit.store_name)}`;
   if (format === 'xlsx') {
-    return sendXlsx(res, `R6_exceptions_${audit.store_code}`, [
-      { name: 'Voided', aoa: [['Code', 'Item', 'Qty/Bottles', 'Open ml', 'Location', 'Void Reason', 'Counted By', 'Voided By'],
-        ...data.voided.map((v) => [v.code, v.name, n(v.qty ?? v.bottles), n(v.open_ml), n(v.location_text), v.void_reason, v.counted_by_name, v.voided_by_name])] },
-      { name: 'Not Applicable', aoa: [['Code', 'Item', 'Reason', 'Marked By'],
-        ...data.notApplicable.map((v) => [v.code, v.name, v.reason, v.marked_by_name])] },
-      { name: 'Multiple Entries', aoa: [['Code', 'Item', 'Entries', 'Physical Qty'],
-        ...data.multiEntry.map((v) => [v.code, v.name, v.entries, v.physical_qty])] },
-      { name: 'Zero Quantity', aoa: [['Code', 'Item', 'Zero Entries'],
-        ...data.zeroQty.map((v) => [v.code, v.name, v.zero_entries])] },
-      { name: 'No Photo', aoa: [['Code', 'Item', 'Entries'],
-        ...data.noPhoto.map((v) => [v.code, v.name, v.entries])] },
+    return sendXlsx(res, fname, [
+      { name: 'Voided', aoa: [['Item', 'Qty/Bottles', 'Open ml', 'Location', 'Void Reason', 'Counted By', 'Voided By'],
+        ...data.voided.map((v) => [v.name, n(v.qty ?? v.bottles), n(v.open_ml), n(v.location_text), v.void_reason, v.counted_by_name, v.voided_by_name])] },
+      { name: 'Not Applicable', aoa: [['Item', 'Reason', 'Marked By'],
+        ...data.notApplicable.map((v) => [v.name, v.reason, v.marked_by_name])] },
+      { name: 'Multiple Entries', aoa: [['Item', 'Entries', 'Physical Qty'],
+        ...data.multiEntry.map((v) => [v.name, v.entries, v.physical_qty])] },
+      { name: 'Zero Quantity', aoa: [['Item', 'Zero Entries'],
+        ...data.zeroQty.map((v) => [v.name, v.zero_entries])] },
+      { name: 'No Photo', aoa: [['Item', 'Entries'],
+        ...data.noPhoto.map((v) => [v.name, v.entries])] },
     ]);
   }
   if (format === 'pdf') {
-    return sendPdf(res, `R6_exceptions_${audit.store_code}`, {
+    return sendPdf(res, fname, {
       title: 'R6 — Exception Report', subtitle: `${audit.store_name} — ${audit.audit_date}`,
       blocks: [
-        { title: 'Voided Entries', columns: ['Code', 'Item', 'Reason', 'Counted By', 'Voided By'],
-          widths: [55, 150, 130, 90, 98], rows: data.voided.map((v) => [v.code, v.name, v.void_reason, v.counted_by_name, v.voided_by_name]) },
-        { title: 'Not Applicable', columns: ['Code', 'Item', 'Reason', 'Marked By'],
-          widths: [60, 170, 190, 103], rows: data.notApplicable.map((v) => [v.code, v.name, v.reason, v.marked_by_name]) },
-        { title: 'Multiple Entries', columns: ['Code', 'Item', 'Entries', 'Physical Qty'],
-          rows: data.multiEntry.map((v) => [v.code, v.name, v.entries, v.physical_qty]) },
-        { title: 'Zero Quantity', columns: ['Code', 'Item', 'Zero Entries'],
-          rows: data.zeroQty.map((v) => [v.code, v.name, v.zero_entries]) },
-        { title: 'Counted Without Photo', columns: ['Code', 'Item', 'Entries'],
-          rows: data.noPhoto.map((v) => [v.code, v.name, v.entries]) },
+        { title: 'Voided Entries', columns: ['Item', 'Reason', 'Counted By', 'Voided By'],
+          widths: [160, 150, 105, 108], rows: data.voided.map((v) => [v.name, v.void_reason, v.counted_by_name, v.voided_by_name]) },
+        { title: 'Not Applicable', columns: ['Item', 'Reason', 'Marked By'],
+          widths: [180, 240, 103], rows: data.notApplicable.map((v) => [v.name, v.reason, v.marked_by_name]) },
+        { title: 'Multiple Entries', columns: ['Item', 'Entries', 'Physical Qty'],
+          rows: data.multiEntry.map((v) => [v.name, v.entries, v.physical_qty]) },
+        { title: 'Zero Quantity', columns: ['Item', 'Zero Entries'],
+          rows: data.zeroQty.map((v) => [v.name, v.zero_entries]) },
+        { title: 'Counted Without Photo', columns: ['Item', 'Entries'],
+          rows: data.noPhoto.map((v) => [v.name, v.entries]) },
       ],
     });
   }

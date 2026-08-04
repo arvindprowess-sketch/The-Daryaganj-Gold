@@ -15,6 +15,7 @@ import settingsRoutes from './routes/settings.js';
 import dashboardRoutes from './routes/dashboard.js';
 import reportRoutes from './routes/reports.js';
 import uploadRoutes from './routes/uploads.js';
+import photoReviewRoutes from './routes/photoReviews.js';
 
 const app = express();
 app.use(cors({ origin: config.clientOrigin === '*' ? true : config.clientOrigin.split(',') }));
@@ -37,6 +38,7 @@ app.use('/api/settings', settingsRoutes);
 app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/reports', reportRoutes);
 app.use('/api/upload', uploadRoutes);
+app.use('/api/photo-reviews', photoReviewRoutes);
 
 // Central error handler
 app.use((err, _req, res, _next) => {

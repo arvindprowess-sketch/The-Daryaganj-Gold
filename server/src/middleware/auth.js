@@ -1,13 +1,15 @@
-import { verifyToken } from '../lib/auth.js';
+import { verifyAccessToken } from '../lib/auth.js';
 import { query } from '../db.js';
 
 // Attaches req.user = { id, role, username, name } from a Bearer token.
+// Signals `code` so the client can distinguish an expired token (refreshable)
+// from a genuinely invalid one (must re-login).
 export function requireAuth(req, res, next) {
   const header = req.headers.authorization || '';
   const token = header.startsWith('Bearer ') ? header.slice(7) : null;
-  if (!token) return res.status(401).json({ error: 'Missing token' });
+  if (!token) return res.status(401).json({ error: 'Missing token', code: 'no_token' });
   try {
-    const payload = verifyToken(token);
+    const payload = verifyAccessToken(token);
     req.user = {
       id: payload.sub,
       role: payload.role,
@@ -15,8 +17,12 @@ export function requireAuth(req, res, next) {
       name: payload.name,
     };
     next();
-  } catch {
-    return res.status(401).json({ error: 'Invalid or expired token' });
+  } catch (err) {
+    const expired = err.name === 'TokenExpiredError';
+    return res.status(401).json({
+      error: expired ? 'Token expired' : 'Invalid token',
+      code: expired ? 'token_expired' : 'token_invalid',
+    });
   }
 }
 

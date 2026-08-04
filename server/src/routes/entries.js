@@ -69,12 +69,36 @@ router.post('/audits/:auditId/entries', async (req, res) => {
     [req.params.auditId, itemId, qty, bottles, openMl,
      b.location_text || null, b.remarks || null, b.photo_url || null, req.user.id]
   );
+  const entry = rows[0];
+
+  // ── Photo flow to item master ──────────────────────────────────────────
+  // The entry photo stays attached to the entry as evidence either way; the
+  // logic below only decides whether it also becomes the MASTER photo.
+  let photoOutcome = null;
+  if (b.photo_url) {
+    if (!item.photo_url) {
+      // No master photo yet → promote immediately, visible to everyone at once.
+      await query(
+        'UPDATE items SET photo_url = $2, photo_version = photo_version + 1 WHERE id = $1',
+        [itemId, b.photo_url]
+      );
+      photoOutcome = 'promoted';
+    } else if (item.photo_url !== b.photo_url) {
+      // Master photo already exists → queue for admin approval, do not replace.
+      await query(
+        `INSERT INTO photo_reviews (item_id, entry_id, audit_id, proposed_url, current_url, submitted_by)
+         VALUES ($1,$2,$3,$4,$5,$6)`,
+        [itemId, entry.id, req.params.auditId, b.photo_url, item.photo_url, req.user.id]
+      );
+      photoOutcome = 'pending_review';
+    }
+  }
 
   // Counting an item clears any prior Not-Applicable mark for it.
   await query('DELETE FROM audit_na WHERE audit_id = $1 AND item_id = $2',
     [req.params.auditId, itemId]);
 
-  res.status(201).json(forRole(req.user.role, rows[0]));
+  res.status(201).json({ ...forRole(req.user.role, entry), photo_outcome: photoOutcome });
 });
 
 // ── Void an entry (NO DELETION). Auditor may void own; admin may void any. ────

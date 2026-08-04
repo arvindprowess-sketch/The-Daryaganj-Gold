@@ -13,6 +13,11 @@ sessions, enter system stock, and generate reports.
 
 ---
 
+> **Item names are the identifier.** The client's inventory does not use item
+> codes, so there is no `code` column. Names are unique case-insensitively, and
+> every comparison (CSV import, photo matching, system stock) trims whitespace,
+> collapses internal double spaces, and ignores case.
+
 ## Non-negotiable design rules (audit defensibility)
 
 These are enforced in code, not just the UI:
@@ -63,6 +68,8 @@ Key server variables (`server/.env`):
 |---|---|
 | `DATABASE_URL` | Postgres connection string |
 | `JWT_SECRET` | Secret for signing tokens (change in prod) |
+| `JWT_EXPIRES_IN` | Access token lifetime (default `1h`, refreshed silently) |
+| `JWT_REFRESH_EXPIRES_IN` | Refresh token lifetime (default `30d`) |
 | `BCRYPT_ROUNDS` | Password hashing cost |
 | `STORAGE_DRIVER` | `local` (dev) or `s3` (R2/S3 in prod) |
 | `UPLOAD_DIR` / `PUBLIC_BASE_URL` | Local upload folder and its public URL |
@@ -149,6 +156,45 @@ This only prevents data loss; the app is otherwise online-only.
 
 ---
 
+## Sessions and logout
+
+Auditors count for hours in places with poor signal, so the session is built not
+to drop:
+
+- Login issues a short-lived **access token** plus a long-lived **refresh
+  token**. The client refreshes silently (on a timer, on tab focus, and on any
+  401), so an active user is never logged out.
+- A **network failure is never treated as an auth failure.** `api.js` raises a
+  distinct `NetworkError` for requests that never reached the server; only a
+  rejected *refresh token* ends the session.
+- The session survives reload and navigation (the profile is cached and the
+  route guard waits for auth to finish loading).
+- Logging out asks for confirmation, and never discards saved drafts.
+
+## Photos from counting → item master
+
+- Item has **no** master photo → the auditor's photo becomes the master
+  immediately and is visible to everyone.
+- Item **already has** a master photo → the new photo is saved with the count
+  entry and queued in **Photo Review** (admin) showing current vs proposed side
+  by side. The master only changes on approval.
+- **Entry photos are evidence** — they stay attached to their count entry
+  whether or not they become the master, and are never deleted or replaced.
+- Master photo URLs carry a `photo_version` cache-buster so a new image shows
+  immediately instead of serving a stale cached file.
+
+## Reports vs the admin working view
+
+- **Reports (the client deliverable) show TOTALS ONLY** — one line per item
+  carrying its total, with no per-entry lines and no redundant "<item> Total"
+  row. This applies to every report and every export.
+- **The admin count-entry screen shows every individual entry** (quantity,
+  location, user, timestamp), with voided entries struck through and excluded
+  from the total. That is where an admin verifies how a total was arrived at.
+
+The per-entry detail always exists in the database; it simply never appears in
+a report given to the client.
+
 ## Reports
 
 Admin only. Each exports to **Excel (.xlsx, SheetJS)** and **PDF (pdfkit)**.
@@ -158,7 +204,12 @@ Admin only. Each exports to **Excel (.xlsx, SheetJS)** and **PDF (pdfkit)**.
 - **R3** Liquor Report — sealed bottles and open ml kept **separate**
   (footnote: "Open bottle quantities are recorded by visual estimation.")
 - **R4** Variance Report — physical − system, with % and status bands read from
-  the **settings** table (liquor 2%/4%, others 1%/3% defaults — not hardcoded)
+  the **settings** table (liquor 2%/4%, others 1%/3% defaults — not hardcoded).
+  While an audit is `open` the variance is **PROVISIONAL**: a banner reports how
+  many items are still uncounted, an *Uncounted* column and an
+  [All items | Counted only] filter are available, and any export is stamped
+  `PROVISIONAL` in the file header and filename. The warning disappears once the
+  auditor submits the count (audit status `submitted`).
 - **R5** Consolidated — all stores, comparative aggregate variance
 - **R6** Exception Report — voided entries, Not-Applicable items, items with
   multiple entries, zero-quantity entries, and items counted without a photo

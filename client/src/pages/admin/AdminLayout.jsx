@@ -1,13 +1,14 @@
 import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import { useAuth } from '../../lib/auth.jsx';
 import { useState } from 'react';
+import ConfirmDialog from '../../components/ConfirmDialog.jsx';
 
 const nav = [
   ['', 'Dashboard', '📊'],
   ['items', 'Item Master', '📦'],
+  ['photo-review', 'Photo Review', '🖼️'],
   ['stores-users', 'Stores & Users', '🏬'],
   ['audits', 'Audit Sessions', '🗓️'],
-  ['system-stock-help', 'System Stock', '📥'],
   ['settings', 'Settings', '⚙️'],
   ['reports', 'Reports', '📈'],
 ];
@@ -16,23 +17,17 @@ export default function AdminLayout() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
+  const [confirm, setConfirm] = useState(false);
 
   const Links = () => (
     <nav className="space-y-1">
       {nav.map(([to, label, icon]) => (
-        to === 'system-stock-help' ? (
-          <NavLink key={to} to="/admin/audits" onClick={() => setOpen(false)}
-                   className="flex items-center gap-3 px-3 py-2.5 rounded-xl text-slate-300 hover:bg-white/10">
-            <span>{icon}</span><span>{label}</span>
-          </NavLink>
-        ) : (
-          <NavLink key={to} to={`/admin/${to}`} end={to === ''} onClick={() => setOpen(false)}
-                   className={({ isActive }) =>
-                     `flex items-center gap-3 px-3 py-2.5 rounded-xl transition ${
-                       isActive ? 'bg-brand text-white' : 'text-slate-300 hover:bg-white/10'}`}>
-            <span>{icon}</span><span>{label}</span>
-          </NavLink>
-        )
+        <NavLink key={to} to={`/admin/${to}`} end={to === ''} onClick={() => setOpen(false)}
+                 className={({ isActive }) =>
+                   `flex items-center gap-3 px-3 py-2.5 rounded-xl transition ${
+                     isActive ? 'bg-brand text-white' : 'text-slate-300 hover:bg-white/10'}`}>
+          <span>{icon}</span><span>{label}</span>
+        </NavLink>
       ))}
     </nav>
   );
@@ -49,7 +44,7 @@ export default function AdminLayout() {
         <div className="mt-auto pt-4 border-t border-white/10 text-sm">
           <div className="px-2 text-slate-400">{user?.name}</div>
           <button className="mt-2 w-full text-left px-2 py-2 rounded-lg hover:bg-white/10"
-                  onClick={() => { logout(); navigate('/login'); }}>Log out</button>
+                  onClick={() => setConfirm(true)}>Log out</button>
         </div>
       </aside>
 
@@ -65,7 +60,7 @@ export default function AdminLayout() {
             <div className="text-2xl font-black mb-6 px-2">Audix</div>
             <Links />
             <button className="mt-6 w-full text-left px-2 py-2 rounded-lg hover:bg-white/10"
-                    onClick={() => { logout(); navigate('/login'); }}>Log out</button>
+                    onClick={() => setConfirm(true)}>Log out</button>
           </div>
         </div>
       )}
@@ -73,6 +68,16 @@ export default function AdminLayout() {
       <main className="flex-1 min-w-0 p-4 md:p-8 pt-16 md:pt-8">
         <Outlet />
       </main>
+
+      <ConfirmDialog
+        open={confirm}
+        title="Log out?"
+        message="Any unsaved entry on this screen will be lost."
+        confirmLabel="Log out"
+        danger
+        onCancel={() => setConfirm(false)}
+        onConfirm={() => { logout(); navigate('/login'); }}
+      />
     </div>
   );
 }

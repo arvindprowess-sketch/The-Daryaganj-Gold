@@ -1,6 +1,6 @@
-code,name,section,category,unit,is_liquor,bottle_size_ml,rate
-DRY-101,Cornflour,Main Store / Backroom,Dry Store,Kg,no,,60
-DRY-102,Black Pepper,Main Store / Backroom,Dry Store,Kg,no,,720
-VEG-101,Green Chilli,Base Kitchen,Vegetables & Dairy,Kg,no,,55
-LIQ-101,Jack Daniels,Bar & Liquor,Spirits,Bottle,yes,750,3600
-LIQ-102,Corona Beer,Bar & Liquor,Beer & Wine,Bottle,yes,355,220
+name,section,category,unit,is_liquor,bottle_size_ml,rate
+Cornflour,Main Store / Backroom,Dry Store,Kg,no,,60
+Black Pepper,Main Store / Backroom,Dry Store,Kg,no,,720
+Green Chilli,Base Kitchen,Vegetables & Dairy,Kg,no,,55
+Jack Daniels,Bar & Liquor,Spirits,Bottle,yes,750,3600
+Corona Beer,Bar & Liquor,Beer & Wine,Bottle,yes,355,220

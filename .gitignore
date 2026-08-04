@@ -6,6 +6,8 @@ build/
 *.log
 npm-debug.log*
 uploads/*
+server/uploads/*
+!server/uploads/.gitkeep
 !uploads/.gitkeep
 .DS_Store
 coverage/

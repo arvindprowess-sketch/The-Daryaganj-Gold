@@ -22,10 +22,13 @@ import CountEntry from './pages/admin/CountEntry.jsx';
 import SystemStock from './pages/admin/SystemStock.jsx';
 import Settings from './pages/admin/Settings.jsx';
 import Reports from './pages/admin/Reports.jsx';
+import PhotoReview from './pages/admin/PhotoReview.jsx';
 
 function RequireRole({ role, children }) {
   const { user, loading } = useAuth();
   const loc = useLocation();
+  // Wait for auth to finish loading before deciding — guarding early was one
+  // cause of spurious redirects to /login.
   if (loading) return <Spinner />;
   if (!user) return <Navigate to="/login" state={{ from: loc }} replace />;
   if (role && user.role !== role) {
@@ -59,6 +62,7 @@ export default function App() {
         <Route path="/admin" element={<RequireRole role="admin"><AdminLayout /></RequireRole>}>
           <Route index element={<Dashboard />} />
           <Route path="items" element={<ItemMaster />} />
+          <Route path="photo-review" element={<PhotoReview />} />
           <Route path="stores-users" element={<StoresUsers />} />
           <Route path="audits" element={<AuditSessions />} />
           <Route path="audits/:auditId/count" element={<CountEntry />} />

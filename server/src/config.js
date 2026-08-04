@@ -12,7 +12,10 @@ export const config = {
   databaseUrl:
     process.env.DATABASE_URL || 'postgres://audix:audix@localhost:5432/audix',
   jwtSecret: process.env.JWT_SECRET || 'dev-insecure-secret-change-me',
-  jwtExpiresIn: process.env.JWT_EXPIRES_IN || '12h',
+  // Short-lived access token, silently refreshed by the client so an active
+  // auditor is never logged out mid-count.
+  jwtExpiresIn: process.env.JWT_EXPIRES_IN || '1h',
+  jwtRefreshExpiresIn: process.env.JWT_REFRESH_EXPIRES_IN || '30d',
   bcryptRounds: parseInt(process.env.BCRYPT_ROUNDS || '10', 10),
   storageDriver: process.env.STORAGE_DRIVER || 'local',
   uploadDir: process.env.UPLOAD_DIR || 'uploads',

@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { query } from '../db.js';
 import { requireAuth, requireRole, assertStoreAccess, loadAuditForUser } from '../middleware/auth.js';
 import { forRole } from '../lib/blindCount.js';
+import { itemEntriesForAdmin } from '../lib/reports.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -38,6 +39,39 @@ router.post('/', requireRole('admin'), async (req, res) => {
     [store_id, audit_date, cutoff_time || null, req.user.id]
   );
   res.status(201).json(rows[0]);
+});
+
+// Auditor submits the count. Variance stops being provisional at this point.
+router.post('/:id/submit', async (req, res) => {
+  const { audit, allowed } = await loadAuditForUser(req.user, req.params.id);
+  if (!audit) return res.status(404).json({ error: 'Not found' });
+  if (!allowed) return res.status(403).json({ error: 'Forbidden' });
+  if (audit.status !== 'open') return res.status(409).json({ error: `Audit is already ${audit.status}` });
+
+  // Guard: every active item must be counted or explicitly marked N/A.
+  const { rows: left } = await query(
+    `SELECT count(*)::int AS n FROM items i
+      WHERE i.is_active = TRUE
+        AND NOT EXISTS (SELECT 1 FROM count_entries ce WHERE ce.item_id=i.id AND ce.audit_id=$1 AND ce.status='active')
+        AND NOT EXISTS (SELECT 1 FROM audit_na na WHERE na.item_id=i.id AND na.audit_id=$1)`,
+    [req.params.id]
+  );
+  if (left[0].n > 0) {
+    return res.status(409).json({ error: `${left[0].n} item(s) still uncounted`, uncounted: left[0].n });
+  }
+  const { rows } = await query(
+    `UPDATE audits SET status='submitted', submitted_at=now() WHERE id=$1 RETURNING *`,
+    [req.params.id]
+  );
+  res.json(rows[0]);
+});
+
+// Admin working view: every individual entry per item, voided ones included.
+// This is where an admin verifies how a total was arrived at. Client reports
+// never show this level of detail.
+router.get('/:id/entries', requireRole('admin'), async (req, res) => {
+  const data = await itemEntriesForAdmin(req.params.id, req.query.item_id || null);
+  res.json(data);
 });
 
 router.post('/:id/close', requireRole('admin'), async (req, res) => {
@@ -102,11 +136,11 @@ router.get('/:id/items', async (req, res) => {
   const params = [req.params.id];
   if (section_id) { params.push(section_id); conds.push(`i.section_id = $${params.length}`); }
   if (category_id) { params.push(category_id); conds.push(`i.category_id = $${params.length}`); }
-  if (search) { params.push(`%${search}%`); conds.push(`(i.name ILIKE $${params.length} OR i.code ILIKE $${params.length})`); }
+  if (search) { params.push(`%${search}%`); conds.push(`i.name ILIKE $${params.length}`); }
 
   const { rows } = await query(
-    `SELECT i.id, i.code, i.name, i.unit, i.is_liquor, i.bottle_size_ml,
-            i.photo_url, i.section_id, i.category_id, i.rate,
+    `SELECT i.id, i.name, i.unit, i.is_liquor, i.bottle_size_ml,
+            i.photo_url, i.photo_version, i.section_id, i.category_id, i.rate,
             COALESCE(agg.entry_count, 0)::int AS entry_count,
             agg.total_qty,
             agg.total_bottles,
@@ -146,7 +180,7 @@ router.get('/:id/uncounted', async (req, res) => {
   if (!audit) return res.status(404).json({ error: 'Not found' });
   if (!allowed) return res.status(403).json({ error: 'Forbidden' });
   const { rows } = await query(
-    `SELECT i.id, i.code, i.name, i.unit, i.section_id
+    `SELECT i.id, i.name, i.unit, i.section_id
        FROM items i
       WHERE i.is_active = TRUE
         AND NOT EXISTS (SELECT 1 FROM count_entries ce WHERE ce.item_id=i.id AND ce.audit_id=$1 AND ce.status='active')

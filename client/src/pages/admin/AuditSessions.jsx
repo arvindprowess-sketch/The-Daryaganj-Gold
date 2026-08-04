@@ -53,13 +53,19 @@ export default function AuditSessions() {
                 <td className="px-4 py-2">{new Date(a.audit_date).toLocaleDateString()}</td>
                 <td className="px-4 py-2">{a.cutoff_time || '—'}</td>
                 <td className="px-4 py-2">
-                  <span className={`chip ${a.status === 'open' ? 'bg-green-100 text-green-700 border-green-200' : 'bg-slate-100 text-slate-500 border-slate-200'}`}>{a.status}</span>
+                  <span className={`chip ${
+                    a.status === 'open' ? 'bg-green-100 text-green-700 border-green-200'
+                    : a.status === 'submitted' ? 'bg-blue-100 text-blue-700 border-blue-200'
+                    : 'bg-slate-100 text-slate-500 border-slate-200'}`}>{a.status}</span>
+                  {a.status === 'open' && (
+                    <div className="text-[11px] text-amber-600 mt-0.5">variance provisional</div>
+                  )}
                 </td>
                 <td className="px-4 py-2">
                   <div className="flex flex-wrap gap-3">
                     <Link className="text-brand font-medium" to={`/admin/audits/${a.id}/count`}>Count entry</Link>
                     <Link className="text-brand font-medium" to={`/admin/audits/${a.id}/system-stock`}>System stock</Link>
-                    {a.status === 'open' && <button className="text-red-600 font-medium" onClick={() => close(a)}>Close</button>}
+                    {a.status !== 'closed' && <button className="text-red-600 font-medium" onClick={() => close(a)}>Close</button>}
                   </div>
                 </td>
               </tr>

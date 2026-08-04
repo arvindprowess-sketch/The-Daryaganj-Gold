@@ -1,6 +1,6 @@
-import { useEffect, useState, useCallback, useMemo } from 'react';
+import { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { useParams } from 'react-router-dom';
-import { api } from '../../lib/api.js';
+import { api, bustCache } from '../../lib/api.js';
 import MobileHeader from '../../components/MobileHeader.jsx';
 import { Spinner, PhotoThumb } from '../../components/ui.jsx';
 import ItemEntry from '../../components/ItemEntry.jsx';
@@ -15,9 +15,10 @@ export default function ItemList() {
   const [status, setStatus] = useState('all');
   const [search, setSearch] = useState('');
   const [active, setActive] = useState(null); // item open in the entry sheet
+  const scrollRef = useRef(0);                // remembered scroll position
 
   const load = useCallback(() => {
-    api.get(`/audits/${auditId}/items?section_id=${sectionId}`).then(setItems);
+    return api.get(`/audits/${auditId}/items?section_id=${sectionId}`).then(setItems);
   }, [auditId, sectionId]);
 
   useEffect(() => { load(); }, [load]);
@@ -25,6 +26,17 @@ export default function ItemList() {
     api.get('/meta/categories').then(setCategories);
     api.get('/meta/sections').then((s) => setSection(s.find((x) => String(x.id) === String(sectionId))));
   }, [sectionId]);
+
+  // Opening the sheet remembers where the user was; closing restores it so the
+  // list does not jump back to the top after saving an entry (#6).
+  function openItem(item) {
+    scrollRef.current = window.scrollY;
+    setActive(item);
+  }
+  function closeSheet() {
+    setActive(null);
+    requestAnimationFrame(() => window.scrollTo(0, scrollRef.current));
+  }
 
   const sectionCats = useMemo(
     () => categories.filter((c) => String(c.section_id) === String(sectionId)),
@@ -37,7 +49,7 @@ export default function ItemList() {
       if (cat && String(i.category_id) !== String(cat)) return false;
       if (status === 'counted' && !i.counted) return false;
       if (status === 'notcounted' && i.counted) return false;
-      if (search && !(`${i.name} ${i.code}`.toLowerCase().includes(search.toLowerCase()))) return false;
+      if (search && !i.name.toLowerCase().includes(search.toLowerCase())) return false;
       return true;
     });
   }, [items, cat, status, search]);
@@ -51,7 +63,7 @@ export default function ItemList() {
                     back={`/a/audit/${auditId}`} />
 
       <div className="sticky top-[56px] z-10 bg-slate-100/95 backdrop-blur px-3 pt-3 pb-2 space-y-2">
-        <input className="field py-2.5" placeholder="Search item or code…"
+        <input className="field py-2.5" placeholder="Search item…"
                value={search} onChange={(e) => setSearch(e.target.value)} />
         {/* Category chips */}
         {sectionCats.length > 0 && (
@@ -74,12 +86,12 @@ export default function ItemList() {
 
       <div className="px-3 divide-y">
         {filtered.map((i) => (
-          <button key={i.id} onClick={() => setActive(i)}
+          <button key={i.id} onClick={() => openItem(i)}
                   className="w-full flex items-center gap-3 py-3 text-left active:bg-slate-50">
-            <PhotoThumb src={i.photo_url} size={64} />
+            <PhotoThumb src={bustCache(i.photo_url, i.photo_version)} size={64} />
             <div className="flex-1 min-w-0">
               <div className="font-bold truncate">{i.name}</div>
-              <div className="text-sm text-slate-500">{i.unit}{i.is_liquor ? ' · liquor' : ''}</div>
+              <div className="text-sm text-slate-500">{i.is_liquor ? 'Bottle · liquor' : i.unit}</div>
               {i.not_applicable && <div className="text-xs text-amber-600">Not applicable</div>}
             </div>
             <div className="text-right">
@@ -103,7 +115,7 @@ export default function ItemList() {
 
       {active && (
         <ItemEntry auditId={auditId} item={active}
-                   onClose={() => setActive(null)}
+                   onClose={closeSheet}
                    onSaved={load} />
       )}
     </div>

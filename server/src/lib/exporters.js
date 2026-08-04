@@ -16,7 +16,7 @@ export function buildWorkbook(sheets) {
 // blocks: [{ title, columns:[...], rows:[[...]], note? }]
 // Fixed-column table layout using absolute cell positioning. Kept deliberately
 // simple (no underline / manual strokes) so coordinates never go NaN.
-export function buildPdf({ title, subtitle, blocks }) {
+export function buildPdf({ title, subtitle, blocks, banner }) {
   return new Promise((resolve, reject) => {
     const doc = new PDFDocument({ size: 'A4', margin: 36 });
     const chunks = [];
@@ -31,6 +31,12 @@ export function buildPdf({ title, subtitle, blocks }) {
     doc.fontSize(16).font('Helvetica-Bold').text('Audix Solutions & Co.');
     doc.fontSize(13).font('Helvetica').text(title);
     if (subtitle) doc.fontSize(9).fillColor('#555').text(subtitle).fillColor('#000');
+    // PROVISIONAL stamp — a variance export from an open audit must carry it.
+    if (banner) {
+      doc.moveDown(0.4);
+      doc.fontSize(10).font('Helvetica-Bold').fillColor('#b45309').text(banner);
+      doc.fillColor('#000').font('Helvetica');
+    }
     doc.moveDown(0.5);
 
     for (const block of blocks) {

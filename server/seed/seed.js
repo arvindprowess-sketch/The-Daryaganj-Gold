@@ -5,7 +5,7 @@ import { hashPassword } from '../src/lib/auth.js';
 async function seed() {
   await withTransaction(async (c) => {
     // Reset (order matters for FKs)
-    await c.query(`TRUNCATE audit_na, system_stock, count_entries, audits,
+    await c.query(`TRUNCATE photo_reviews, audit_na, system_stock, count_entries, audits,
       items, categories, sections, user_stores, users, stores RESTART IDENTITY CASCADE`);
 
     // ── Sections (4) ──────────────────────────────────────────────────────
@@ -72,62 +72,64 @@ async function seed() {
     }
 
     // ── Items (30: 22 regular + 8 liquor) ─────────────────────────────────
+    // Item NAME is the identifier — there are no item codes.
     const items = [
-      // code, name, category, unit, rate
-      ['DRY-001', 'Refined Oil', 'Dry Store', 'Ltr', 140],
-      ['DRY-002', 'Basmati Rice', 'Dry Store', 'Kg', 95],
-      ['DRY-003', 'Wheat Flour (Atta)', 'Dry Store', 'Kg', 42],
-      ['DRY-004', 'Sugar', 'Dry Store', 'Kg', 45],
-      ['DRY-005', 'Salt', 'Dry Store', 'Kg', 20],
-      ['DRY-006', 'Toor Dal', 'Dry Store', 'Kg', 130],
-      ['FRZ-001', 'Chicken Breast (Frozen)', 'Frozen & Chilled', 'Kg', 260],
-      ['FRZ-002', 'French Fries (Frozen)', 'Frozen & Chilled', 'Kg', 120],
-      ['FRZ-003', 'Prawns (Frozen)', 'Frozen & Chilled', 'Kg', 520],
-      ['VEG-001', 'Tomato', 'Vegetables & Dairy', 'Kg', 40],
-      ['VEG-002', 'Onion', 'Vegetables & Dairy', 'Kg', 35],
-      ['VEG-003', 'Paneer', 'Vegetables & Dairy', 'Kg', 320],
-      ['VEG-004', 'Butter', 'Vegetables & Dairy', 'Kg', 480],
-      ['SAU-001', 'Soy Sauce', 'Sauces & Condiments', 'Ltr', 180],
-      ['SAU-002', 'Tomato Ketchup', 'Sauces & Condiments', 'Kg', 110],
-      ['SAU-003', 'Mayonnaise', 'Sauces & Condiments', 'Kg', 150],
-      ['CRK-001', 'Dinner Plate', 'Crockery & Cutlery', 'Nos', 220],
-      ['CRK-002', 'Water Glass', 'Crockery & Cutlery', 'Nos', 60],
-      ['CRK-003', 'Fork', 'Crockery & Cutlery', 'Nos', 45],
-      ['CRK-004', 'Wine Glass', 'Crockery & Cutlery', 'Nos', 130],
-      ['PKG-001', 'Takeaway Box (Large)', 'Packaging & Consumables', 'Nos', 8],
-      ['PKG-002', 'Paper Napkin (Pack)', 'Packaging & Consumables', 'Pack', 35],
+      // name, category, unit, rate
+      ['Refined Oil', 'Dry Store', 'Ltr', 140],
+      ['Basmati Rice', 'Dry Store', 'Kg', 95],
+      ['Wheat Flour (Atta)', 'Dry Store', 'Kg', 42],
+      ['Sugar', 'Dry Store', 'Kg', 45],
+      ['Salt', 'Dry Store', 'Kg', 20],
+      ['Toor Dal', 'Dry Store', 'Kg', 130],
+      ['Chicken Breast (Frozen)', 'Frozen & Chilled', 'Kg', 260],
+      ['French Fries (Frozen)', 'Frozen & Chilled', 'Kg', 120],
+      ['Prawns (Frozen)', 'Frozen & Chilled', 'Kg', 520],
+      ['Tomato', 'Vegetables & Dairy', 'Kg', 40],
+      ['Onion', 'Vegetables & Dairy', 'Kg', 35],
+      ['Paneer', 'Vegetables & Dairy', 'Kg', 320],
+      ['Butter', 'Vegetables & Dairy', 'Kg', 480],
+      ['Soy Sauce', 'Sauces & Condiments', 'Ltr', 180],
+      ['Tomato Ketchup', 'Sauces & Condiments', 'Kg', 110],
+      ['Mayonnaise', 'Sauces & Condiments', 'Kg', 150],
+      ['Dinner Plate', 'Crockery & Cutlery', 'Nos', 220],
+      ['Water Glass', 'Crockery & Cutlery', 'Nos', 60],
+      ['Fork', 'Crockery & Cutlery', 'Nos', 45],
+      ['Wine Glass', 'Crockery & Cutlery', 'Nos', 130],
+      ['Takeaway Box (Large)', 'Packaging & Consumables', 'Nos', 8],
+      ['Paper Napkin (Pack)', 'Packaging & Consumables', 'Pack', 35],
     ];
     // 8 liquor
     const liquor = [
-      // code, name, category, bottle_size_ml, rate
-      ['LIQ-001', 'Old Monk Rum', 'Spirits', 750, 750],
-      ['LIQ-002', 'Blenders Pride Whisky', 'Spirits', 750, 1050],
-      ['LIQ-003', 'Smirnoff Vodka', 'Spirits', 750, 980],
-      ['LIQ-004', 'Bacardi White Rum', 'Spirits', 750, 1150],
-      ['LIQ-005', 'Beefeater Gin', 'Spirits', 750, 2400],
-      ['LIQ-006', 'Jameson Whiskey', 'Spirits', 1000, 3200],
-      ['LIQ-007', 'Kingfisher Premium Beer', 'Beer & Wine', 650, 160],
-      ['LIQ-008', 'Sula Sauvignon Blanc', 'Beer & Wine', 750, 950],
+      // name, category, bottle_size_ml, rate
+      ['Old Monk Rum', 'Spirits', 750, 750],
+      ['Blenders Pride Whisky', 'Spirits', 750, 1050],
+      ['Smirnoff Vodka', 'Spirits', 750, 980],
+      ['Bacardi White Rum', 'Spirits', 750, 1150],
+      ['Beefeater Gin', 'Spirits', 750, 2400],
+      ['Jameson Whiskey', 'Spirits', 1000, 3200],
+      ['Kingfisher Premium Beer', 'Beer & Wine', 650, 160],
+      ['Sula Sauvignon Blanc', 'Beer & Wine', 750, 950],
     ];
 
+    // Keyed by item name — names are the identifier now.
     const itemIds = {};
-    for (const [code, name, cat, unit, rate] of items) {
+    for (const [name, cat, unit, rate] of items) {
       const catId = cats[cat];
       const secId = (await c.query('SELECT section_id FROM categories WHERE id=$1', [catId])).rows[0].section_id;
       const { rows } = await c.query(
-        `INSERT INTO items (code, name, category_id, section_id, unit, is_liquor, rate)
-         VALUES ($1,$2,$3,$4,$5,FALSE,$6) RETURNING id`,
-        [code, name, catId, secId, unit, rate]);
-      itemIds[code] = rows[0].id;
+        `INSERT INTO items (name, category_id, section_id, unit, is_liquor, rate)
+         VALUES ($1,$2,$3,$4,FALSE,$5) RETURNING id`,
+        [name, catId, secId, unit, rate]);
+      itemIds[name] = rows[0].id;
     }
-    for (const [code, name, cat, ml, rate] of liquor) {
+    for (const [name, cat, ml, rate] of liquor) {
       const catId = cats[cat];
       const secId = (await c.query('SELECT section_id FROM categories WHERE id=$1', [catId])).rows[0].section_id;
       const { rows } = await c.query(
-        `INSERT INTO items (code, name, category_id, section_id, unit, is_liquor, bottle_size_ml, rate)
-         VALUES ($1,$2,$3,$4,'Bottle',TRUE,$5,$6) RETURNING id`,
-        [code, name, catId, secId, ml, rate]);
-      itemIds[code] = rows[0].id;
+        `INSERT INTO items (name, category_id, section_id, unit, is_liquor, bottle_size_ml, rate)
+         VALUES ($1,$2,$3,'Bottle',TRUE,$4,$5) RETURNING id`,
+        [name, catId, secId, ml, rate]);
+      itemIds[name] = rows[0].id;
     }
 
     // ── One open audit for Aerocity ───────────────────────────────────────
@@ -142,43 +144,51 @@ async function seed() {
 
     // Sample entries — including an item counted at TWO locations (append-only)
     // and one VOIDED entry, so the behaviour is visible immediately.
-    const mkEntry = (itemCode, fields) => c.query(
+    const mkEntry = (itemName, fields) => c.query(
       `INSERT INTO count_entries (audit_id, item_id, qty, bottles, open_ml, location_text, remarks, counted_by, status, void_reason, voided_by, voided_at)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id`,
-      [auditId, itemIds[itemCode], fields.qty ?? null, fields.bottles ?? null, fields.open_ml ?? null,
+      [auditId, itemIds[itemName], fields.qty ?? null, fields.bottles ?? null, fields.open_ml ?? null,
        fields.location ?? null, fields.remarks ?? null, fields.by ?? rakesh,
        fields.status ?? 'active', fields.void_reason ?? null,
        fields.voided_by ?? null, fields.voided_at ?? null]);
 
     // Refined Oil — TWO entries, different locations (append-only demo)
-    await mkEntry('DRY-001', { qty: 1.0, location: 'Dry Store', by: rakesh });
-    await mkEntry('DRY-001', { qty: 2.0, location: 'Basement rack', by: rakesh });
+    await mkEntry('Refined Oil', { qty: 1.0, location: 'Dry Store', by: rakesh });
+    await mkEntry('Refined Oil', { qty: 2.0, location: 'Basement rack', by: rakesh });
 
     // A voided entry (wrong count) — kept, struck through, excluded from totals
-    await mkEntry('DRY-002', { qty: 99, location: 'Dry Store', by: rakesh,
+    await mkEntry('Basmati Rice', { qty: 99, location: 'Dry Store', by: rakesh,
       status: 'void', void_reason: 'Miscounted sacks — re-counted below',
       voided_by: rakesh, voided_at: new Date().toISOString() });
-    await mkEntry('DRY-002', { qty: 40, location: 'Dry Store', by: rakesh });
+    await mkEntry('Basmati Rice', { qty: 40, location: 'Dry Store', by: rakesh });
 
     // A few more regular counts
-    await mkEntry('DRY-004', { qty: 25, location: 'Dry Store', by: sunil });
-    await mkEntry('VEG-003', { qty: 8.5, location: 'Cold room', by: sunil });
-    await mkEntry('CRK-001', { qty: 120, location: 'Wash area', by: sunil });
+    await mkEntry('Sugar', { qty: 25, location: 'Dry Store', by: sunil });
+    await mkEntry('Paneer', { qty: 8.5, location: 'Cold room', by: sunil });
+    await mkEntry('Dinner Plate', { qty: 120, location: 'Wash area', by: sunil });
     // Zero-quantity explicit count (counted, found zero)
-    await mkEntry('FRZ-003', { qty: 0, location: 'Freezer 2', remarks: 'Out of stock', by: rakesh });
+    await mkEntry('Prawns (Frozen)', { qty: 0, location: 'Freezer 2', remarks: 'Out of stock', by: rakesh });
 
     // Liquor entries — bottles and open ml kept separate
-    await mkEntry('LIQ-001', { bottles: 3, open_ml: 400, location: 'Bar shelf', by: rakesh });
-    await mkEntry('LIQ-002', { bottles: 5, open_ml: 0, location: 'Bar store', by: rakesh });
-    await mkEntry('LIQ-007', { bottles: 24, open_ml: 0, location: 'Beer chiller', by: sunil });
+    await mkEntry('Old Monk Rum', { bottles: 3, open_ml: 400, location: 'Bar shelf', by: rakesh });
+    await mkEntry('Blenders Pride Whisky', { bottles: 5, open_ml: 0, location: 'Bar store', by: rakesh });
+    await mkEntry('Kingfisher Premium Beer', { bottles: 24, open_ml: 0, location: 'Beer chiller', by: sunil });
 
-    // System stock for a handful of items (for variance demo)
-    const sysStock = [['DRY-001', 3], ['DRY-002', 42], ['DRY-004', 25], ['FRZ-003', 2],
-      ['LIQ-001', 3], ['LIQ-002', 6], ['LIQ-007', 24], ['VEG-003', 9]];
-    for (const [code, qty] of sysStock) {
+    // System stock for a handful of items (for variance demo). Liquor keeps
+    // bottles and open ml separate, exactly as the physical count does.
+    const sysNonLiquor = [['Refined Oil', 3], ['Basmati Rice', 42], ['Sugar', 25],
+      ['Prawns (Frozen)', 2], ['Paneer', 9]];
+    for (const [name, qty] of sysNonLiquor) {
       await c.query(
         'INSERT INTO system_stock (audit_id, item_id, qty, created_by) VALUES ($1,$2,$3,$4)',
-        [auditId, itemIds[code], qty, userIds['admin']]);
+        [auditId, itemIds[name], qty, userIds['admin']]);
+    }
+    const sysLiquor = [['Old Monk Rum', 3, 500], ['Blenders Pride Whisky', 6, 0],
+      ['Kingfisher Premium Beer', 24, 0]];
+    for (const [name, bottles, openMl] of sysLiquor) {
+      await c.query(
+        'INSERT INTO system_stock (audit_id, item_id, bottles, open_ml, created_by) VALUES ($1,$2,$3,$4,$5)',
+        [auditId, itemIds[name], bottles, openMl, userIds['admin']]);
     }
   });
 
