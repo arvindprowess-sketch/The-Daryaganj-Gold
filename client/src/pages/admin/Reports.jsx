@@ -20,26 +20,41 @@ export default function Reports() {
   const [loadedReport, setLoadedReport] = useState(null);
   const [loading, setLoading] = useState(false);
   const [vFilter, setVFilter] = useState('all'); // variance: all | counted
+  const [vCategory, setVCategory] = useState('');   // variance: category filter
+  const [vGroup, setVGroup] = useState(false);      // variance: group by category
+  const [categories, setCategories] = useState([]);
   const [consolidateIds, setConsolidateIds] = useState([]);
   const [consolidated, setConsolidated] = useState(null);
 
   useEffect(() => {
     api.get('/audits').then((a) => { setAudits(a); if (a[0]) setAuditId(String(a[0].id)); });
+    api.get('/meta/categories').then(setCategories);
   }, []);
+
+  // Variance-only query params (filter / category / grouping) shared by the
+  // on-screen view and the Excel + PDF exports so they always agree.
+  const varianceParams = report === 'variance'
+    ? [
+        vFilter === 'counted' ? 'filter=counted' : '',
+        vCategory ? `category_id=${vCategory}` : '',
+        vGroup ? 'group_by=category' : '',
+      ].filter(Boolean)
+    : [];
 
   useEffect(() => {
     if (!auditId) return;
     setLoading(true); setData(null); setLoadedReport(null);
     const forReport = report;
-    const qs = report === 'variance' && vFilter === 'counted' ? '?filter=counted' : '';
+    const qs = varianceParams.length ? `?${varianceParams.join('&')}` : '';
     api.get(`/reports/${report}/${auditId}${qs}`)
       .then((d) => { setData(d); setLoadedReport(forReport); })
       .catch((e) => { setData({ error: e.message }); setLoadedReport(forReport); })
       .finally(() => setLoading(false));
-  }, [report, auditId, vFilter]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [report, auditId, vFilter, vCategory, vGroup]);
 
   const store = audits.find((a) => String(a.id) === String(auditId));
-  const filterQs = report === 'variance' && vFilter === 'counted' ? '&filter=counted' : '';
+  const filterQs = varianceParams.length ? `&${varianceParams.join('&')}` : '';
   const base = `${report}/${auditId}`;
   const provisional = report === 'variance' && data?.provisional;
   const fname = `${provisional ? 'PROVISIONAL_' : ''}${report}_${(store?.store_name || auditId).replace(/\W+/g, '_')}`;
@@ -77,9 +92,18 @@ export default function Reports() {
       )}
 
       {report === 'variance' && (
-        <div className="flex gap-2 mb-4">
+        <div className="flex flex-wrap items-center gap-2 mb-4">
           <button className={vFilter === 'all' ? 'chip-on' : 'chip-off'} onClick={() => setVFilter('all')}>All items</button>
           <button className={vFilter === 'counted' ? 'chip-on' : 'chip-off'} onClick={() => setVFilter('counted')}>Counted only</button>
+          <select className="field py-2 max-w-[220px]" value={vCategory} onChange={(e) => setVCategory(e.target.value)}>
+            <option value="">All categories</option>
+            {categories.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+          </select>
+          <label className="flex items-center gap-2 text-sm text-slate-600 select-none">
+            <input type="checkbox" className="h-5 w-5 accent-teal-700"
+                   checked={vGroup} onChange={(e) => setVGroup(e.target.checked)} />
+            Group by category
+          </label>
         </div>
       )}
 
@@ -94,7 +118,7 @@ export default function Reports() {
       <div className="card p-4 overflow-x-auto">
         {loading || (data && loadedReport !== report)
           ? <Spinner />
-          : data ? <ReportView report={loadedReport} data={data} /> : <p className="text-slate-400">Select a report.</p>}
+          : data ? <ReportView report={loadedReport} data={data} grouped={vGroup} /> : <p className="text-slate-400">Select a report.</p>}
       </div>
 
       {/* R5 Consolidated */}
@@ -149,7 +173,7 @@ function Table({ cols, rows }) {
   );
 }
 
-function ReportView({ report, data }) {
+function ReportView({ report, data, grouped }) {
   if (data.error) return <p className="text-red-600">{data.error}</p>;
 
   if (report === 'physical-summary') {
@@ -188,27 +212,49 @@ function ReportView({ report, data }) {
     );
   }
 
+  // R4 — section and category included, exactly as they appear in the item
+  // master. Optionally grouped category-wise for review.
   if (report === 'variance') {
-    return (
-      <Table cols={['Item', 'Unit', 'Physical', 'System', 'Variance', '%', 'Counted', 'Status']}
-             rows={data.rows.map((r) => [r.name, r.unit, r.physical_qty, r.system_qty ?? '—',
-               r.variance ?? '—', r.variance_pct ?? '—', r.counted ? 'Yes' : 'No', r.status])} />
-    );
+    const cols = ['Item', 'Section', 'Category', 'Unit', 'Physical', 'System', 'Variance', '%', 'Counted', 'Status'];
+    const toRow = (r) => [r.name, r.section, r.category, r.unit, r.physical_qty,
+                          r.system_qty ?? '—', r.variance ?? '—', r.variance_pct ?? '—',
+                          r.counted ? 'Yes' : 'No', r.status];
+    if (grouped) {
+      const m = new Map();
+      for (const r of data.rows) {
+        const k = r.category || '—';
+        if (!m.has(k)) m.set(k, []);
+        m.get(k).push(r);
+      }
+      const groups = [...m].sort((a, b) => a[0].localeCompare(b[0]));
+      return (
+        <div className="space-y-5">
+          {groups.map(([cat, list]) => (
+            <div key={cat}>
+              <h3 className="font-bold mb-1">{cat} <span className="font-normal text-slate-400">({list.length})</span></h3>
+              <Table cols={cols} rows={list.map(toRow)} />
+            </div>
+          ))}
+          {groups.length === 0 && <p className="text-slate-400">No data.</p>}
+        </div>
+      );
+    }
+    return <Table cols={cols} rows={data.rows.map(toRow)} />;
   }
 
   if (report === 'exceptions') {
     return (
       <div className="space-y-5 text-sm">
-        <Section title="Voided entries" cols={['Item', 'Reason', 'Counted by', 'Voided by']}
-                 rows={data.voided.map((v) => [v.name, v.void_reason, v.counted_by_name, v.voided_by_name])} />
-        <Section title="Not applicable" cols={['Item', 'Reason', 'Marked by']}
-                 rows={data.notApplicable.map((v) => [v.name, v.reason, v.marked_by_name])} />
-        <Section title="Multiple entries" cols={['Item', 'Entries', 'Physical qty']}
-                 rows={data.multiEntry.map((v) => [v.name, v.entries, v.physical_qty])} />
-        <Section title="Zero quantity" cols={['Item', 'Zero entries']}
-                 rows={data.zeroQty.map((v) => [v.name, v.zero_entries])} />
-        <Section title="Counted without photo" cols={['Item', 'Entries']}
-                 rows={data.noPhoto.map((v) => [v.name, v.entries])} />
+        <Section title="Voided entries" cols={['Item', 'Section', 'Category', 'Reason', 'Counted by', 'Voided by']}
+                 rows={data.voided.map((v) => [v.name, v.section, v.category, v.void_reason, v.counted_by_name, v.voided_by_name])} />
+        <Section title="Not applicable" cols={['Item', 'Section', 'Category', 'Reason', 'Marked by']}
+                 rows={data.notApplicable.map((v) => [v.name, v.section, v.category, v.reason, v.marked_by_name])} />
+        <Section title="Multiple entries" cols={['Item', 'Section', 'Category', 'Entries', 'Physical qty']}
+                 rows={data.multiEntry.map((v) => [v.name, v.section, v.category, v.entries, v.physical_qty])} />
+        <Section title="Zero quantity" cols={['Item', 'Section', 'Category', 'Zero entries']}
+                 rows={data.zeroQty.map((v) => [v.name, v.section, v.category, v.zero_entries])} />
+        <Section title="Counted without photo" cols={['Item', 'Section', 'Category', 'Entries']}
+                 rows={data.noPhoto.map((v) => [v.name, v.section, v.category, v.entries])} />
       </div>
     );
   }

@@ -142,7 +142,7 @@ function ItemEditor({ item, sections, categories, onClose, onSaved }) {
       <div className="space-y-3">
         <div className="flex justify-center"><PhotoThumb src={bustCache(f.photo_url, f.photo_version)} size={100} /></div>
         {/* Photo control is upload-only on desktop admin. */}
-        <PhotoInput value={f.photo_url} uploadOnly
+        <PhotoInput value={f.photo_url} uploadOnly itemName={f.name}
                     onUploaded={(url) => set({ photo_url: url, photo_version: Date.now() })} />
         <label className="block"><span className="text-sm text-slate-600">Name (this is the item's identifier)</span>
           <input className="field mt-1" value={f.name} onChange={(e) => set({ name: e.target.value })} /></label>

@@ -163,13 +163,14 @@ export async function liquorReport(auditId) {
 // ── R4 Variance ─────────────────────────────────────────────────────────────
 // Physical − System. While the audit is open this is PROVISIONAL: uncounted
 // items would otherwise read as 100% shortages.
-export async function varianceReport(auditId, { countedOnly = false } = {}) {
+export async function varianceReport(auditId, { countedOnly = false, categoryId = null } = {}) {
   const items = await auditItemAggregates(auditId);
   const tol = await getTolerances();
   const audit = await getAudit(auditId);
   const provisional = !audit || audit.status === 'open';
 
-  const source = countedOnly ? items.filter((i) => i.counted) : items;
+  let source = countedOnly ? items.filter((i) => i.counted) : items;
+  if (categoryId) source = source.filter((i) => String(i.category_id) === String(categoryId));
 
   const rows = source.map((i) => {
     // Liquor compares sealed bottles; open ml is reported separately and never
@@ -182,7 +183,8 @@ export async function varianceReport(auditId, { countedOnly = false } = {}) {
     const pct = system && system !== 0 ? (variance / system) * 100 : (variance ? 100 : 0);
     return {
       name: i.name, unit: i.is_liquor ? 'Bottle' : i.unit, is_liquor: i.is_liquor,
-      section: i.section_name, category: i.category_name,
+      section: i.section_name || '—', category: i.category_name || '—',
+      category_id: i.category_id,
       physical_qty: physical,
       physical_open_ml: i.is_liquor ? Number(i.total_open_ml) : null,
       system_qty: system,
@@ -226,10 +228,15 @@ export async function consolidated(auditIds) {
 
 // R6 — exceptions
 export async function exceptionReport(auditId) {
+  // Section and category are joined in here too, so every exception line can be
+  // traced back to where the item lives (same join that R2/R4 carry).
   const voided = (await query(
-    `SELECT ce.id, i.name, ce.qty, ce.bottles, ce.open_ml, ce.location_text,
+    `SELECT ce.id, i.name, COALESCE(s.name,'—') AS section, COALESCE(c.name,'—') AS category,
+            ce.qty, ce.bottles, ce.open_ml, ce.location_text,
             ce.void_reason, u.name AS counted_by_name, vu.name AS voided_by_name, ce.voided_at
        FROM count_entries ce JOIN items i ON i.id=ce.item_id
+       LEFT JOIN sections s ON s.id = i.section_id
+       LEFT JOIN categories c ON c.id = i.category_id
        JOIN users u ON u.id=ce.counted_by
        LEFT JOIN users vu ON vu.id=ce.voided_by
       WHERE ce.audit_id=$1 AND ce.status='void' ORDER BY ce.voided_at`,
@@ -237,8 +244,12 @@ export async function exceptionReport(auditId) {
   )).rows;
 
   const notApplicable = (await query(
-    `SELECT i.name, na.reason, u.name AS marked_by_name, na.marked_at
-       FROM audit_na na JOIN items i ON i.id=na.item_id JOIN users u ON u.id=na.marked_by
+    `SELECT i.name, COALESCE(s.name,'—') AS section, COALESCE(c.name,'—') AS category,
+            na.reason, u.name AS marked_by_name, na.marked_at
+       FROM audit_na na JOIN items i ON i.id=na.item_id
+       LEFT JOIN sections s ON s.id = i.section_id
+       LEFT JOIN categories c ON c.id = i.category_id
+       JOIN users u ON u.id=na.marked_by
       WHERE na.audit_id=$1 ORDER BY i.name`,
     [auditId]
   )).rows;
@@ -248,9 +259,10 @@ export async function exceptionReport(auditId) {
   const zeroQty = [];
   const noPhoto = [];
   for (const it of agg) {
-    if (it.entry_count > 1) multiEntry.push({ name: it.name, entries: it.entry_count, physical_qty: it.physical_qty });
-    if (it.entry_count > 0 && it.active_zero > 0) zeroQty.push({ name: it.name, zero_entries: it.active_zero });
-    if (it.entry_count > 0 && it.with_photo === 0) noPhoto.push({ name: it.name, entries: it.entry_count });
+    const where = { section: it.section_name || '—', category: it.category_name || '—' };
+    if (it.entry_count > 1) multiEntry.push({ name: it.name, ...where, entries: it.entry_count, physical_qty: it.physical_qty });
+    if (it.entry_count > 0 && it.active_zero > 0) zeroQty.push({ name: it.name, ...where, zero_entries: it.active_zero });
+    if (it.entry_count > 0 && it.with_photo === 0) noPhoto.push({ name: it.name, ...where, entries: it.entry_count });
   }
   return { voided, notApplicable, multiEntry, zeroQty, noPhoto };
 }

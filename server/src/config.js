@@ -21,13 +21,17 @@ export const config = {
   uploadDir: process.env.UPLOAD_DIR || 'uploads',
   publicBaseUrl: process.env.PUBLIC_BASE_URL || 'http://localhost:4000',
   clientOrigin: process.env.CLIENT_ORIGIN || 'http://localhost:5173',
+  // S3-compatible object storage (Cloudflare R2, AWS S3, MinIO…). Swapping
+  // provider is an env-var change only — no code change.
+  // The documented names are S3_ACCESS_KEY / S3_SECRET_KEY / S3_PUBLIC_URL;
+  // the longer AWS-style names are still accepted for backward compatibility.
   s3: {
     endpoint: process.env.S3_ENDPOINT || '',
     region: process.env.S3_REGION || 'auto',
     bucket: process.env.S3_BUCKET || '',
-    accessKeyId: process.env.S3_ACCESS_KEY_ID || '',
-    secretAccessKey: process.env.S3_SECRET_ACCESS_KEY || '',
-    publicBaseUrl: process.env.S3_PUBLIC_BASE_URL || '',
+    accessKeyId: process.env.S3_ACCESS_KEY || process.env.S3_ACCESS_KEY_ID || '',
+    secretAccessKey: process.env.S3_SECRET_KEY || process.env.S3_SECRET_ACCESS_KEY || '',
+    publicBaseUrl: process.env.S3_PUBLIC_URL || process.env.S3_PUBLIC_BASE_URL || '',
     forcePathStyle: (process.env.S3_FORCE_PATH_STYLE || 'true') === 'true',
   },
 };

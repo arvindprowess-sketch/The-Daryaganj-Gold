@@ -199,12 +199,17 @@ a report given to the client.
 
 Admin only. Each exports to **Excel (.xlsx, SheetJS)** and **PDF (pdfkit)**.
 
+Every item-level report carries **Section** and **Category**, exactly as they
+appear in the item master.
+
 - **R1** Physical Stock Summary — section-wise and category-wise qty & value
-- **R2** Item Detail — per-entry breakdown with totals
+- **R2** Item Detail — one line per item with its total (totals only)
 - **R3** Liquor Report — sealed bottles and open ml kept **separate**
   (footnote: "Open bottle quantities are recorded by visual estimation.")
 - **R4** Variance Report — physical − system, with % and status bands read from
   the **settings** table (liquor 2%/4%, others 1%/3% defaults — not hardcoded).
+  Includes Section and Category, a **category filter** and a **group-by-category**
+  option; both apply to the on-screen view and to the Excel/PDF exports.
   While an audit is `open` the variance is **PROVISIONAL**: a banner reports how
   many items are still uncounted, an *Uncounted* column and an
   [All items | Counted only] filter are available, and any export is stamped
@@ -214,13 +219,82 @@ Admin only. Each exports to **Excel (.xlsx, SheetJS)** and **PDF (pdfkit)**.
 - **R6** Exception Report — voided entries, Not-Applicable items, items with
   multiple entries, zero-quantity entries, and items counted without a photo
 
+## Finding an item while counting
+
+Both counting screens — the auditor's mobile item list and the admin
+count-entry table — have a **search box** that filters by item name as you type
+(debounced, case-insensitive, matches any part of the name). Search works
+**together with** the category filter and the [All | Not counted | Counted]
+filter. On mobile the search box stays **sticky** at the top while the list
+scrolls.
+
 ---
 
-## Swapping storage to R2 / S3 in production
+## Photo storage (object storage, never the database)
 
-Set `STORAGE_DRIVER=s3` and the `S3_*` variables in `server/.env`. The storage
-interface (`server/src/lib/storage.js`) exposes a single `save()` method, so no
-route code changes are needed. The database stores only the returned URL.
+**Image files are never stored in the database — not as binary, not as base64.**
+Photos go to object storage and the database holds only the public **URL
+string**. Everything goes through one narrow interface
+(`server/src/lib/storage.js`, a single `save()` method), so the provider is
+swapped by **changing environment variables only** — no code change.
+
+### Drivers
+
+| `STORAGE_DRIVER` | Used for | Where files land |
+|---|---|---|
+| `local` (default) | development fallback | `server/<UPLOAD_DIR>/`, served at `/uploads` |
+| `s3` | production | Cloudflare R2, AWS S3, MinIO — any S3-compatible bucket |
+
+### Environment variables
+
+```bash
+STORAGE_DRIVER=s3            # local | s3
+
+# Required when STORAGE_DRIVER=s3
+S3_ENDPOINT=https://<accountid>.r2.cloudflarestorage.com
+S3_BUCKET=audix-photos
+S3_ACCESS_KEY=...
+S3_SECRET_KEY=...
+S3_PUBLIC_URL=https://photos.example.com   # public bucket or CDN domain
+S3_REGION=auto                             # R2 uses "auto"
+S3_FORCE_PATH_STYLE=true
+
+# Used by the local driver only
+UPLOAD_DIR=uploads
+PUBLIC_BASE_URL=http://localhost:4000
+```
+
+`S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` / `S3_PUBLIC_BASE_URL` are still
+accepted as aliases, so existing deployments keep working.
+
+### Filenames
+
+Objects are keyed `YYYY-MM-DD/<item-name-slug>-<hash>.jpg`, e.g.
+`2026-08-04/refined-oil-9f3a1c2b.jpg`. The slug makes stored files
+recognisable; the short random hash guarantees **two uploads never collide**,
+even for the same item on the same day.
+
+Images are compressed client-side to a max **1200px** long edge before upload
+(`client/src/lib/image.js`), and the server re-compresses with `sharp` as a
+safety net.
+
+### Migrating photos already held in the database
+
+If an earlier deployment embedded images in Postgres (a `data:image/...;base64`
+URI or a bare base64 blob in `photo_url`), move them out with:
+
+```bash
+cd server
+npm run migrate:photos -- --dry-run   # report only, writes nothing
+npm run migrate:photos                # perform the move
+```
+
+Set `STORAGE_DRIVER` (and the `S3_*` variables) **before** running it so files
+land where you want them. The script is **idempotent** — rows already holding a
+plain URL are skipped, so it is safe to re-run. It covers master photos
+(`items`), entry evidence photos (`count_entries`), and pending proposals
+(`photo_reviews`), and bumps `photo_version` so clients pick up the new URL
+instead of a cached image.
 
 ---
 

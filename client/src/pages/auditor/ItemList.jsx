@@ -4,6 +4,7 @@ import { api, bustCache } from '../../lib/api.js';
 import MobileHeader from '../../components/MobileHeader.jsx';
 import { Spinner, PhotoThumb } from '../../components/ui.jsx';
 import ItemEntry from '../../components/ItemEntry.jsx';
+import useDebounced, { normalizeName } from '../../lib/useDebounced.js';
 
 // M5 — Item list: category chips, search, sticky All/Not counted/Counted.
 export default function ItemList() {
@@ -14,6 +15,7 @@ export default function ItemList() {
   const [cat, setCat] = useState('');       // category filter
   const [status, setStatus] = useState('all');
   const [search, setSearch] = useState('');
+  const debouncedSearch = useDebounced(search, 250);
   const [active, setActive] = useState(null); // item open in the entry sheet
   const scrollRef = useRef(0);                // remembered scroll position
 
@@ -43,16 +45,18 @@ export default function ItemList() {
     [categories, sectionId]
   );
 
+  // Search, category chip and All/Counted/Not-counted all apply together.
   const filtered = useMemo(() => {
     if (!items) return [];
+    const q = normalizeName(debouncedSearch);
     return items.filter((i) => {
       if (cat && String(i.category_id) !== String(cat)) return false;
       if (status === 'counted' && !i.counted) return false;
       if (status === 'notcounted' && i.counted) return false;
-      if (search && !i.name.toLowerCase().includes(search.toLowerCase())) return false;
+      if (q && !normalizeName(i.name).includes(q)) return false;
       return true;
     });
-  }, [items, cat, status, search]);
+  }, [items, cat, status, debouncedSearch]);
 
   if (!items) return <Spinner label="Loading items…" />;
 

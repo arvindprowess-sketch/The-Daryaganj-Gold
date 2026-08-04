@@ -1,9 +1,10 @@
-import { Fragment, useEffect, useState, useCallback } from 'react';
+import { Fragment, useEffect, useState, useCallback, useMemo } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { api, bustCache } from '../../lib/api.js';
 import { Spinner, PhotoThumb } from '../../components/ui.jsx';
 import ItemEntry from '../../components/ItemEntry.jsx';
 import { useToast } from '../../components/Toast.jsx';
+import useDebounced, { normalizeName } from '../../lib/useDebounced.js';
 
 // D5 — Count entry on desktop: wide table for fast keyboard entry.
 //
@@ -20,6 +21,11 @@ export default function CountEntry() {
   const [rowState, setRowState] = useState({});
   const [active, setActive] = useState(null);
   const [savingId, setSavingId] = useState(null);
+  const [categories, setCategories] = useState([]);
+  const [search, setSearch] = useState('');
+  const [cat, setCat] = useState('');
+  const [status, setStatus] = useState('all');
+  const debouncedSearch = useDebounced(search, 250);
   const toast = useToast();
 
   const load = useCallback(async () => {
@@ -34,6 +40,20 @@ export default function CountEntry() {
   }, [auditId]);
 
   useEffect(() => { load(); api.get(`/audits/${auditId}`).then(setAudit); }, [load, auditId]);
+  useEffect(() => { api.get('/meta/categories').then(setCategories); }, []);
+
+  // Search + category + All/Counted/Not-counted all apply together.
+  const filtered = useMemo(() => {
+    if (!items) return [];
+    const q = normalizeName(debouncedSearch);
+    return items.filter((i) => {
+      if (cat && String(i.category_id) !== String(cat)) return false;
+      if (status === 'counted' && !i.counted) return false;
+      if (status === 'notcounted' && i.counted) return false;
+      if (q && !normalizeName(i.name).includes(q)) return false;
+      return true;
+    });
+  }, [items, cat, status, debouncedSearch]);
 
   function setRow(id, patch) { setRowState((p) => ({ ...p, [id]: { ...p[id], ...patch } })); }
 
@@ -87,6 +107,31 @@ export default function CountEntry() {
         </div>
       )}
 
+      {/* Search + filters. Sticky so they stay reachable while the list scrolls
+          (on mobile this sits below the admin top bar). */}
+      <div className="sticky top-0 md:top-0 z-20 -mx-4 md:mx-0 px-4 md:px-0 py-2
+                      bg-slate-100/95 md:bg-transparent backdrop-blur md:backdrop-blur-0 space-y-2 mb-3">
+        <input className="field py-2.5 md:max-w-sm" placeholder="Search item…"
+               value={search} onChange={(e) => setSearch(e.target.value)} />
+        <div className="flex gap-2 overflow-x-auto no-scrollbar">
+          <button className={cat === '' ? 'chip-on' : 'chip-off'} onClick={() => setCat('')}>All categories</button>
+          {categories.map((c) => (
+            <button key={c.id} className={String(cat) === String(c.id) ? 'chip-on' : 'chip-off'}
+                    onClick={() => setCat(String(c.id))}>{c.name}</button>
+          ))}
+        </div>
+        <div className="flex gap-2">
+          {[['all', 'All'], ['notcounted', 'Not counted'], ['counted', 'Counted']].map(([k, label]) => (
+            <button key={k} onClick={() => setStatus(k)}
+                    className={`flex-1 md:flex-none justify-center ${status === k ? 'chip-on' : 'chip-off'}`}>{label}</button>
+          ))}
+        </div>
+      </div>
+
+      <p className="text-sm text-slate-500 mb-2">
+        Showing {filtered.length} of {items.length} items.
+      </p>
+
       <div className="card overflow-x-auto">
         <table className="w-full text-sm">
           <thead className="bg-slate-50 text-left text-slate-500"><tr>
@@ -94,7 +139,7 @@ export default function CountEntry() {
             <th className="px-3 py-3">Total</th><th className="px-3 py-3 w-64">Add entry</th>
             <th className="px-3 py-3">Location</th><th className="px-3 py-3"></th></tr></thead>
           <tbody className="divide-y">
-            {items.map((i) => {
+            {filtered.map((i) => {
               const r = rowState[i.id] || {};
               const detail = entriesByItem[i.id];
               const isOpen = !!expanded[i.id];
@@ -197,6 +242,9 @@ export default function CountEntry() {
                 </Fragment>
               );
             })}
+            {filtered.length === 0 && (
+              <tr><td colSpan={6} className="p-8 text-center text-slate-400">No items match.</td></tr>
+            )}
           </tbody>
         </table>
       </div>

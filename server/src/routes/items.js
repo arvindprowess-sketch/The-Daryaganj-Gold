@@ -229,7 +229,9 @@ router.post('/photos/bulk', requireRole('admin'), photoUpload.array('photos', 20
       const buf = await sharp(f.buffer).rotate()
         .resize({ width: 1200, height: 1200, fit: 'inside', withoutEnlargement: true })
         .jpeg({ quality: 78 }).toBuffer();
-      const { url } = await storage.save(buf, { ext: '.jpg', contentType: 'image/jpeg' });
+      const { url } = await storage.save(buf, {
+        ext: '.jpg', contentType: 'image/jpeg', name: rows[0].name,
+      });
       await query('UPDATE items SET photo_url = $2, photo_version = photo_version + 1 WHERE id = $1',
         [rows[0].id, url]);
       matched.push({ name: rows[0].name, url });

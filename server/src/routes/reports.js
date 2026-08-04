@@ -117,29 +117,56 @@ router.get('/variance/:auditId', async (req, res) => {
   const audit = await getAudit(req.params.auditId);
   if (!audit) return res.status(404).json({ error: 'Not found' });
   const countedOnly = req.query.filter === 'counted';
-  const { rows, provisional, progress } = await varianceReport(req.params.auditId, { countedOnly });
+  const categoryId = req.query.category_id || null;
+  const groupBy = req.query.group_by === 'category' ? 'category' : null;
+  const { rows, provisional, progress } = await varianceReport(req.params.auditId, { countedOnly, categoryId });
   const format = req.query.format;
   const fname = `${provisional ? 'PROVISIONAL_' : ''}R4_variance_${slug(audit.store_name)}`;
   const stamp = provisional
     ? `PROVISIONAL — count in progress. ${progress.uncounted} of ${progress.total} items not yet counted.`
     : null;
-  const cols = ['Item', 'Unit', 'Physical', 'System', 'Variance', 'Variance %', 'Counted', 'Status'];
-  const toRow = (d) => [d.name, d.unit, d.physical_qty, n(d.system_qty), n(d.variance),
-                        n(d.variance_pct), d.counted ? 'Yes' : 'No', d.status];
+  // Section and category are part of the report, exactly as in the item master.
+  const cols = ['Item', 'Section', 'Category', 'Unit', 'Physical', 'System', 'Variance', 'Variance %', 'Counted', 'Status'];
+  const toRow = (d) => [d.name, d.section, d.category, d.unit, d.physical_qty, n(d.system_qty),
+                        n(d.variance), n(d.variance_pct), d.counted ? 'Yes' : 'No', d.status];
+
+  // Group the export category-wise when asked, so variance can be reviewed by
+  // category without re-sorting the file by hand.
+  let groups = null;
+  if (groupBy) {
+    const m = new Map();
+    for (const r of rows) {
+      const k = r.category || '—';
+      if (!m.has(k)) m.set(k, []);
+      m.get(k).push(r);
+    }
+    groups = [...m].sort((a, b) => a[0].localeCompare(b[0]));
+  }
+
   if (format === 'xlsx') {
     const header = [];
     if (stamp) header.push(['PROVISIONAL'], [stamp], []);
-    return sendXlsx(res, fname, [{
-      name: 'Variance', aoa: [...header, cols, ...rows.map(toRow)],
-    }]);
+    const aoa = [...header, cols];
+    if (groups) {
+      for (const [cat, list] of groups) {
+        aoa.push([], [`Category: ${cat}`], ...list.map(toRow));
+      }
+    } else {
+      aoa.push(...rows.map(toRow));
+    }
+    return sendXlsx(res, fname, [{ name: 'Variance', aoa }]);
   }
   if (format === 'pdf') {
+    const widths = [120, 70, 70, 40, 50, 50, 50, 50, 40, 55];
     return sendPdf(res, fname, {
       title: `R4 — Variance Report${provisional ? ' (PROVISIONAL)' : ''}`,
       subtitle: `${audit.store_name} — ${audit.audit_date}`,
       banner: stamp,
-      blocks: [{ title: 'Variance (Physical − System)', columns: cols,
-        widths: [150, 45, 55, 55, 55, 55, 45, 63], rows: rows.map(toRow) }],
+      blocks: groups
+        ? groups.map(([cat, list]) => ({
+            title: `Category: ${cat}`, columns: cols, widths, rows: list.map(toRow),
+          }))
+        : [{ title: 'Variance (Physical − System)', columns: cols, widths, rows: rows.map(toRow) }],
     });
   }
   res.json({ audit, rows, provisional, progress });
@@ -181,34 +208,35 @@ router.get('/exceptions/:auditId', async (req, res) => {
   const data = await exceptionReport(req.params.auditId);
   const format = req.query.format;
   const fname = `R6_exceptions_${slug(audit.store_name)}`;
+  const SC = ['Section', 'Category'];
   if (format === 'xlsx') {
     return sendXlsx(res, fname, [
-      { name: 'Voided', aoa: [['Item', 'Qty/Bottles', 'Open ml', 'Location', 'Void Reason', 'Counted By', 'Voided By'],
-        ...data.voided.map((v) => [v.name, n(v.qty ?? v.bottles), n(v.open_ml), n(v.location_text), v.void_reason, v.counted_by_name, v.voided_by_name])] },
-      { name: 'Not Applicable', aoa: [['Item', 'Reason', 'Marked By'],
-        ...data.notApplicable.map((v) => [v.name, v.reason, v.marked_by_name])] },
-      { name: 'Multiple Entries', aoa: [['Item', 'Entries', 'Physical Qty'],
-        ...data.multiEntry.map((v) => [v.name, v.entries, v.physical_qty])] },
-      { name: 'Zero Quantity', aoa: [['Item', 'Zero Entries'],
-        ...data.zeroQty.map((v) => [v.name, v.zero_entries])] },
-      { name: 'No Photo', aoa: [['Item', 'Entries'],
-        ...data.noPhoto.map((v) => [v.name, v.entries])] },
+      { name: 'Voided', aoa: [['Item', ...SC, 'Qty/Bottles', 'Open ml', 'Location', 'Void Reason', 'Counted By', 'Voided By'],
+        ...data.voided.map((v) => [v.name, v.section, v.category, n(v.qty ?? v.bottles), n(v.open_ml), n(v.location_text), v.void_reason, v.counted_by_name, v.voided_by_name])] },
+      { name: 'Not Applicable', aoa: [['Item', ...SC, 'Reason', 'Marked By'],
+        ...data.notApplicable.map((v) => [v.name, v.section, v.category, v.reason, v.marked_by_name])] },
+      { name: 'Multiple Entries', aoa: [['Item', ...SC, 'Entries', 'Physical Qty'],
+        ...data.multiEntry.map((v) => [v.name, v.section, v.category, v.entries, v.physical_qty])] },
+      { name: 'Zero Quantity', aoa: [['Item', ...SC, 'Zero Entries'],
+        ...data.zeroQty.map((v) => [v.name, v.section, v.category, v.zero_entries])] },
+      { name: 'No Photo', aoa: [['Item', ...SC, 'Entries'],
+        ...data.noPhoto.map((v) => [v.name, v.section, v.category, v.entries])] },
     ]);
   }
   if (format === 'pdf') {
     return sendPdf(res, fname, {
       title: 'R6 — Exception Report', subtitle: `${audit.store_name} — ${audit.audit_date}`,
       blocks: [
-        { title: 'Voided Entries', columns: ['Item', 'Reason', 'Counted By', 'Voided By'],
-          widths: [160, 150, 105, 108], rows: data.voided.map((v) => [v.name, v.void_reason, v.counted_by_name, v.voided_by_name]) },
-        { title: 'Not Applicable', columns: ['Item', 'Reason', 'Marked By'],
-          widths: [180, 240, 103], rows: data.notApplicable.map((v) => [v.name, v.reason, v.marked_by_name]) },
-        { title: 'Multiple Entries', columns: ['Item', 'Entries', 'Physical Qty'],
-          rows: data.multiEntry.map((v) => [v.name, v.entries, v.physical_qty]) },
-        { title: 'Zero Quantity', columns: ['Item', 'Zero Entries'],
-          rows: data.zeroQty.map((v) => [v.name, v.zero_entries]) },
-        { title: 'Counted Without Photo', columns: ['Item', 'Entries'],
-          rows: data.noPhoto.map((v) => [v.name, v.entries]) },
+        { title: 'Voided Entries', columns: ['Item', ...SC, 'Reason', 'Counted By', 'Voided By'],
+          widths: [120, 75, 75, 110, 75, 78], rows: data.voided.map((v) => [v.name, v.section, v.category, v.void_reason, v.counted_by_name, v.voided_by_name]) },
+        { title: 'Not Applicable', columns: ['Item', ...SC, 'Reason', 'Marked By'],
+          widths: [130, 85, 85, 140, 83], rows: data.notApplicable.map((v) => [v.name, v.section, v.category, v.reason, v.marked_by_name]) },
+        { title: 'Multiple Entries', columns: ['Item', ...SC, 'Entries', 'Physical Qty'],
+          rows: data.multiEntry.map((v) => [v.name, v.section, v.category, v.entries, v.physical_qty]) },
+        { title: 'Zero Quantity', columns: ['Item', ...SC, 'Zero Entries'],
+          rows: data.zeroQty.map((v) => [v.name, v.section, v.category, v.zero_entries]) },
+        { title: 'Counted Without Photo', columns: ['Item', ...SC, 'Entries'],
+          rows: data.noPhoto.map((v) => [v.name, v.section, v.category, v.entries]) },
       ],
     });
   }

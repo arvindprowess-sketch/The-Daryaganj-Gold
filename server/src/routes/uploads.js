@@ -27,7 +27,13 @@ router.post('/', requireAuth, upload.single('photo'), async (req, res) => {
       .resize({ width: 1200, height: 1200, fit: 'inside', withoutEnlargement: true })
       .jpeg({ quality: 78 })
       .toBuffer();
-    const { url } = await storage.save(buffer, { ext: '.jpg', contentType: 'image/jpeg' });
+    // The item name (when the caller knows it) becomes the filename slug, so
+    // stored objects are recognisable: "refined-oil-9f3a1c2b.jpg".
+    const { url } = await storage.save(buffer, {
+      ext: '.jpg',
+      contentType: 'image/jpeg',
+      name: req.body?.item_name || req.file.originalname,
+    });
     res.status(201).json({ url });
   } catch (err) {
     res.status(400).json({ error: err.message || 'Upload failed' });

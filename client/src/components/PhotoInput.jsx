@@ -7,7 +7,7 @@ import { api } from '../lib/api.js';
 //   Desktop: a single "Upload" button (file picker). NO camera.
 //   Mobile : two buttons — [Take Photo] (capture) and [Upload].
 // Compresses to max 1200px before upload. Returns the stored URL via onUploaded.
-export default function PhotoInput({ value, onUploaded, uploadOnly = false }) {
+export default function PhotoInput({ value, onUploaded, uploadOnly = false, itemName }) {
   const cameraRef = useRef(null);
   const fileRef = useRef(null);
   const [busy, setBusy] = useState(false);
@@ -25,6 +25,8 @@ export default function PhotoInput({ value, onUploaded, uploadOnly = false }) {
       const compressed = await compressImage(file);
       const fd = new FormData();
       fd.append('photo', compressed);
+      // Sent so the stored object is named after the item, not a random blob.
+      if (itemName) fd.append('item_name', itemName);
       const { url } = await api.upload('/upload', fd);
       onUploaded(url);
     } catch (err) {

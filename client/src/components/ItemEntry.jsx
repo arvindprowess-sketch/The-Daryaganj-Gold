@@ -193,7 +193,7 @@ export default function ItemEntry({ auditId, item, onClose, onSaved, uploadOnly 
                  onChange={(e) => update({ remarks: e.target.value })} />
         </label>
 
-        <PhotoInput value={form.photo_url} uploadOnly={uploadOnly}
+        <PhotoInput value={form.photo_url} uploadOnly={uploadOnly} itemName={item.name}
                     onUploaded={(url) => update({ photo_url: url })} />
 
         {error && <p className="text-sm text-red-600">{error}</p>}
