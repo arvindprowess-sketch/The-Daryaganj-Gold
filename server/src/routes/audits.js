@@ -93,33 +93,55 @@ router.get('/:id', async (req, res) => {
   res.json({ ...audit, store_name: rows[0]?.name, store_code: rows[0]?.code });
 });
 
-// ── Section list with progress (M4) ──────────────────────────────────────────
-router.get('/:id/sections', async (req, res) => {
+// ── Super category list with progress (M4) ───────────────────────────────────
+// The auditor sees SUPER CATEGORIES ONLY — categories are never a navigation
+// level on mobile. Progress is one aggregate query (no per-item round trips),
+// so it stays cheap at 618 items per store.
+router.get('/:id/super-categories', async (req, res) => {
   const { audit, allowed } = await loadAuditForUser(req.user, req.params.id);
   if (!audit) return res.status(404).json({ error: 'Not found' });
   if (!allowed) return res.status(403).json({ error: 'Forbidden' });
 
   const { rows } = await query(
-    `WITH counted AS (
-       SELECT i.section_id,
-              COUNT(DISTINCT CASE WHEN ce.id IS NOT NULL OR na.id IS NOT NULL THEN i.id END) AS counted
-         FROM items i
-         LEFT JOIN count_entries ce ON ce.item_id = i.id AND ce.audit_id = $1 AND ce.status = 'active'
-         LEFT JOIN audit_na na ON na.item_id = i.id AND na.audit_id = $1
-        WHERE i.is_active = TRUE
-        GROUP BY i.section_id
-     ),
-     totals AS (
-       SELECT section_id, COUNT(*) AS total FROM items WHERE is_active = TRUE GROUP BY section_id
-     )
-     SELECT s.id, s.name, s.sort_order,
-            COALESCE(t.total, 0)::int AS total,
-            COALESCE(c.counted, 0)::int AS counted
-       FROM sections s
-       LEFT JOIN totals t ON t.section_id = s.id
-       LEFT JOIN counted c ON c.section_id = s.id
-      WHERE s.is_active = TRUE
-      ORDER BY s.sort_order, s.name`,
+    `SELECT sc.id, sc.name, sc.sort_order,
+            COUNT(i.id)::int AS total,
+            COUNT(i.id) FILTER (
+              WHERE EXISTS (SELECT 1 FROM count_entries ce
+                             WHERE ce.item_id = i.id AND ce.audit_id = $1 AND ce.status = 'active')
+                 OR EXISTS (SELECT 1 FROM audit_na na
+                             WHERE na.item_id = i.id AND na.audit_id = $1)
+            )::int AS counted
+       FROM super_categories sc
+       LEFT JOIN items i ON i.super_category_id = sc.id AND i.is_active = TRUE
+      WHERE sc.is_active = TRUE
+      GROUP BY sc.id, sc.name, sc.sort_order
+      ORDER BY sc.sort_order, sc.name`,
+    [req.params.id]
+  );
+  res.json(rows);
+});
+
+// Category-level progress (admin console only — never a mobile nav level).
+router.get('/:id/categories', async (req, res) => {
+  const { audit, allowed } = await loadAuditForUser(req.user, req.params.id);
+  if (!audit) return res.status(404).json({ error: 'Not found' });
+  if (!allowed) return res.status(403).json({ error: 'Forbidden' });
+
+  const { rows } = await query(
+    `SELECT c.id, c.name, c.super_category_id, sc.name AS super_category_name,
+            COUNT(i.id)::int AS total,
+            COUNT(i.id) FILTER (
+              WHERE EXISTS (SELECT 1 FROM count_entries ce
+                             WHERE ce.item_id = i.id AND ce.audit_id = $1 AND ce.status = 'active')
+                 OR EXISTS (SELECT 1 FROM audit_na na
+                             WHERE na.item_id = i.id AND na.audit_id = $1)
+            )::int AS counted
+       FROM categories c
+       LEFT JOIN super_categories sc ON sc.id = c.super_category_id
+       LEFT JOIN items i ON i.category_id = c.id AND i.is_active = TRUE
+      WHERE c.is_active = TRUE
+      GROUP BY c.id, c.name, c.super_category_id, sc.name, sc.sort_order
+      ORDER BY sc.sort_order NULLS LAST, sc.name, c.name`,
     [req.params.id]
   );
   res.json(rows);
@@ -131,16 +153,17 @@ router.get('/:id/items', async (req, res) => {
   if (!audit) return res.status(404).json({ error: 'Not found' });
   if (!allowed) return res.status(403).json({ error: 'Forbidden' });
 
-  const { section_id, category_id, search, status } = req.query;
+  const { super_category_id, category_id, search, status } = req.query;
   const conds = ['i.is_active = TRUE'];
   const params = [req.params.id];
-  if (section_id) { params.push(section_id); conds.push(`i.section_id = $${params.length}`); }
+  if (super_category_id) { params.push(super_category_id); conds.push(`i.super_category_id = $${params.length}`); }
   if (category_id) { params.push(category_id); conds.push(`i.category_id = $${params.length}`); }
   if (search) { params.push(`%${search}%`); conds.push(`i.name ILIKE $${params.length}`); }
 
   const { rows } = await query(
     `SELECT i.id, i.name, i.unit, i.is_liquor, i.bottle_size_ml,
-            i.photo_url, i.photo_version, i.section_id, i.category_id, i.rate,
+            i.photo_url, i.photo_version, i.super_category_id, i.category_id, i.rate,
+            sc.name AS super_category_name, c.name AS category_name,
             COALESCE(agg.entry_count, 0)::int AS entry_count,
             agg.total_qty,
             agg.total_bottles,
@@ -148,6 +171,8 @@ router.get('/:id/items', async (req, res) => {
             (na.id IS NOT NULL) AS not_applicable,
             na.reason AS na_reason
        FROM items i
+       LEFT JOIN super_categories sc ON sc.id = i.super_category_id
+       LEFT JOIN categories c ON c.id = i.category_id
        LEFT JOIN LATERAL (
          SELECT COUNT(*) AS entry_count,
                 SUM(qty) AS total_qty,
@@ -180,7 +205,7 @@ router.get('/:id/uncounted', async (req, res) => {
   if (!audit) return res.status(404).json({ error: 'Not found' });
   if (!allowed) return res.status(403).json({ error: 'Forbidden' });
   const { rows } = await query(
-    `SELECT i.id, i.name, i.unit, i.section_id
+    `SELECT i.id, i.name, i.unit, i.super_category_id
        FROM items i
       WHERE i.is_active = TRUE
         AND NOT EXISTS (SELECT 1 FROM count_entries ce WHERE ce.item_id=i.id AND ce.audit_id=$1 AND ce.status='active')

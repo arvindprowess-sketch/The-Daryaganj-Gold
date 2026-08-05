@@ -4,39 +4,67 @@ import { Spinner, PhotoThumb } from '../../components/ui.jsx';
 import PhotoInput from '../../components/PhotoInput.jsx';
 import { useToast } from '../../components/Toast.jsx';
 
-const blank = { name: '', section_id: '', category_id: '', unit: 'Nos', is_liquor: false, bottle_size_ml: '', rate: '' };
+const blank = { name: '', super_category_id: '', category_id: '', unit: '', is_liquor: false, bottle_size_ml: '', rate: '' };
 
 // Item NAME is the single identifier — there are no item codes.
 export default function ItemMaster() {
   const [items, setItems] = useState(null);
-  const [sections, setSections] = useState([]);
+  const [counts, setCounts] = useState({ total: 0, with_photo: 0 });
+  const [supers, setSupers] = useState([]);
   const [categories, setCategories] = useState([]);
   const [search, setSearch] = useState('');
-  const [fSection, setFSection] = useState('');
+  const [fSuper, setFSuper] = useState('');
   const [fCat, setFCat] = useState('');
+  const [fPhoto, setFPhoto] = useState('');   // '' | 'has' | 'none'
   const [editing, setEditing] = useState(null);
   const [panel, setPanel] = useState(null); // 'csv' | 'photos'
 
   const load = useCallback(() => {
     const qs = new URLSearchParams();
     if (search) qs.set('search', search);
-    if (fSection) qs.set('section_id', fSection);
+    if (fSuper) qs.set('super_category_id', fSuper);
     if (fCat) qs.set('category_id', fCat);
-    return api.get(`/items?${qs}`).then(setItems);
-  }, [search, fSection, fCat]);
+    if (fPhoto) qs.set('photo', fPhoto);
+    return api.get(`/items?${qs}`).then((r) => { setItems(r.items); setCounts(r.counts); });
+  }, [search, fSuper, fCat, fPhoto]);
 
   useEffect(() => { load(); }, [load]);
   useEffect(() => {
-    api.get('/meta/sections').then(setSections);
+    api.get('/meta/super-categories').then(setSupers);
     api.get('/meta/categories').then(setCategories);
   }, []);
+
+  // Dependent dropdowns: choosing a super category narrows the category list.
+  const visibleCats = fSuper
+    ? categories.filter((c) => String(c.super_category_id) === String(fSuper))
+    : categories;
+
+  function pickSuper(v) {
+    setFSuper(v);
+    // Drop a category selection that no longer belongs to the chosen super.
+    if (v && fCat) {
+      const stillValid = categories.some(
+        (c) => String(c.id) === String(fCat) && String(c.super_category_id) === String(v)
+      );
+      if (!stillValid) setFCat('');
+    }
+  }
 
   if (!items) return <Spinner />;
 
   return (
     <div>
       <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
-        <h1 className="text-2xl font-bold">Item master</h1>
+        <div>
+          <h1 className="text-2xl font-bold">Item master</h1>
+          {/* Photo coverage at a glance while photos are collected. */}
+          <p className="text-slate-500 text-sm">
+            {counts.total} items · {counts.with_photo} with photos
+            {counts.total > counts.with_photo && (
+              <span className="text-amber-600"> · {counts.total - counts.with_photo} missing</span>
+            )}
+          </p>
+        </div>
         <div className="flex gap-2">
           <button className="btn-ghost" onClick={() => setPanel('csv')}>⬆ CSV import</button>
           <button className="btn-ghost" onClick={() => setPanel('photos')}>🖼 Bulk photos</button>
@@ -46,22 +74,32 @@ export default function ItemMaster() {
 
       <div className="flex flex-wrap gap-2 mb-3">
         <input className="field max-w-xs" placeholder="Search name…" value={search} onChange={(e) => setSearch(e.target.value)} />
-        <select className="field max-w-[200px]" value={fSection} onChange={(e) => setFSection(e.target.value)}>
-          <option value="">All sections</option>
-          {sections.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+        <select className="field max-w-[220px]" value={fSuper} onChange={(e) => pickSuper(e.target.value)}>
+          <option value="">All super categories</option>
+          {supers.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
         </select>
-        <select className="field max-w-[200px]" value={fCat} onChange={(e) => setFCat(e.target.value)}>
+        <select className="field max-w-[220px]" value={fCat} onChange={(e) => setFCat(e.target.value)}>
           <option value="">All categories</option>
-          {categories.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+          {visibleCats.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
         </select>
+        <div className="flex gap-2">
+          {[['', 'All'], ['has', 'Has photo'], ['none', 'No photo']].map(([k, label]) => (
+            <button key={k || 'all'} className={fPhoto === k ? 'chip-on' : 'chip-off'}
+                    onClick={() => setFPhoto(k)}>{label}</button>
+          ))}
+        </div>
       </div>
+
+      <p className="text-sm text-slate-500 mb-2">Showing {items.length} of {counts.total} items.</p>
 
       <div className="card overflow-x-auto">
         <table className="w-full text-sm">
           <thead className="bg-slate-50 text-left text-slate-500">
             <tr>
               <th className="px-3 py-3">Photo</th>
-              <th className="px-3 py-3">Name</th><th className="px-3 py-3">Section / Category</th>
+              <th className="px-3 py-3">Super Category</th>
+              <th className="px-3 py-3">Category</th>
+              <th className="px-3 py-3">Name</th>
               <th className="px-3 py-3">Unit</th><th className="px-3 py-3">Liquor</th>
               <th className="px-3 py-3 text-right">Rate</th><th className="px-3 py-3"></th>
             </tr>
@@ -70,10 +108,12 @@ export default function ItemMaster() {
             {items.map((i) => (
               <tr key={i.id}>
                 <td className="px-3 py-2"><PhotoThumb src={bustCache(i.photo_url, i.photo_version)} size={44} /></td>
+                <td className="px-3 py-2 text-slate-500">{i.super_category_name || '—'}</td>
+                <td className="px-3 py-2 text-slate-500">{i.category_name || '—'}</td>
                 <td className="px-3 py-2 font-medium">{i.name}</td>
-                <td className="px-3 py-2 text-slate-500">{i.section_name || '—'} / {i.category_name || '—'}</td>
-                <td className="px-3 py-2">{i.is_liquor ? `Bottle (${i.bottle_size_ml || '?'}ml)` : i.unit}</td>
-                <td className="px-3 py-2">{i.is_liquor ? 'Yes' : ''}</td>
+                {/* Unit is displayed exactly as uploaded. */}
+                <td className="px-3 py-2">{i.unit}</td>
+                <td className="px-3 py-2">{i.is_liquor ? `Yes (${i.bottle_size_ml || '?'}ml)` : ''}</td>
                 <td className="px-3 py-2 text-right">{i.rate != null ? Number(i.rate).toFixed(2) : '—'}</td>
                 <td className="px-3 py-2 text-right">
                   <button className="text-brand font-medium" onClick={() => setEditing(i)}>Edit</button>
@@ -86,7 +126,7 @@ export default function ItemMaster() {
       </div>
 
       {editing && (
-        <ItemEditor item={editing} sections={sections} categories={categories}
+        <ItemEditor item={editing} supers={supers} categories={categories}
                     onClose={() => setEditing(null)} onSaved={() => { setEditing(null); load(); }} />
       )}
       {panel === 'csv' && <CsvImport onClose={() => setPanel(null)} onDone={() => { setPanel(null); load(); }} />}
@@ -109,10 +149,10 @@ function Modal({ title, onClose, children, wide }) {
   );
 }
 
-function ItemEditor({ item, sections, categories, onClose, onSaved }) {
+function ItemEditor({ item, supers, categories, onClose, onSaved }) {
   const [f, setF] = useState({
-    name: item.name || '', section_id: item.section_id || '',
-    category_id: item.category_id || '', unit: item.unit || 'Nos', is_liquor: !!item.is_liquor,
+    name: item.name || '', super_category_id: item.super_category_id || '',
+    category_id: item.category_id || '', unit: item.unit || '', is_liquor: !!item.is_liquor,
     bottle_size_ml: item.bottle_size_ml || '', rate: item.rate ?? '',
     photo_url: item.photo_url || null, photo_version: item.photo_version,
   });
@@ -124,7 +164,8 @@ function ItemEditor({ item, sections, categories, onClose, onSaved }) {
     setErr(''); setBusy(true);
     const payload = {
       name: f.name.trim(),
-      section_id: f.section_id || null, category_id: f.category_id || null,
+      super_category_id: f.super_category_id || null, category_id: f.category_id || null,
+      // Unit is free text, stored as typed.
       unit: f.unit, is_liquor: f.is_liquor,
       bottle_size_ml: f.is_liquor ? Number(f.bottle_size_ml) || null : null,
       rate: f.rate === '' ? null : Number(f.rate), photo_url: f.photo_url,
@@ -137,6 +178,17 @@ function ItemEditor({ item, sections, categories, onClose, onSaved }) {
   }
 
   const set = (p) => setF({ ...f, ...p });
+  // Dependent dropdowns: the category list follows the chosen super category.
+  const editorCats = f.super_category_id
+    ? categories.filter((c) => String(c.super_category_id) === String(f.super_category_id))
+    : categories;
+
+  function pickSuper(v) {
+    const stillValid = categories.some(
+      (c) => String(c.id) === String(f.category_id) && String(c.super_category_id) === String(v)
+    );
+    setF({ ...f, super_category_id: v, category_id: stillValid ? f.category_id : '' });
+  }
   return (
     <Modal title={isNew ? 'New item' : `Edit ${item.name}`} onClose={onClose}>
       <div className="space-y-3">
@@ -147,19 +199,21 @@ function ItemEditor({ item, sections, categories, onClose, onSaved }) {
         <label className="block"><span className="text-sm text-slate-600">Name (this is the item's identifier)</span>
           <input className="field mt-1" value={f.name} onChange={(e) => set({ name: e.target.value })} /></label>
         <div className="grid grid-cols-2 gap-3">
-          <label className="block"><span className="text-sm text-slate-600">Unit</span>
-            <input className="field mt-1" value={f.unit} onChange={(e) => set({ unit: e.target.value })} /></label>
+          <label className="block"><span className="text-sm text-slate-600">Unit (free text)</span>
+            <input className="field mt-1" value={f.unit} placeholder="e.g. CAN (5 LTR)"
+                   onChange={(e) => set({ unit: e.target.value })} />
+            <span className="block text-xs text-slate-400 mt-1">Shown exactly as typed.</span></label>
           <label className="block"><span className="text-sm text-slate-600">Rate (₹)</span>
             <input className="field mt-1" value={f.rate} onChange={(e) => set({ rate: e.target.value })} /></label>
         </div>
         <div className="grid grid-cols-2 gap-3">
-          <label className="block"><span className="text-sm text-slate-600">Section</span>
-            <select className="field mt-1" value={f.section_id} onChange={(e) => set({ section_id: e.target.value })}>
-              <option value="">—</option>{sections.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+          <label className="block"><span className="text-sm text-slate-600">Super Category</span>
+            <select className="field mt-1" value={f.super_category_id} onChange={(e) => pickSuper(e.target.value)}>
+              <option value="">—</option>{supers.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
             </select></label>
           <label className="block"><span className="text-sm text-slate-600">Category</span>
             <select className="field mt-1" value={f.category_id} onChange={(e) => set({ category_id: e.target.value })}>
-              <option value="">—</option>{categories.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+              <option value="">—</option>{editorCats.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
             </select></label>
         </div>
         <div className="grid grid-cols-2 gap-3 items-end">
@@ -220,8 +274,14 @@ function CsvImport({ onClose, onDone }) {
   return (
     <Modal title="CSV import — item master" onClose={onClose} wide>
       <p className="text-sm text-slate-600 mb-2">
-        Columns: <code>name, section, category, unit, is_liquor, bottle_size_ml, rate</code>.
-        Items are matched by <strong>name</strong> (spaces trimmed, case-insensitive).
+        Columns: <code>item_name, super_category, category, unit, is_liquor, bottle_size_ml, rate</code>.
+        Items are matched by <strong>item_name</strong> (spaces trimmed, case-insensitive).
+        <br />
+        <span className="text-slate-500">
+          <code>is_liquor</code> accepts TRUE/FALSE, 1/0 or Yes/No. <code>bottle_size_ml</code> is
+          required when it is TRUE. <code>unit</code> is free text and is stored exactly as written.
+          A super category or category that does not exist yet is created on commit.
+        </span>
       </p>
       <div className="flex flex-wrap items-center gap-2 mb-3">
         <button className="btn-ghost"
@@ -247,6 +307,22 @@ function CsvImport({ onClose, onDone }) {
             <span className="text-red-600">{preview.invalid} invalid</span>
             {preview.invalid > 0 && ' — fix errors before committing.'}
           </p>
+
+          {/* Hierarchy levels the file introduces — created on commit, never
+              a reason to fail the import. */}
+          {(preview.newSuperCategories?.length > 0 || preview.newCategories?.length > 0) && (
+            <div className="mb-4 rounded-xl border border-sky-200 bg-sky-50 p-3 text-sm">
+              <div className="font-semibold text-sky-800 mb-1">New hierarchy levels — will be created</div>
+              {preview.newSuperCategories?.length > 0 && (
+                <div className="text-sky-800">
+                  Super categories: {preview.newSuperCategories.join(', ')}
+                </div>
+              )}
+              {preview.newCategories?.length > 0 && (
+                <div className="text-sky-800">Categories: {preview.newCategories.join(', ')}</div>
+              )}
+            </div>
+          )}
 
           {unmatchedRows.length > 0 && (
             <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 p-3">
@@ -278,14 +354,28 @@ function CsvImport({ onClose, onDone }) {
           <div className="overflow-x-auto max-h-72 border rounded-xl">
             <table className="w-full text-xs">
               <thead className="bg-slate-50 sticky top-0"><tr>
-                <th className="px-2 py-2 text-left">Row</th><th className="px-2 py-2 text-left">Name</th>
-                <th className="px-2 py-2 text-left">Status</th><th className="px-2 py-2 text-left">Errors</th>
+                <th className="px-2 py-2 text-left">Row</th>
+                <th className="px-2 py-2 text-left">Super Category</th>
+                <th className="px-2 py-2 text-left">Category</th>
+                <th className="px-2 py-2 text-left">Item Name</th>
+                <th className="px-2 py-2 text-left">Unit</th>
+                <th className="px-2 py-2 text-left">Status</th>
+                <th className="px-2 py-2 text-left">Errors</th>
               </tr></thead>
               <tbody className="divide-y">
                 {preview.rows.map((r) => (
                   <tr key={r.row} className={r.errors.length ? 'bg-red-50' : ''}>
                     <td className="px-2 py-1.5">{r.row}</td>
+                    <td className="px-2 py-1.5">
+                      {r.data.super_category_name || '—'}
+                      {r.newSuperCategory && <span className="ml-1 text-sky-600">(new)</span>}
+                    </td>
+                    <td className="px-2 py-1.5">
+                      {r.data.category_name || '—'}
+                      {r.newCategory && <span className="ml-1 text-sky-600">(new)</span>}
+                    </td>
                     <td className="px-2 py-1.5 font-medium">{r.data.name}</td>
+                    <td className="px-2 py-1.5 font-mono">{r.data.unit}</td>
                     <td className="px-2 py-1.5">
                       {r.errors.length ? 'invalid'
                         : r.matched ? <span className="text-green-600">update existing</span>

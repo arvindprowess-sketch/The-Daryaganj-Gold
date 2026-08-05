@@ -1,203 +1,174 @@
 import { pool, withTransaction } from '../src/db.js';
 import { hashPassword } from '../src/lib/auth.js';
+import { ensureHierarchy } from './hierarchy.js';
+import { loadItemMaster, REAL_CSV } from './itemMaster.js';
 
 // Deterministic demo dataset. Safe to re-run: it clears the demo tables first.
 async function seed() {
-  await withTransaction(async (c) => {
+  const { items: master, source } = loadItemMaster();
+
+  const summary = await withTransaction(async (c) => {
     // Reset (order matters for FKs)
     await c.query(`TRUNCATE photo_reviews, audit_na, system_stock, count_entries, audits,
-      items, categories, sections, user_stores, users, stores RESTART IDENTITY CASCADE`);
+      items, categories, super_categories, user_stores, users, stores RESTART IDENTITY CASCADE`);
 
-    // ── Sections (4) ──────────────────────────────────────────────────────
-    const sections = {};
-    for (const [name, order] of [
-      ['Main Store / Backroom', 1],
-      ['Base Kitchen', 2],
-      ['Bar & Liquor', 3],
-      ['Outlet & Consumables', 4],
-    ]) {
-      const { rows } = await c.query(
-        'INSERT INTO sections (name, sort_order) VALUES ($1,$2) RETURNING id', [name, order]);
-      sections[name] = rows[0].id;
-    }
+    // ── The client's real hierarchy (5 super categories) ───────────────────
+    const { superIds, categoryIds } = await ensureHierarchy(c);
 
-    // ── Categories (~8) ───────────────────────────────────────────────────
-    const catDefs = [
-      ['Dry Store', 'Main Store / Backroom'],
-      ['Frozen & Chilled', 'Main Store / Backroom'],
-      ['Vegetables & Dairy', 'Base Kitchen'],
-      ['Sauces & Condiments', 'Base Kitchen'],
-      ['Spirits', 'Bar & Liquor'],
-      ['Beer & Wine', 'Bar & Liquor'],
-      ['Crockery & Cutlery', 'Outlet & Consumables'],
-      ['Packaging & Consumables', 'Outlet & Consumables'],
-    ];
-    const cats = {};
-    for (const [name, section] of catDefs) {
-      const { rows } = await c.query(
-        'INSERT INTO categories (name, section_id) VALUES ($1,$2) RETURNING id',
-        [name, sections[section]]);
-      cats[name] = rows[0].id;
-    }
+    // ── Store: M3M ─────────────────────────────────────────────────────────
+    const { rows: storeRows } = await c.query(
+      `INSERT INTO stores (code, name, address) VALUES ($1,$2,$3) RETURNING id`,
+      ['M3M', 'M3M', 'M3M, Gurugram']
+    );
+    const storeId = storeRows[0].id;
 
-    // ── Stores (2) ────────────────────────────────────────────────────────
-    const storeIds = {};
-    for (const [code, name, address] of [
-      ['AERO', 'Aerocity Outlet', 'Aerocity, New Delhi'],
-      ['CP', 'Connaught Place Outlet', 'CP Block A, New Delhi'],
-    ]) {
-      const { rows } = await c.query(
-        'INSERT INTO stores (code, name, address) VALUES ($1,$2,$3) RETURNING id',
-        [code, name, address]);
-      storeIds[code] = rows[0].id;
-    }
-
-    // ── Users (3) ─────────────────────────────────────────────────────────
+    // ── Users (unchanged) ──────────────────────────────────────────────────
     const creds = [
       { username: 'admin', name: 'Admin (Audix)', role: 'admin', password: 'admin123', stores: [] },
-      { username: 'rakesh', name: 'Rakesh Kumar', role: 'auditor', password: 'rakesh123', stores: ['AERO', 'CP'] },
-      { username: 'sunil', name: 'Sunil Verma', role: 'auditor', password: 'sunil123', stores: ['AERO'] },
+      { username: 'rakesh', name: 'Rakesh Kumar', role: 'auditor', password: 'rakesh123', stores: [storeId] },
+      { username: 'sunil', name: 'Sunil Verma', role: 'auditor', password: 'sunil123', stores: [storeId] },
     ];
     const userIds = {};
     for (const u of creds) {
       const hash = await hashPassword(u.password);
       const { rows } = await c.query(
         'INSERT INTO users (username, name, password_hash, role) VALUES ($1,$2,$3,$4) RETURNING id',
-        [u.username, u.name, hash, u.role]);
+        [u.username, u.name, hash, u.role]
+      );
       userIds[u.username] = rows[0].id;
-      for (const s of u.stores) {
-        await c.query('INSERT INTO user_stores (user_id, store_id) VALUES ($1,$2)',
-          [rows[0].id, storeIds[s]]);
+      for (const sid of u.stores) {
+        await c.query('INSERT INTO user_stores (user_id, store_id) VALUES ($1,$2)', [rows[0].id, sid]);
       }
     }
 
-    // ── Items (30: 22 regular + 8 liquor) ─────────────────────────────────
-    // Item NAME is the identifier — there are no item codes.
-    const items = [
-      // name, category, unit, rate
-      ['Refined Oil', 'Dry Store', 'Ltr', 140],
-      ['Basmati Rice', 'Dry Store', 'Kg', 95],
-      ['Wheat Flour (Atta)', 'Dry Store', 'Kg', 42],
-      ['Sugar', 'Dry Store', 'Kg', 45],
-      ['Salt', 'Dry Store', 'Kg', 20],
-      ['Toor Dal', 'Dry Store', 'Kg', 130],
-      ['Chicken Breast (Frozen)', 'Frozen & Chilled', 'Kg', 260],
-      ['French Fries (Frozen)', 'Frozen & Chilled', 'Kg', 120],
-      ['Prawns (Frozen)', 'Frozen & Chilled', 'Kg', 520],
-      ['Tomato', 'Vegetables & Dairy', 'Kg', 40],
-      ['Onion', 'Vegetables & Dairy', 'Kg', 35],
-      ['Paneer', 'Vegetables & Dairy', 'Kg', 320],
-      ['Butter', 'Vegetables & Dairy', 'Kg', 480],
-      ['Soy Sauce', 'Sauces & Condiments', 'Ltr', 180],
-      ['Tomato Ketchup', 'Sauces & Condiments', 'Kg', 110],
-      ['Mayonnaise', 'Sauces & Condiments', 'Kg', 150],
-      ['Dinner Plate', 'Crockery & Cutlery', 'Nos', 220],
-      ['Water Glass', 'Crockery & Cutlery', 'Nos', 60],
-      ['Fork', 'Crockery & Cutlery', 'Nos', 45],
-      ['Wine Glass', 'Crockery & Cutlery', 'Nos', 130],
-      ['Takeaway Box (Large)', 'Packaging & Consumables', 'Nos', 8],
-      ['Paper Napkin (Pack)', 'Packaging & Consumables', 'Pack', 35],
-    ];
-    // 8 liquor
-    const liquor = [
-      // name, category, bottle_size_ml, rate
-      ['Old Monk Rum', 'Spirits', 750, 750],
-      ['Blenders Pride Whisky', 'Spirits', 750, 1050],
-      ['Smirnoff Vodka', 'Spirits', 750, 980],
-      ['Bacardi White Rum', 'Spirits', 750, 1150],
-      ['Beefeater Gin', 'Spirits', 750, 2400],
-      ['Jameson Whiskey', 'Spirits', 1000, 3200],
-      ['Kingfisher Premium Beer', 'Beer & Wine', 650, 160],
-      ['Sula Sauvignon Blanc', 'Beer & Wine', 750, 950],
-    ];
-
-    // Keyed by item name — names are the identifier now.
+    // ── Item master ────────────────────────────────────────────────────────
+    // Unit is inserted verbatim — no normalisation, no substitution.
     const itemIds = {};
-    for (const [name, cat, unit, rate] of items) {
-      const catId = cats[cat];
-      const secId = (await c.query('SELECT section_id FROM categories WHERE id=$1', [catId])).rows[0].section_id;
+    let liquorCount = 0;
+    for (const it of master) {
+      const catId = categoryIds[`${it.super_category}/${it.category}`] ?? null;
+      const superId = superIds[it.super_category] ?? null;
       const { rows } = await c.query(
-        `INSERT INTO items (name, category_id, section_id, unit, is_liquor, rate)
-         VALUES ($1,$2,$3,$4,FALSE,$5) RETURNING id`,
-        [name, catId, secId, unit, rate]);
-      itemIds[name] = rows[0].id;
-    }
-    for (const [name, cat, ml, rate] of liquor) {
-      const catId = cats[cat];
-      const secId = (await c.query('SELECT section_id FROM categories WHERE id=$1', [catId])).rows[0].section_id;
-      const { rows } = await c.query(
-        `INSERT INTO items (name, category_id, section_id, unit, is_liquor, bottle_size_ml, rate)
-         VALUES ($1,$2,$3,'Bottle',TRUE,$4,$5) RETURNING id`,
-        [name, catId, secId, ml, rate]);
-      itemIds[name] = rows[0].id;
+        `INSERT INTO items (name, super_category_id, category_id, unit, is_liquor, bottle_size_ml, rate)
+         VALUES ($1,$2,$3,$4,$5,$6,$7)
+         ON CONFLICT (lower(name)) DO NOTHING
+         RETURNING id`,
+        [it.item_name, superId, catId, it.unit, it.is_liquor, it.bottle_size_ml, it.rate]
+      );
+      if (rows[0]) {
+        itemIds[it.item_name.toLowerCase()] = rows[0].id;
+        if (it.is_liquor) liquorCount++;
+      }
     }
 
-    // ── One open audit for Aerocity ───────────────────────────────────────
+    // ── One open audit with sample entries ─────────────────────────────────
     const { rows: auditRows } = await c.query(
       `INSERT INTO audits (store_id, audit_date, cutoff_time, status, created_by)
        VALUES ($1, CURRENT_DATE, '6:00 PM', 'open', $2) RETURNING id`,
-      [storeIds['AERO'], userIds['admin']]);
+      [storeId, userIds['admin']]
+    );
     const auditId = auditRows[0].id;
-
     const rakesh = userIds['rakesh'];
     const sunil = userIds['sunil'];
 
-    // Sample entries — including an item counted at TWO locations (append-only)
-    // and one VOIDED entry, so the behaviour is visible immediately.
-    const mkEntry = (itemName, fields) => c.query(
-      `INSERT INTO count_entries (audit_id, item_id, qty, bottles, open_ml, location_text, remarks, counted_by, status, void_reason, voided_by, voided_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id`,
-      [auditId, itemIds[itemName], fields.qty ?? null, fields.bottles ?? null, fields.open_ml ?? null,
-       fields.location ?? null, fields.remarks ?? null, fields.by ?? rakesh,
-       fields.status ?? 'active', fields.void_reason ?? null,
-       fields.voided_by ?? null, fields.voided_at ?? null]);
+    const idOf = (name) => itemIds[name.toLowerCase()];
+    const mkEntry = (itemName, f) => {
+      const id = idOf(itemName);
+      if (!id) return null;
+      return c.query(
+        `INSERT INTO count_entries (audit_id, item_id, qty, bottles, open_ml, location_text,
+           remarks, counted_by, status, void_reason, voided_by, voided_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+        [auditId, id, f.qty ?? null, f.bottles ?? null, f.open_ml ?? null, f.location ?? null,
+         f.remarks ?? null, f.by ?? rakesh, f.status ?? 'active', f.void_reason ?? null,
+         f.voided_by ?? null, f.voided_at ?? null]
+      );
+    };
 
-    // Refined Oil — TWO entries, different locations (append-only demo)
-    await mkEntry('Refined Oil', { qty: 1.0, location: 'Dry Store', by: rakesh });
-    await mkEntry('Refined Oil', { qty: 2.0, location: 'Basement rack', by: rakesh });
+    // Pick representative items that exist in whichever master was loaded.
+    const nonLiquor = master.filter((m) => !m.is_liquor);
+    const liquor = master.filter((m) => m.is_liquor);
+    const pick = (n) => nonLiquor[n]?.item_name;
 
-    // A voided entry (wrong count) — kept, struck through, excluded from totals
-    await mkEntry('Basmati Rice', { qty: 99, location: 'Dry Store', by: rakesh,
-      status: 'void', void_reason: 'Miscounted sacks — re-counted below',
-      voided_by: rakesh, voided_at: new Date().toISOString() });
-    await mkEntry('Basmati Rice', { qty: 40, location: 'Dry Store', by: rakesh });
-
-    // A few more regular counts
-    await mkEntry('Sugar', { qty: 25, location: 'Dry Store', by: sunil });
-    await mkEntry('Paneer', { qty: 8.5, location: 'Cold room', by: sunil });
-    await mkEntry('Dinner Plate', { qty: 120, location: 'Wash area', by: sunil });
-    // Zero-quantity explicit count (counted, found zero)
-    await mkEntry('Prawns (Frozen)', { qty: 0, location: 'Freezer 2', remarks: 'Out of stock', by: rakesh });
-
-    // Liquor entries — bottles and open ml kept separate
-    await mkEntry('Old Monk Rum', { bottles: 3, open_ml: 400, location: 'Bar shelf', by: rakesh });
-    await mkEntry('Blenders Pride Whisky', { bottles: 5, open_ml: 0, location: 'Bar store', by: rakesh });
-    await mkEntry('Kingfisher Premium Beer', { bottles: 24, open_ml: 0, location: 'Beer chiller', by: sunil });
-
-    // System stock for a handful of items (for variance demo). Liquor keeps
-    // bottles and open ml separate, exactly as the physical count does.
-    const sysNonLiquor = [['Refined Oil', 3], ['Basmati Rice', 42], ['Sugar', 25],
-      ['Prawns (Frozen)', 2], ['Paneer', 9]];
-    for (const [name, qty] of sysNonLiquor) {
-      await c.query(
-        'INSERT INTO system_stock (audit_id, item_id, qty, created_by) VALUES ($1,$2,$3,$4)',
-        [auditId, itemIds[name], qty, userIds['admin']]);
+    // One item counted at TWO locations (append-only is visible immediately).
+    const twoLoc = pick(0);
+    if (twoLoc) {
+      await mkEntry(twoLoc, { qty: 1.0, location: 'Dry Store', by: rakesh });
+      await mkEntry(twoLoc, { qty: 2.0, location: 'Basement rack', by: rakesh });
     }
-    const sysLiquor = [['Old Monk Rum', 3, 500], ['Blenders Pride Whisky', 6, 0],
-      ['Kingfisher Premium Beer', 24, 0]];
-    for (const [name, bottles, openMl] of sysLiquor) {
+
+    // One VOIDED entry, kept visible and excluded from totals.
+    const voided = pick(1);
+    if (voided) {
+      await mkEntry(voided, { qty: 99, location: 'Dry Store', by: rakesh, status: 'void',
+        void_reason: 'Miscounted sacks — re-counted below',
+        voided_by: rakesh, voided_at: new Date().toISOString() });
+      await mkEntry(voided, { qty: 40, location: 'Dry Store', by: rakesh });
+    }
+
+    if (pick(2)) await mkEntry(pick(2), { qty: 25, location: 'Dry Store', by: sunil });
+    if (pick(3)) await mkEntry(pick(3), { qty: 8.5, location: 'Cold room', by: sunil });
+    // Explicit zero: counted, found none — different from "not yet counted".
+    if (pick(4)) await mkEntry(pick(4), { qty: 0, location: 'Freezer 2', remarks: 'Out of stock', by: rakesh });
+
+    // Liquor: bottles and open ml stay separate.
+    if (liquor[0]) await mkEntry(liquor[0].item_name, { bottles: 3, open_ml: 400, location: 'Bar shelf', by: rakesh });
+    if (liquor[1]) await mkEntry(liquor[1].item_name, { bottles: 5, open_ml: 0, location: 'Bar store', by: rakesh });
+
+    // System stock for a handful of items so variance has something to compare.
+    const sysNonLiquor = [[pick(0), 3], [pick(1), 42], [pick(2), 25], [pick(3), 9]];
+    for (const [name, qty] of sysNonLiquor) {
+      const id = name && idOf(name);
+      if (id) {
+        await c.query(
+          'INSERT INTO system_stock (audit_id, item_id, qty, created_by) VALUES ($1,$2,$3,$4)',
+          [auditId, id, qty, userIds['admin']]
+        );
+      }
+    }
+    if (liquor[0] && idOf(liquor[0].item_name)) {
       await c.query(
         'INSERT INTO system_stock (audit_id, item_id, bottles, open_ml, created_by) VALUES ($1,$2,$3,$4,$5)',
-        [auditId, itemIds[name], bottles, openMl, userIds['admin']]);
+        [auditId, idOf(liquor[0].item_name), 3, 400, userIds['admin']]
+      );
     }
+    if (liquor[1] && idOf(liquor[1].item_name)) {
+      await c.query(
+        'INSERT INTO system_stock (audit_id, item_id, bottles, open_ml, created_by) VALUES ($1,$2,$3,$4,$5)',
+        [auditId, idOf(liquor[1].item_name), 6, 0, userIds['admin']]
+      );
+    }
+
+    const { rows: counts } = await c.query(
+      `SELECT (SELECT count(*) FROM items)::int AS items,
+              (SELECT count(*) FROM items WHERE is_liquor)::int AS liquor,
+              (SELECT count(*) FROM super_categories)::int AS supers,
+              (SELECT count(*) FROM categories)::int AS cats`
+    );
+    return { ...counts[0], liquorCount };
   });
 
   console.log('\n════════════════════════════════════════════');
-  console.log(' Seed complete. Login credentials:');
+  console.log(' Seed complete.');
+  console.log('════════════════════════════════════════════');
+  console.log(` Store        : M3M`);
+  console.log(` Hierarchy    : ${summary.supers} super categories, ${summary.cats} categories`);
+  console.log(` Item master  : ${summary.items} items (${summary.liquor} liquor)`);
+  if (source === 'client-csv') {
+    console.log(` Source       : Item_Master_Import_Ready.csv (client data)`);
+  } else {
+    console.log('');
+    console.log(' ⚠  Item_Master_Import_Ready.csv was NOT found, so a STAND-IN');
+    console.log('    master was generated at the same volume and distribution.');
+    console.log('    These item names are placeholders, NOT client data.');
+    console.log('    To seed the real master, drop the file at:');
+    console.log(`      ${REAL_CSV}`);
+    console.log('    and re-run `npm run seed`.');
+  }
   console.log('════════════════════════════════════════════');
   console.log(' ADMIN    username: admin    password: admin123');
-  console.log(' AUDITOR  username: rakesh   password: rakesh123  (Aerocity + CP)');
-  console.log(' AUDITOR  username: sunil    password: sunil123   (Aerocity)');
+  console.log(' AUDITOR  username: rakesh   password: rakesh123  (M3M)');
+  console.log(' AUDITOR  username: sunil    password: sunil123   (M3M)');
   console.log('════════════════════════════════════════════\n');
   await pool.end();
 }

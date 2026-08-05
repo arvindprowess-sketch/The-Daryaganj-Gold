@@ -20,15 +20,18 @@ export default function Reports() {
   const [loadedReport, setLoadedReport] = useState(null);
   const [loading, setLoading] = useState(false);
   const [vFilter, setVFilter] = useState('all'); // variance: all | counted
+  const [vSuper, setVSuper] = useState('');         // variance: super category filter
   const [vCategory, setVCategory] = useState('');   // variance: category filter
   const [vGroup, setVGroup] = useState(false);      // variance: group by category
   const [categories, setCategories] = useState([]);
+  const [supers, setSupers] = useState([]);
   const [consolidateIds, setConsolidateIds] = useState([]);
   const [consolidated, setConsolidated] = useState(null);
 
   useEffect(() => {
     api.get('/audits').then((a) => { setAudits(a); if (a[0]) setAuditId(String(a[0].id)); });
     api.get('/meta/categories').then(setCategories);
+    api.get('/meta/super-categories').then(setSupers);
   }, []);
 
   // Variance-only query params (filter / category / grouping) shared by the
@@ -36,6 +39,7 @@ export default function Reports() {
   const varianceParams = report === 'variance'
     ? [
         vFilter === 'counted' ? 'filter=counted' : '',
+        vSuper ? `super_category_id=${vSuper}` : '',
         vCategory ? `category_id=${vCategory}` : '',
         vGroup ? 'group_by=category' : '',
       ].filter(Boolean)
@@ -51,7 +55,7 @@ export default function Reports() {
       .catch((e) => { setData({ error: e.message }); setLoadedReport(forReport); })
       .finally(() => setLoading(false));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [report, auditId, vFilter, vCategory, vGroup]);
+  }, [report, auditId, vFilter, vSuper, vCategory, vGroup]);
 
   const store = audits.find((a) => String(a.id) === String(auditId));
   const filterQs = varianceParams.length ? `&${varianceParams.join('&')}` : '';
@@ -95,14 +99,20 @@ export default function Reports() {
         <div className="flex flex-wrap items-center gap-2 mb-4">
           <button className={vFilter === 'all' ? 'chip-on' : 'chip-off'} onClick={() => setVFilter('all')}>All items</button>
           <button className={vFilter === 'counted' ? 'chip-on' : 'chip-off'} onClick={() => setVFilter('counted')}>Counted only</button>
+          <select className="field py-2 max-w-[220px]" value={vSuper}
+                  onChange={(e) => { setVSuper(e.target.value); setVCategory(''); }}>
+            <option value="">All super categories</option>
+            {supers.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </select>
           <select className="field py-2 max-w-[220px]" value={vCategory} onChange={(e) => setVCategory(e.target.value)}>
             <option value="">All categories</option>
-            {categories.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+            {(vSuper ? categories.filter((c) => String(c.super_category_id) === String(vSuper)) : categories)
+              .map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
           </select>
           <label className="flex items-center gap-2 text-sm text-slate-600 select-none">
             <input type="checkbox" className="h-5 w-5 accent-teal-700"
                    checked={vGroup} onChange={(e) => setVGroup(e.target.checked)} />
-            Group by category
+            Group &amp; subtotal by hierarchy
           </label>
         </div>
       )}
@@ -151,9 +161,16 @@ export default function Reports() {
                 PROVISIONAL — one or more audits are still in progress.
               </div>
             )}
+            <h3 className="font-bold mb-2">By store</h3>
             <Table cols={['Store', 'Date', 'Status', 'Items', 'Uncounted', 'Physical value', 'Total variance', 'Critical']}
                    rows={consolidated.rows.map((r) => [r.store_name, new Date(r.audit_date).toLocaleDateString(),
                      r.status, r.items, r.uncounted, (r.physical_value || 0).toFixed(2), r.total_variance_qty, r.critical_items])} />
+            {/* Super-category-level comparison across stores. */}
+            <h3 className="font-bold mt-6 mb-2">By super category</h3>
+            <Table cols={['Super Category', 'Store', 'Items', 'Physical', 'System', 'Variance', 'Value']}
+                   rows={(consolidated.superCategories || []).map((r) => [
+                     r.super_category, r.store_name, r.items, r.physical_qty,
+                     r.system_qty, r.variance, (r.value || 0).toFixed(2)])} />
           </div>
         )}
       </div>
@@ -176,15 +193,23 @@ function Table({ cols, rows }) {
 function ReportView({ report, data, grouped }) {
   if (data.error) return <p className="text-red-600">{data.error}</p>;
 
+  // R1 — grouped super category → category, with a subtotal per category, a
+  // subtotal per super category, and a grand total.
   if (report === 'physical-summary') {
     return (
       <div className="space-y-6">
-        <div><h3 className="font-bold mb-2">By section</h3>
-          <Table cols={['Section', 'Items', 'Quantity', 'Value']}
-                 rows={data.sections.map((s) => [s.section, s.items, s.qty, s.value.toFixed(2)])} /></div>
-        <div><h3 className="font-bold mb-2">By category</h3>
-          <Table cols={['Section', 'Category', 'Items', 'Quantity', 'Value']}
-                 rows={data.categories.map((c) => [c.section, c.category, c.items, c.qty, c.value.toFixed(2)])} /></div>
+        {data.groups.map((g) => (
+          <div key={g.super_category}>
+            <h3 className="font-bold mb-2">{g.super_category}</h3>
+            <Table cols={['Category', 'Items', 'Quantity', 'Value']} rows={[
+              ...g.categories.map((c) => [c.category, c.items, c.qty, c.value.toFixed(2)]),
+              ['SUBTOTAL', g.items, g.qty, g.value.toFixed(2)],
+            ]} />
+          </div>
+        ))}
+        <div className="rounded-xl bg-slate-100 px-4 py-3 font-bold text-slate-800">
+          Grand total — {data.grand.items} items · quantity {data.grand.qty} · value {data.grand.value.toFixed(2)}
+        </div>
       </div>
     );
   }
@@ -193,9 +218,9 @@ function ReportView({ report, data, grouped }) {
   // redundant "<item> Total" row.
   if (report === 'item-detail') {
     return (
-      <Table cols={['Item', 'Section', 'Category', 'Unit', 'Total quantity', 'Open (ml)']}
+      <Table cols={['Super Category', 'Category', 'Item Name', 'Unit', 'Total quantity', 'Open (ml)']}
              rows={data.rows.map((r) => [
-               r.name, r.section, r.category, r.unit,
+               r.super_category, r.category, r.name, r.unit,
                r.not_applicable ? 'N/A' : (r.is_liquor ? r.total_bottles : r.total_qty),
                r.is_liquor ? r.total_open_ml : '',
              ])} />
@@ -205,34 +230,47 @@ function ReportView({ report, data, grouped }) {
   if (report === 'liquor') {
     return (
       <div>
-        <Table cols={['Brand', 'Sealed bottles', 'Open (ml)']}
-               rows={data.rows.map((r) => [r.brand, r.sealed_bottles, r.open_ml])} />
+        <Table cols={['Super Category', 'Category', 'Brand', 'Unit', 'Sealed bottles', 'Open (ml)']}
+               rows={data.rows.map((r) => [r.super_category, r.category, r.brand, r.unit,
+                 r.sealed_bottles, r.open_ml])} />
         <p className="text-xs text-slate-500 mt-2 italic">{data.footnote}</p>
       </div>
     );
   }
 
-  // R4 — section and category included, exactly as they appear in the item
-  // master. Optionally grouped category-wise for review.
+  // R4 — super category AND category included, exactly as in the item master.
+  // Optionally grouped with subtotals at category and super category level.
   if (report === 'variance') {
-    const cols = ['Item', 'Section', 'Category', 'Unit', 'Physical', 'System', 'Variance', '%', 'Counted', 'Status'];
-    const toRow = (r) => [r.name, r.section, r.category, r.unit, r.physical_qty,
+    const cols = ['Super Category', 'Category', 'Item Name', 'Unit', 'Physical', 'System', 'Variance', '%', 'Counted', 'Status'];
+    const toRow = (r) => [r.super_category, r.category, r.name, r.unit, r.physical_qty,
                           r.system_qty ?? '—', r.variance ?? '—', r.variance_pct ?? '—',
                           r.counted ? 'Yes' : 'No', r.status];
     if (grouped) {
-      const m = new Map();
-      for (const r of data.rows) {
-        const k = r.category || '—';
-        if (!m.has(k)) m.set(k, []);
-        m.get(k).push(r);
-      }
-      const groups = [...m].sort((a, b) => a[0].localeCompare(b[0]));
+      const groups = data.groups || [];
       return (
-        <div className="space-y-5">
-          {groups.map(([cat, list]) => (
-            <div key={cat}>
-              <h3 className="font-bold mb-1">{cat} <span className="font-normal text-slate-400">({list.length})</span></h3>
-              <Table cols={cols} rows={list.map(toRow)} />
+        <div className="space-y-8">
+          {groups.map((g) => (
+            <div key={g.super_category}>
+              <h3 className="font-bold text-lg mb-2">
+                {g.super_category}{' '}
+                <span className="font-normal text-slate-400 text-sm">({g.items} items)</span>
+              </h3>
+              <div className="space-y-4 pl-2">
+                {g.categories.map((c) => (
+                  <div key={c.category}>
+                    <h4 className="font-semibold text-sm text-slate-600 mb-1">
+                      {c.category} <span className="font-normal text-slate-400">({c.items})</span>
+                    </h4>
+                    <Table cols={cols} rows={[
+                      ...c.rows.map(toRow),
+                      ['', `${c.category} SUBTOTAL`, '', '', c.physical_qty, c.system_qty, c.variance, '', '', ''],
+                    ]} />
+                  </div>
+                ))}
+              </div>
+              <div className="mt-2 rounded-lg bg-slate-100 px-3 py-2 text-sm font-bold text-slate-700">
+                {g.super_category} subtotal — physical {g.physical_qty} · system {g.system_qty} · variance {g.variance}
+              </div>
             </div>
           ))}
           {groups.length === 0 && <p className="text-slate-400">No data.</p>}
@@ -245,16 +283,16 @@ function ReportView({ report, data, grouped }) {
   if (report === 'exceptions') {
     return (
       <div className="space-y-5 text-sm">
-        <Section title="Voided entries" cols={['Item', 'Section', 'Category', 'Reason', 'Counted by', 'Voided by']}
-                 rows={data.voided.map((v) => [v.name, v.section, v.category, v.void_reason, v.counted_by_name, v.voided_by_name])} />
-        <Section title="Not applicable" cols={['Item', 'Section', 'Category', 'Reason', 'Marked by']}
-                 rows={data.notApplicable.map((v) => [v.name, v.section, v.category, v.reason, v.marked_by_name])} />
-        <Section title="Multiple entries" cols={['Item', 'Section', 'Category', 'Entries', 'Physical qty']}
-                 rows={data.multiEntry.map((v) => [v.name, v.section, v.category, v.entries, v.physical_qty])} />
-        <Section title="Zero quantity" cols={['Item', 'Section', 'Category', 'Zero entries']}
-                 rows={data.zeroQty.map((v) => [v.name, v.section, v.category, v.zero_entries])} />
-        <Section title="Counted without photo" cols={['Item', 'Section', 'Category', 'Entries']}
-                 rows={data.noPhoto.map((v) => [v.name, v.section, v.category, v.entries])} />
+        <Section title="Voided entries" cols={['Super Category', 'Category', 'Item Name', 'Reason', 'Counted by', 'Voided by']}
+                 rows={data.voided.map((v) => [v.super_category, v.category, v.name, v.void_reason, v.counted_by_name, v.voided_by_name])} />
+        <Section title="Not applicable" cols={['Super Category', 'Category', 'Item Name', 'Reason', 'Marked by']}
+                 rows={data.notApplicable.map((v) => [v.super_category, v.category, v.name, v.reason, v.marked_by_name])} />
+        <Section title="Multiple entries" cols={['Super Category', 'Category', 'Item Name', 'Entries', 'Physical qty']}
+                 rows={data.multiEntry.map((v) => [v.super_category, v.category, v.name, v.entries, v.physical_qty])} />
+        <Section title="Zero quantity" cols={['Super Category', 'Category', 'Item Name', 'Zero entries']}
+                 rows={data.zeroQty.map((v) => [v.super_category, v.category, v.name, v.zero_entries])} />
+        <Section title="Counted without photo" cols={['Super Category', 'Category', 'Item Name', 'Entries']}
+                 rows={data.noPhoto.map((v) => [v.super_category, v.category, v.name, v.entries])} />
       </div>
     );
   }

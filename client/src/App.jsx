@@ -8,7 +8,7 @@ import Login from './pages/Login.jsx';
 // Auditor (mobile) flow
 import StoreSelect from './pages/auditor/StoreSelect.jsx';
 import AuditSession from './pages/auditor/AuditSession.jsx';
-import SectionList from './pages/auditor/SectionList.jsx';
+import SuperCategoryList from './pages/auditor/SuperCategoryList.jsx';
 import ItemList from './pages/auditor/ItemList.jsx';
 import Submit from './pages/auditor/Submit.jsx';
 
@@ -54,8 +54,8 @@ export default function App() {
         {/* ── Auditor (mobile-first) ── */}
         <Route path="/a" element={<RequireRole role="auditor"><StoreSelect /></RequireRole>} />
         <Route path="/a/store/:storeId" element={<RequireRole role="auditor"><AuditSession /></RequireRole>} />
-        <Route path="/a/audit/:auditId" element={<RequireRole role="auditor"><SectionList /></RequireRole>} />
-        <Route path="/a/audit/:auditId/section/:sectionId" element={<RequireRole role="auditor"><ItemList /></RequireRole>} />
+        <Route path="/a/audit/:auditId" element={<RequireRole role="auditor"><SuperCategoryList /></RequireRole>} />
+        <Route path="/a/audit/:auditId/super-category/:superCategoryId" element={<RequireRole role="auditor"><ItemList /></RequireRole>} />
         <Route path="/a/audit/:auditId/submit" element={<RequireRole role="auditor"><Submit /></RequireRole>} />
 
         {/* ── Admin (desktop) ── */}

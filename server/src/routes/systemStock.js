@@ -16,12 +16,17 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 *
 // One template for both kinds of item: liquor columns are left blank on
 // non-liquor rows. Matches exactly what the variance report needs.
 router.get('/template', (_req, res) => {
+  // Mirrors the client's own system export so their file can be uploaded
+  // as-is: LOC is ignored, the hierarchy columns only help identify unmatched
+  // rows, and matching is on Item Name. system_bottles / system_open_ml are
+  // optional extras for liquor, where bottles and ml stay separate.
   const csv = toCsv(
-    ['item_name', 'system_qty', 'system_bottles', 'system_open_ml'],
+    ['LOC', 'Super Category Name', 'Category Name', 'Item Name', 'Unit', 'Closing Qty',
+     'system_bottles', 'system_open_ml'],
     [
-      ['Refined Oil', '24.5', '', ''],
-      ['Paneer', '7.6', '', ''],
-      ['Old Monk Rum', '', '3', '400'],
+      ['M3M', 'FOOD', 'PROVISION', 'Refined Oil', 'CAN (5 LTR)', '24.5', '', ''],
+      ['M3M', 'FOOD', 'DAIRY', 'Paneer', 'TIN (850 GM)', '7.6', '', ''],
+      ['M3M', 'LIQUOR', 'LIQUOR', 'Old Monk Rum', 'BTL (750 ML)', '3', '3', '400'],
     ]
   );
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
@@ -34,12 +39,16 @@ router.get('/template', (_req, res) => {
 router.get('/:auditId', async (req, res) => {
   const { rows } = await query(
     `SELECT i.id AS item_id, i.name, i.unit, i.is_liquor, i.bottle_size_ml,
+            COALESCE(sc.name,'—') AS super_category, COALESCE(c.name,'—') AS category,
+            i.super_category_id, i.category_id,
             ss.qty, ss.bottles, ss.open_ml,
             (ss.item_id IS NOT NULL) AS has_system
        FROM items i
+       LEFT JOIN super_categories sc ON sc.id = i.super_category_id
+       LEFT JOIN categories c ON c.id = i.category_id
        LEFT JOIN system_stock ss ON ss.item_id = i.id AND ss.audit_id = $1
       WHERE i.is_active = TRUE
-      ORDER BY i.name`,
+      ORDER BY sc.sort_order NULLS LAST, sc.name, c.name, i.name`,
     [req.params.auditId]
   );
   res.json(rows);
@@ -67,9 +76,22 @@ router.put('/:auditId/item/:itemId', async (req, res) => {
 });
 
 // ── CSV analysis shared by preview and commit ───────────────────────────────
+// The client's own system export uses these headers:
+//     LOC, Super Category Name, Category Name, Item Name, Unit, Closing Qty
+// which the CSV parser lower-cases. Both that format and our own template are
+// accepted. LOC is ignored; the hierarchy columns are carried through only to
+// help identify unmatched rows in the preview — MATCHING IS ON ITEM NAME.
+const pickName = (r) => r.item_name ?? r['item name'] ?? r.name;
+const pickQty = (r) => r.system_qty ?? r['closing qty'] ?? r.closing_qty;
+const pickSuper = (r) => r.super_category ?? r['super category name'] ?? r.super_category_name ?? '';
+const pickCategory = (r) => r.category ?? r['category name'] ?? r.category_name ?? '';
+
 async function analyse(records) {
   const { rows: items } = await query(
     'SELECT id, name, is_liquor FROM items WHERE is_active = TRUE');
+  // Both sides are trimmed and internal double spaces collapsed before
+  // comparing — the client's export contains trailing and doubled spaces and
+  // those must never cause a false mismatch.
   const byName = new Map(items.map((i) => [nameKey(i.name), i]));
 
   const matched = [];
@@ -79,34 +101,51 @@ async function analyse(records) {
 
   records.forEach((r, idx) => {
     const row = idx + 2;
-    const name = normalizeName(r.item_name ?? r.name);
-    if (!name) { invalid.push({ row, name: '', error: 'item_name is required' }); return; }
+    const name = normalizeName(pickName(r));
+    if (!name) { invalid.push({ row, name: '', error: 'Item Name is required' }); return; }
     const key = nameKey(name);
     if (seen.has(key)) { invalid.push({ row, name, error: 'duplicate name within file' }); return; }
     seen.add(key);
 
     const item = byName.get(key);
-    if (!item) { unmatched.push({ row, name }); return; }
+    if (!item) {
+      // Report the client's own hierarchy labels so an unmatched row is easy
+      // to locate in their export.
+      unmatched.push({
+        row, name,
+        super_category: normalizeName(pickSuper(r)),
+        category: normalizeName(pickCategory(r)),
+      });
+      return;
+    }
 
     const num = (v) => (v == null || String(v).trim() === '' ? null : Number(v));
-    const qty = num(r.system_qty);
+    const closing = num(pickQty(r));
     const bottles = num(r.system_bottles);
     const openMl = num(r.system_open_ml);
-    if ([qty, bottles, openMl].some((v) => v != null && Number.isNaN(v))) {
+    if ([closing, bottles, openMl].some((v) => v != null && Number.isNaN(v))) {
       invalid.push({ row, name, error: 'quantities must be numbers' }); return;
     }
-    if (item.is_liquor && qty != null && bottles == null && openMl == null) {
-      invalid.push({ row, name, error: 'liquor item: use system_bottles / system_open_ml' }); return;
+
+    if (item.is_liquor) {
+      // Liquor keeps bottles and ml separate. Our own template supplies both
+      // columns; the client's single Closing Qty column is the sealed-bottle
+      // count, with open ml defaulting to 0 until entered.
+      matched.push({
+        row, name, item_id: item.id, is_liquor: true,
+        qty: null,
+        bottles: bottles ?? closing ?? 0,
+        open_ml: openMl ?? 0,
+      });
+    } else {
+      if (closing == null && (bottles != null || openMl != null)) {
+        invalid.push({ row, name, error: 'non-liquor item: use system_qty / Closing Qty' }); return;
+      }
+      matched.push({
+        row, name, item_id: item.id, is_liquor: false,
+        qty: closing, bottles: null, open_ml: null,
+      });
     }
-    if (!item.is_liquor && qty == null && (bottles != null || openMl != null)) {
-      invalid.push({ row, name, error: 'non-liquor item: use system_qty' }); return;
-    }
-    matched.push({
-      row, name, item_id: item.id, is_liquor: item.is_liquor,
-      qty: item.is_liquor ? null : qty,
-      bottles: item.is_liquor ? (bottles ?? 0) : null,
-      open_ml: item.is_liquor ? (openMl ?? 0) : null,
-    });
   });
   return { matched, unmatched, invalid };
 }
@@ -117,8 +156,9 @@ router.post('/:auditId/preview', upload.single('file'), async (req, res) => {
   const text = req.file ? req.file.buffer.toString('utf8') : req.body?.csv;
   if (!text) return res.status(400).json({ error: 'No CSV provided' });
   const { headers, records } = parseCsvObjects(text);
-  if (!headers.includes('item_name')) {
-    return res.status(400).json({ error: 'Missing required column: item_name' });
+  // Accept our template (item_name) or the client's export (Item Name).
+  if (!headers.includes('item_name') && !headers.includes('item name') && !headers.includes('name')) {
+    return res.status(400).json({ error: 'Missing required column: Item Name (or item_name)' });
   }
   const { matched, unmatched, invalid } = await analyse(records);
   const { rows: existing } = await query(

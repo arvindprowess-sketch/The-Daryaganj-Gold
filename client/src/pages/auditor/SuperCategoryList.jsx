@@ -4,24 +4,33 @@ import { api } from '../../lib/api.js';
 import MobileHeader from '../../components/MobileHeader.jsx';
 import { Spinner, ProgressBar } from '../../components/ui.jsx';
 
-// M4 — Section list: cards with progress bars (counted / total).
-export default function SectionList() {
+// ═══════════════════════════════════════════════════════════════════════════
+// M4 — Super category cards with progress.
+//
+// The auditor sees SUPER CATEGORIES ONLY. Categories are never a navigation
+// level on mobile: they would clutter the flow and confuse the counter.
+// Tapping a card goes STRAIGHT to the item list for that super category —
+// there is no intermediate category screen. (Categories are still stored on
+// every item and appear across the admin console and every report.)
+// ═══════════════════════════════════════════════════════════════════════════
+export default function SuperCategoryList() {
   const { auditId } = useParams();
   const nav = useNavigate();
-  const [sections, setSections] = useState(null);
+  const [groups, setGroups] = useState(null);
   const [audit, setAudit] = useState(null);
 
   const load = useCallback(() => {
     api.get(`/audits/${auditId}`).then(setAudit);
-    api.get(`/audits/${auditId}/sections`).then(setSections);
+    // One aggregate query server-side — no per-item loading.
+    api.get(`/audits/${auditId}/super-categories`).then(setGroups);
   }, [auditId]);
 
   useEffect(() => { load(); }, [load]);
 
-  if (!sections) return <Spinner label="Loading sections…" />;
+  if (!groups) return <Spinner label="Loading…" />;
 
-  const totalCounted = sections.reduce((s, x) => s + x.counted, 0);
-  const totalItems = sections.reduce((s, x) => s + x.total, 0);
+  const totalCounted = groups.reduce((s, x) => s + x.counted, 0);
+  const totalItems = groups.reduce((s, x) => s + x.total, 0);
 
   return (
     <div className="min-h-full pb-24">
@@ -39,14 +48,17 @@ export default function SectionList() {
           <ProgressBar value={totalCounted} total={totalItems} />
         </div>
 
-        {sections.map((s) => (
-          <button key={s.id} onClick={() => nav(`/a/audit/${auditId}/section/${s.id}`)}
+        {groups.map((g) => (
+          <button key={g.id}
+                  onClick={() => nav(`/a/audit/${auditId}/super-category/${g.id}`)}
                   className="card w-full text-left p-4 active:scale-[0.99]">
             <div className="flex items-center justify-between mb-2">
-              <span className="font-bold">{s.name}</span>
-              <span className="text-sm text-slate-500">{s.counted} / {s.total} counted</span>
+              <span className="font-bold">{g.name}</span>
+              <span className="text-sm text-slate-500 whitespace-nowrap">
+                {g.counted} / {g.total} counted
+              </span>
             </div>
-            <ProgressBar value={s.counted} total={s.total} />
+            <ProgressBar value={g.counted} total={g.total} />
           </button>
         ))}
       </div>

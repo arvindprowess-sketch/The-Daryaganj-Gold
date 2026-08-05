@@ -128,7 +128,10 @@ export default function ItemEntry({ auditId, item, onClose, onSaved, uploadOnly 
       </div>
       <div className="flex items-center justify-between mb-3">
         <div className="font-bold text-lg">{item.name}</div>
-        <div className="text-sm text-slate-500">Unit: {item.is_liquor ? 'Bottle' : item.unit}</div>
+        {/* Unit is READ-ONLY here and shown exactly as the master supplies it.
+            The auditor never chooses or edits a unit. The category is
+            deliberately not displayed — the counter does not need it. */}
+        <div className="text-sm text-slate-500">Unit: {item.unit}</div>
       </div>
 
       {/* Prior entries (read-only). Void shown struck through. */}

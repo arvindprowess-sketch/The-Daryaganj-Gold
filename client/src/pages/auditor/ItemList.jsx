@@ -4,33 +4,44 @@ import { api, bustCache } from '../../lib/api.js';
 import MobileHeader from '../../components/MobileHeader.jsx';
 import { Spinner, PhotoThumb } from '../../components/ui.jsx';
 import ItemEntry from '../../components/ItemEntry.jsx';
+import VirtualList from '../../components/VirtualList.jsx';
 import useDebounced, { normalizeName } from '../../lib/useDebounced.js';
 
-// M5 — Item list: category chips, search, sticky All/Not counted/Counted.
+// ═══════════════════════════════════════════════════════════════════════════
+// M5 — Item list for one SUPER CATEGORY.
+//
+//  * Rows show item name, unit and photo only. The CATEGORY IS NOT SHOWN —
+//    the auditor does not need it (it is on the admin console and in reports).
+//  * Search covers the WHOLE STORE, not just the current super category, so a
+//    counter who finds an item in the wrong place can still record it.
+//  * The list is virtualised: FOOD alone has ~299 items.
+// ═══════════════════════════════════════════════════════════════════════════
 export default function ItemList() {
-  const { auditId, sectionId } = useParams();
-  const [items, setItems] = useState(null);
-  const [categories, setCategories] = useState([]);
-  const [section, setSection] = useState(null);
-  const [cat, setCat] = useState('');       // category filter
+  const { auditId, superCategoryId } = useParams();
+  const [items, setItems] = useState(null);        // this super category
+  const [allItems, setAllItems] = useState(null);  // whole store, for search
+  const [superCategory, setSuperCategory] = useState(null);
   const [status, setStatus] = useState('all');
   const [search, setSearch] = useState('');
   const debouncedSearch = useDebounced(search, 250);
-  const [active, setActive] = useState(null); // item open in the entry sheet
-  const scrollRef = useRef(0);                // remembered scroll position
+  const [active, setActive] = useState(null);
+  const scrollRef = useRef(0);
 
   const load = useCallback(() => {
-    return api.get(`/audits/${auditId}/items?section_id=${sectionId}`).then(setItems);
-  }, [auditId, sectionId]);
+    return Promise.all([
+      api.get(`/audits/${auditId}/items?super_category_id=${superCategoryId}`).then(setItems),
+      api.get(`/audits/${auditId}/items`).then(setAllItems),
+    ]);
+  }, [auditId, superCategoryId]);
 
   useEffect(() => { load(); }, [load]);
   useEffect(() => {
-    api.get('/meta/categories').then(setCategories);
-    api.get('/meta/sections').then((s) => setSection(s.find((x) => String(x.id) === String(sectionId))));
-  }, [sectionId]);
+    api.get('/meta/super-categories')
+      .then((list) => setSuperCategory(list.find((x) => String(x.id) === String(superCategoryId))));
+  }, [superCategoryId]);
 
-  // Opening the sheet remembers where the user was; closing restores it so the
-  // list does not jump back to the top after saving an entry (#6).
+  // Opening the sheet remembers the scroll position; closing restores it, so
+  // the list does not jump to the top after saving an entry.
   function openItem(item) {
     scrollRef.current = window.scrollY;
     setActive(item);
@@ -40,87 +51,77 @@ export default function ItemList() {
     requestAnimationFrame(() => window.scrollTo(0, scrollRef.current));
   }
 
-  const sectionCats = useMemo(
-    () => categories.filter((c) => String(c.section_id) === String(sectionId)),
-    [categories, sectionId]
-  );
+  const searching = normalizeName(debouncedSearch).length > 0;
 
-  // Search, category chip and All/Counted/Not-counted all apply together.
   const filtered = useMemo(() => {
-    if (!items) return [];
+    // While searching, look across the whole store; otherwise stay within the
+    // chosen super category.
+    const source = (searching ? allItems : items) || [];
     const q = normalizeName(debouncedSearch);
-    return items.filter((i) => {
-      if (cat && String(i.category_id) !== String(cat)) return false;
+    return source.filter((i) => {
       if (status === 'counted' && !i.counted) return false;
       if (status === 'notcounted' && i.counted) return false;
       if (q && !normalizeName(i.name).includes(q)) return false;
       return true;
     });
-  }, [items, cat, status, debouncedSearch]);
+  }, [items, allItems, status, debouncedSearch, searching]);
 
   if (!items) return <Spinner label="Loading items…" />;
 
+  const renderRow = (i) => (
+    <button onClick={() => openItem(i)}
+            className="w-full h-full flex items-center gap-3 px-3 text-left active:bg-slate-50 border-b border-slate-100">
+      <PhotoThumb src={bustCache(i.photo_url, i.photo_version)} size={60} />
+      <div className="flex-1 min-w-0">
+        <div className="font-bold truncate">{i.name}</div>
+        {/* Unit is shown exactly as the master supplies it. */}
+        <div className="text-sm text-slate-500 truncate">{i.unit}</div>
+        {i.not_applicable && <div className="text-xs text-amber-600">Not applicable</div>}
+      </div>
+      <div className="text-right shrink-0">
+        {i.counted ? (
+          <div className="flex items-center gap-1 justify-end">
+            <span className="text-green-600 text-lg">✓</span>
+            <span className="font-semibold">
+              {i.is_liquor
+                ? `${i.total_bottles ?? 0} btl`
+                : `${Number(i.total_qty ?? 0).toFixed(i.total_qty % 1 ? 3 : 0)}`}
+            </span>
+          </div>
+        ) : (
+          <span className="inline-block h-3 w-3 rounded-full bg-slate-300" />
+        )}
+      </div>
+    </button>
+  );
+
   return (
     <div className="min-h-full pb-6">
-      <MobileHeader title={section?.name || 'Items'}
+      <MobileHeader title={superCategory?.name || 'Items'}
                     subtitle={`${items.filter((i) => i.counted).length} / ${items.length} counted`}
                     back={`/a/audit/${auditId}`} />
 
+      {/* Sticky search + status filter — stays put while the list scrolls. */}
       <div className="sticky top-[56px] z-10 bg-slate-100/95 backdrop-blur px-3 pt-3 pb-2 space-y-2">
-        <input className="field py-2.5" placeholder="Search item…"
+        <input className="field py-2.5" placeholder="Search item (whole store)…"
                value={search} onChange={(e) => setSearch(e.target.value)} />
-        {/* Category chips */}
-        {sectionCats.length > 0 && (
-          <div className="flex gap-2 overflow-x-auto no-scrollbar">
-            <button className={cat === '' ? 'chip-on' : 'chip-off'} onClick={() => setCat('')}>All categories</button>
-            {sectionCats.map((c) => (
-              <button key={c.id} className={String(cat) === String(c.id) ? 'chip-on' : 'chip-off'}
-                      onClick={() => setCat(String(c.id))}>{c.name}</button>
-            ))}
-          </div>
-        )}
-        {/* Status filter */}
         <div className="flex gap-2">
           {[['all', 'All'], ['notcounted', 'Not counted'], ['counted', 'Counted']].map(([k, label]) => (
             <button key={k} onClick={() => setStatus(k)}
                     className={`flex-1 ${status === k ? 'chip-on' : 'chip-off'} justify-center`}>{label}</button>
           ))}
         </div>
+        {searching && (
+          <p className="text-xs text-slate-500">
+            Searching all super categories — {filtered.length} match{filtered.length === 1 ? '' : 'es'}.
+          </p>
+        )}
       </div>
 
-      <div className="px-3 divide-y">
-        {filtered.map((i) => (
-          <button key={i.id} onClick={() => openItem(i)}
-                  className="w-full flex items-center gap-3 py-3 text-left active:bg-slate-50">
-            <PhotoThumb src={bustCache(i.photo_url, i.photo_version)} size={64} />
-            <div className="flex-1 min-w-0">
-              <div className="font-bold truncate">{i.name}</div>
-              <div className="text-sm text-slate-500">{i.is_liquor ? 'Bottle · liquor' : i.unit}</div>
-              {i.not_applicable && <div className="text-xs text-amber-600">Not applicable</div>}
-            </div>
-            <div className="text-right">
-              {i.counted ? (
-                <div className="flex items-center gap-1 justify-end">
-                  <span className="text-green-600 text-lg">✓</span>
-                  <span className="font-semibold">
-                    {i.is_liquor
-                      ? `${i.total_bottles ?? 0} btl`
-                      : `${Number(i.total_qty ?? 0).toFixed(i.total_qty % 1 ? 3 : 0)}`}
-                  </span>
-                </div>
-              ) : (
-                <span className="inline-block h-3 w-3 rounded-full bg-slate-300" />
-              )}
-            </div>
-          </button>
-        ))}
-        {filtered.length === 0 && <div className="p-8 text-center text-slate-400">No items match.</div>}
-      </div>
+      <VirtualList items={filtered} rowHeight={80} renderRow={renderRow} />
 
       {active && (
-        <ItemEntry auditId={auditId} item={active}
-                   onClose={closeSheet}
-                   onSaved={load} />
+        <ItemEntry auditId={auditId} item={active} onClose={closeSheet} onSaved={load} />
       )}
     </div>
   );

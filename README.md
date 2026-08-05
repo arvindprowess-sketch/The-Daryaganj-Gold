@@ -18,6 +18,50 @@ sessions, enter system stock, and generate reports.
 > every comparison (CSV import, photo matching, system stock) trims whitespace,
 > collapses internal double spaces, and ignores case.
 
+## Item hierarchy
+
+The app mirrors the client's own inventory master, because our reports have to
+reconcile against their system:
+
+```
+super_categories  →  categories  →  items
+```
+
+Both levels are **ordinary admin-manageable rows**, not hardcoded constants —
+the client can add a super category or a category at any time (Item master →
+CSV import creates unknown levels, or manage them directly via the meta API).
+
+The seeded structure uses the client's names **exactly as they write them**
+(same spelling, same case) so reports reconcile without manual translation:
+
+| Super category | Categories |
+|---|---|
+| `FOOD` | PROVISION, SEMI FINISHED, VEGETABLES & FRUITS, BUTCHERY, DAIRY |
+| `NON FOOD` | CONSUMABLE, PRINTABLE, HK, CHEMICAL, PACKAGING |
+| `CCG` | BAR WARE, BAR GLASSWARE, CROCKERY, CUTLERY, SERVICE WARE |
+| `LIQUOR` | LIQUOR |
+| `BEVERAGES` | BEVERAGES |
+
+**Where each level is visible**
+
+- **Auditors (mobile) see SUPER CATEGORIES ONLY** — five cards, and tapping one
+  goes straight to the item list. Categories are never a navigation level on
+  the phone; they would clutter the flow and confuse the counter.
+- **Categories are stored on every item** and appear throughout the admin
+  console and in **every report**.
+
+## Unit is plain text
+
+Unit is a label that comes from the client's master and is displayed **exactly
+as uploaded, character for character**. There is no dropdown, no reference
+table, no autocomplete, and no normalisation beyond stripping leading/trailing
+whitespace. Strings such as `CAN (5 LTR)`, `BTL (500 ML)`, `TIN (850 GM)`,
+`POR`, `BOT-680G` and `Pkt (50 pcs)` all round-trip unchanged, and an
+unrecognised unit **never** rejects a CSV row.
+
+The auditor never chooses or edits a unit — it is read-only on every counting
+screen. An admin can edit it as free text on the item master.
+
 ## Non-negotiable design rules (audit defensibility)
 
 These are enforced in code, not just the UI:
@@ -93,14 +137,32 @@ The seed prints credentials to the console:
 
 ```
 ADMIN    username: admin    password: admin123
-AUDITOR  username: rakesh   password: rakesh123   (Aerocity + CP)
-AUDITOR  username: sunil    password: sunil123    (Aerocity)
+AUDITOR  username: rakesh   password: rakesh123   (M3M)
+AUDITOR  username: sunil    password: sunil123    (M3M)
 ```
 
-It creates 4 sections, 8 categories, 2 stores, 3 users, 30 items (22 regular +
-8 liquor), and **one open audit** with sample entries — including an item with
-**two entries at different locations** (append-only) and a **voided entry**, so
-the append-only and void behaviour is visible immediately.
+It creates the client's hierarchy (5 super categories, 17 categories), the
+**M3M** store, 3 users, the **618-item master (64 liquor)**, and **one open
+audit** with sample entries — including an item with **two entries at different
+locations** (append-only) and a **voided entry**, so the append-only and void
+behaviour is visible immediately.
+
+### Seeding the real item master
+
+The seed prefers the client's own export. Drop it at:
+
+```
+server/seed/Item_Master_Import_Ready.csv
+```
+
+with columns `item_name, super_category, category, unit, is_liquor,
+bottle_size_ml, rate`, then run `npm run seed`. It is used verbatim — units
+included.
+
+If that file is **absent**, the seed generates a **stand-in master** at the same
+volume and distribution (FOOD 299 · NON FOOD 128 · CCG 70 · LIQUOR 64 ·
+BEVERAGES 57 = 618) so the app can be exercised at realistic scale, and prints a
+warning saying so. Those names are placeholders, **not client data**.
 
 ## 4. Run
 
@@ -199,23 +261,31 @@ a report given to the client.
 
 Admin only. Each exports to **Excel (.xlsx, SheetJS)** and **PDF (pdfkit)**.
 
-Every item-level report carries **Section** and **Category**, exactly as they
-appear in the item master.
+Every report carries **both hierarchy levels**, in a standard column order:
 
-- **R1** Physical Stock Summary — section-wise and category-wise qty & value
+```
+Super Category | Category | Item Name | Unit | ... figures ...
+```
+
+- **R1** Physical Stock Summary — grouped super category → category, with a
+  subtotal per category, a subtotal per super category, and a grand total
 - **R2** Item Detail — one line per item with its total (totals only)
-- **R3** Liquor Report — sealed bottles and open ml kept **separate**
-  (footnote: "Open bottle quantities are recorded by visual estimation.")
+- **R3** Liquor Report — structure unchanged; sealed bottles and open ml stay
+  **separate** and are never combined. Super category and category added for
+  consistency. (Footnote: "Open bottle quantities are recorded by visual
+  estimation.")
 - **R4** Variance Report — physical − system, with % and status bands read from
   the **settings** table (liquor 2%/4%, others 1%/3% defaults — not hardcoded).
-  Includes Section and Category, a **category filter** and a **group-by-category**
-  option; both apply to the on-screen view and to the Excel/PDF exports.
+  Includes Super Category and Category, **filters on both levels**, and a
+  **group-and-subtotal** option producing subtotals at category and super
+  category level; all apply to the on-screen view and to the Excel/PDF exports.
   While an audit is `open` the variance is **PROVISIONAL**: a banner reports how
   many items are still uncounted, an *Uncounted* column and an
   [All items | Counted only] filter are available, and any export is stamped
   `PROVISIONAL` in the file header and filename. The warning disappears once the
   auditor submits the count (audit status `submitted`).
-- **R5** Consolidated — all stores, comparative aggregate variance
+- **R5** Consolidated — all stores, comparative aggregate variance, plus a
+  **super-category-level comparison across stores**
 - **R6** Exception Report — voided entries, Not-Applicable items, items with
   multiple entries, zero-quantity entries, and items counted without a photo
 
@@ -229,6 +299,42 @@ filter. On mobile the search box stays **sticky** at the top while the list
 scrolls.
 
 ---
+
+## System stock import
+
+Admin only; never exposed to the auditor role. The importer accepts **the
+client's own system export directly**:
+
+```
+LOC, Super Category Name, Category Name, Item Name, Unit, Closing Qty
+```
+
+- `Item Name` → the item (this is what matching is done on)
+- `Closing Qty` → the system quantity
+- `LOC` is ignored
+- `Super Category Name` / `Category Name` are used only to help identify
+  unmatched rows in the preview
+
+Names are compared with leading/trailing spaces trimmed and internal double
+spaces collapsed **on both sides**, so the trailing and doubled spaces in the
+client's export never cause a false mismatch. The preview reports matched /
+unmatched counts before anything is written, unmatched names are listed
+explicitly rather than ignored, and a re-import **replaces** that audit's system
+stock behind a confirmation prompt.
+
+For liquor the single `Closing Qty` column is read as the sealed-bottle count;
+optional `system_bottles` / `system_open_ml` columns keep bottles and ml
+separate, exactly as the physical count does.
+
+## Performance at 618 items per store
+
+- The mobile item list is **virtualised** — roughly 16 rows are mounted for a
+  299-item super category instead of all 299.
+- Search is **debounced** (250 ms) and item name is indexed (`pg_trgm` GIN
+  index plus a unique `lower(name)` index).
+- Super-category and category progress counts are computed by a **single
+  aggregate query** each (~0.6 ms measured), never by loading every item.
+- Reports and exports over 618 rows complete in well under a second.
 
 ## Photo storage (object storage, never the database)
 

@@ -10,14 +10,14 @@ export default function Submit() {
   const { auditId } = useParams();
   const nav = useNavigate();
   const [uncounted, setUncounted] = useState(null);
-  const [sections, setSections] = useState([]);
+  const [groups, setGroups] = useState([]);
   const [done, setDone] = useState(false);
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(() => {
     api.get(`/audits/${auditId}/uncounted`).then(setUncounted);
-    api.get(`/audits/${auditId}/sections`).then(setSections);
+    api.get(`/audits/${auditId}/super-categories`).then(setGroups);
   }, [auditId]);
   useEffect(() => { load(); }, [load]);
 
@@ -43,8 +43,8 @@ export default function Submit() {
 
   if (!uncounted) return <Spinner label="Checking progress…" />;
 
-  const counted = sections.reduce((s, x) => s + x.counted, 0);
-  const total = sections.reduce((s, x) => s + x.total, 0);
+  const counted = groups.reduce((s, x) => s + x.counted, 0);
+  const total = groups.reduce((s, x) => s + x.total, 0);
 
   if (done) {
     return (
@@ -56,7 +56,7 @@ export default function Submit() {
           <p className="text-slate-600 mb-6">
             {counted} of {total} items accounted for at this store. The admin will review and close the audit.
           </p>
-          <button className="btn-primary w-full" onClick={() => nav(`/a/audit/${auditId}`)}>Back to sections</button>
+          <button className="btn-primary w-full" onClick={() => nav(`/a/audit/${auditId}`)}>Back to super categories</button>
         </div>
       </div>
     );
