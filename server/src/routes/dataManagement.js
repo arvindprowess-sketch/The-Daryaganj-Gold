@@ -4,7 +4,7 @@ import { requireAuth, requireRole } from '../middleware/auth.js';
 import { requireIntParams } from '../lib/asyncRoutes.js';
 import { logActivity } from '../lib/activityLog.js';
 import { removePhotos, storage, keyFromUrl } from '../lib/storage.js';
-import { config } from '../config.js';
+import { config, productionConfigChecks } from '../config.js';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // DESTRUCTIVE DATA MANAGEMENT — admin only, every operation guarded.
@@ -365,6 +365,13 @@ router.get('/readiness', async (req, res) => {
   }
 
   const checks = [
+    // Configuration first: these are the ones that make everything else moot.
+    // Outside production they are advisory; in production the server refuses
+    // to start at all, so seeing a failure here means the deploy is not live.
+    ...productionConfigChecks().map((c) => ({
+      key: c.key, label: c.label, ok: c.ok, blocking: c.blocking, advisory: c.advisory,
+      detail: c.ok || !c.advisory ? c.detail : `${c.detail} Required before deploying to production.`,
+    })),
     { key: 'demo_data', label: 'Demo data present', ok: !demo.present,
       detail: demo.present
         ? `${demo.users} users, ${demo.stores} stores, ${demo.items} items, ${demo.audits} audits, ${demo.entries} entries`
@@ -389,7 +396,10 @@ router.get('/readiness', async (req, res) => {
   ];
 
   res.json({
-    ready: checks.every((c) => c.ok),
+    // An advisory row (a production config check seen from a development
+    // environment) is something to fix before deploying, not a reason to say
+    // this environment cannot count tonight.
+    ready: checks.every((c) => c.ok || c.advisory),
     environment: config.nodeEnv,
     checks,
     demo,

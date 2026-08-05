@@ -138,6 +138,9 @@ and categories, so running it on a live deployment is safe.
 
 ### Going live (production)
 
+First set the three variables the API refuses to start without — see
+[Production configuration](#production-configuration) — then:
+
 ```bash
 npm run migrate
 npm run seed                                   # hierarchy only
@@ -255,7 +258,7 @@ a report given to the client.
 
 ## Reports
 
-Admin only. Each exports to **Excel (.xlsx, SheetJS)** and **PDF (pdfkit)**.
+Admin only. Each exports to **Excel (.xlsx, exceljs)** and **PDF (pdfkit)**.
 
 Every report carries **both hierarchy levels**, in a standard column order:
 
@@ -395,6 +398,105 @@ separate, exactly as the physical count does.
 - Super-category and category progress counts are computed by a **single
   aggregate query** each (~0.6 ms measured), never by loading every item.
 - Reports and exports over 618 rows complete in well under a second.
+
+## Security
+
+### Production configuration
+
+The API **refuses to start** when `NODE_ENV=production` and any of these is
+still on a development value. It prints what is wrong and exits with code 1
+rather than serving a single request on a known-compromisable configuration.
+
+| Variable | Rejected when | Why |
+| --- | --- | --- |
+| `JWT_SECRET` | unset, equal to the `dev-insecure-secret-change-me` fallback in `config.js`, shorter than 32 characters, or still a recognisable placeholder (`change-me…`, `your-secret…`, `example…`) | Both fallbacks are **public in this repository**. Anyone holding the value can mint a valid admin token. |
+| `DATABASE_URL` | unset or equal to `postgres://audix:audix@localhost:5432/audix` | The default carries the credentials `audix/audix`. |
+| `CLIENT_ORIGIN` | `*` | A wildcard reflects whatever `Origin` the browser sends, which defeats CORS entirely when requests carry a token. Give an explicit comma-separated list. |
+
+Generate a secret with:
+
+```bash
+node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))"
+```
+
+Outside production the same problems are printed as a warning and the server
+runs — development is meant to work with no setup.
+
+All three appear on **Admin → System Readiness**. In production a failure is
+badged *blocks startup*; in development it shows as an amber advisory ("Required
+before deploying to production") and does not count against "ready to count".
+The `DATABASE_URL` password is redacted everywhere it is displayed or logged.
+
+### Rate limiting
+
+`express-rate-limit`, on the authentication endpoints **only**:
+
+| Endpoint | Limit | Why |
+| --- | --- | --- |
+| `POST /api/auth/login` | 10 per IP per 15 min | The one place an attacker can guess their way in. |
+| `POST /api/auth/refresh` | 60 per IP per 15 min | Called automatically by every open tab, so the ceiling is far higher; it exists to stop a stolen refresh token being ground against the endpoint. |
+
+Exceeding a limit returns **429** with a plain-English message in the same
+`{ error }` shape as everything else, so the client shows it like any other
+message rather than "Request failed (429)".
+
+**Counting endpoints are deliberately not limited.** An auditor working through
+618 items submits entries as fast as they can type; throttling that would break
+a count night. Verified: 60 consecutive `POST /audits/:id/entries` all return
+201.
+
+> **Operational note.** The limit is per IP. If the whole firm counts from one
+> office behind a single NAT address, ten mistyped passwords between them will
+> lock out everyone at that address for 15 minutes. Auditors on mobile data each
+> have their own address and are unaffected. Raise the login limit in
+> `server/src/middleware/rateLimit.js` if that turns out to bite.
+
+Behind a reverse proxy (Render, Fly, nginx, Cloudflare) the app sets
+`trust proxy = 1` in production, so `req.ip` is the client address rather than
+the proxy's — otherwise the limiter would treat the entire firm as one client.
+One hop only: trusting the whole `X-Forwarded-For` chain would let a client
+spoof its own address and walk straight past the limiter.
+
+### Failed sign-ins are in the audit trail
+
+Every rejected login writes an `activity_log` row: the username tried, the
+reason (`unknown_username`, `wrong_password`, `account_inactive`), the source
+IP and the user agent. **The password is never recorded.** The HTTP response
+stays identical for every case so it cannot be used to discover which usernames
+exist — only the log distinguishes them.
+
+### Security headers
+
+`helmet` with its defaults: CSP, `X-Content-Type-Options: nosniff`,
+`X-Frame-Options`, `Referrer-Policy`, HSTS.
+
+One deliberate adjustment: photos are served from the object-storage host, which
+the default `img-src 'self'` would block. Rather than turning CSP off, the host
+is allow-listed — `img-src` is built from `S3_PUBLIC_URL` and `S3_ENDPOINT`, so
+configuring storage automatically configures the policy:
+
+```
+img-src 'self' data: blob: https://photos.example.com https://<account>.r2.cloudflarestorage.com
+```
+
+### Dependencies
+
+`npm audit` reports **0 vulnerabilities** in `server/`.
+
+- **sharp** upgraded to `^0.35.3` — `<0.35.0` inherited four libvips CVEs
+  (GHSA-f88m-g3jw-g9cj). Both upload paths were re-verified end to end: a
+  1400×900 PNG through `POST /api/upload` and through bulk photo upload comes
+  back a 1200×771 JPEG, stored and served correctly.
+- **xlsx (SheetJS) removed, replaced with exceljs.** `xlsx@0.18.5` carried two
+  high-severity advisories — prototype pollution (GHSA-4r6h-8v6p-xvw6) and a
+  ReDoS (GHSA-5pgg-2g8v-p4x9) — with **no patched release available**, so
+  upgrading was not an option. Only `buildWorkbook()` used it. All six Excel
+  reports were re-verified after the swap, including multi-sheet workbooks and
+  the PROVISIONAL banner rows.
+- **uuid** is pinned via an `overrides` entry to `^11.1.1`. exceljs depends on
+  `uuid@8`, which carries a moderate advisory. exceljs only calls `v4()` and the
+  advisory affects `v3/v5/v6` with a `buf` argument, so it was not reachable —
+  the override clears it regardless.
 
 ## Data management and production safety
 

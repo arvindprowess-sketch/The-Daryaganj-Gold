@@ -16,8 +16,8 @@ const n = (v) => (v == null ? '' : v);
 // Reports given to the client show TOTALS ONLY — one line per item. The
 // per-entry breakdown lives on the admin count screen, never in a report.
 
-function sendXlsx(res, filename, sheets) {
-  const buf = buildWorkbook(sheets);
+async function sendXlsx(res, filename, sheets) {
+  const buf = await buildWorkbook(sheets);
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
   res.setHeader('Content-Disposition', `attachment; filename="${filename}.xlsx"`);
   res.send(buf);
