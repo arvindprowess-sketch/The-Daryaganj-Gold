@@ -40,11 +40,19 @@ Build & preview the full-stack app from https://github.com/arvindprowess-sketch/
 - **Domain plan**: attach as a **subdomain** (e.g. `audit.<user-domain>`) via Emergent "Link domain" → Entri CNAME. Root domain's existing website untouched. Deployment = 50 credits/month, can be shut down after the 7-day trial; redeploys are free.
 
 ## Pending before deploy
-- Set `CLIENT_ORIGIN` + `PUBLIC_BASE_URL` to the final subdomain.
-- Photos: `STORAGE_DRIVER=local` writes to ephemeral disk — needs S3/R2 or Emergent object storage before go-live.
-- Item master: Neon DB has **0 items**. Needs `Item_Master_Import_Ready.csv` via admin CSV import.
-- Stores + auditor users need creating from the admin console.
-- Client is served by the Vite dev server; deployment needs a production build.
+- **Deploy target = Railway** (see `memory/DEPLOYMENT.md`). Emergent deployment failed at build context: its pipeline hardcodes `backend/.env` + `frontend/.env`, this repo uses `server/` + `client/`. User chose not to restructure.
+- Cloudflare R2 wired and verified (`STORAGE_DRIVER=s3`, bucket `audix-photos`, public URL `pub-3547de…r2.dev`).
+- `CLIENT_ORIGIN` / `PUBLIC_BASE_URL` set to `https://audit.audix.co.in` (preview URL also allowed in CLIENT_ORIGIN for dev).
+- Express now serves `client/dist` when present, with SPA fallback excluding `/api/*` and `/uploads/*`; API still runs standalone when no build exists. Root `package.json` gained `build` + `start` + `engines.node>=20`.
+- Item master: Neon DB has **0 items** — user will CSV-import after deploy. Stores + auditor accounts also to be created post-deploy.
+- Cosmetic: login page footer still advertises the removed demo accounts (`client/src/pages/Login.jsx`).
+- User declined rotating the Neon password / R2 token before go-live.
+
+### Regression test — 2026-06 (testing_agent, `test_reports/iteration_1.json`)
+Backend 100%, frontend 100%. Verified: admin login, SPA deep-route hard reloads (`/admin/reports`,
+`/admin/readiness`, `/admin/data`, `/admin/items`), `/api/*` not swallowed by the SPA fallback,
+readiness checks, R2 upload → public fetch 200 image/jpeg, store + user create/delete on Neon,
+item master and reports empty states. DB left clean (1 user, 0 stores/items/audits).
 
 ## Known issues / notes
 - **P1 — real item master missing.** `server/seed/Item_Master_Import_Ready.csv` is absent, so the 618 items are MOCKED placeholders. Drop the CSV at that path and re-run `npm run seed` for real data.
