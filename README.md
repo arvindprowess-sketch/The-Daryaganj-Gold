@@ -163,7 +163,7 @@ This is the ONLY thing that creates demo data, and it **refuses to run when
 `NODE_ENV=production`** (exit code 1; `--force-seed` overrides). Everything it
 creates is flagged `is_demo = true` so it can be removed exactly.
 
-## 4. Run
+## 4. Run (development)
 
 Two terminals (or use the root convenience script):
 
@@ -182,6 +182,37 @@ npm run dev
 Open **http://localhost:5173**. Log in as an auditor on a narrow window (or
 your phone on the same network) for the mobile flow, or as `admin` for the
 desktop console.
+
+## 5. Deploying as one service
+
+In production the API also **serves the built client from the same origin**.
+The client calls the API with relative URLs (`fetch('/api' + path)` in
+`client/src/lib/api.js`), so there is no API base URL to point a separately
+hosted frontend at — same-origin is the only supported shape.
+
+```bash
+npm --prefix server ci
+npm --prefix client ci --include=dev      # see the note below
+npm --prefix client run build             # produces client/dist
+npm --prefix server start
+```
+
+- `server/src/index.js` serves `client/dist` and falls back to `index.html` for
+  any path that is not `/api` or `/uploads`, so client-side routes survive a
+  hard refresh and a pasted deep link.
+- The block is guarded by `fs.existsSync`, so in development — where Vite serves
+  the client on :5173 and `client/dist` does not exist — it stays inert.
+- `PORT` is read from the environment (`process.env.PORT || 4000`), which is
+  what platforms like Railway, Render and Fly inject.
+- **`--include=dev` matters.** Vite and Tailwind are `devDependencies`, and with
+  `NODE_ENV=production` set, `npm ci` omits them and the build fails with
+  `vite: not found`. Either pass the flag or set `NPM_CONFIG_INCLUDE=dev`.
+- **`STORAGE_DRIVER=s3` is required** on any platform with an ephemeral
+  filesystem: the local driver writes into the container and every photo is lost
+  on redeploy.
+
+Set the variables in [Production configuration](#production-configuration)
+before the first boot — the server exits rather than start without them.
 
 ---
 

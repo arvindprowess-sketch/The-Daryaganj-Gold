@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
+import fs from 'node:fs';
 import path from 'node:path';
 import { config, rootDir, assertProductionConfig } from './config.js';
 import { enableAsyncRouteSafety } from './lib/asyncRoutes.js';
@@ -89,6 +90,23 @@ app.use('/api/reports', reportRoutes);
 app.use('/api/data', dataManagementRoutes);
 app.use('/api/upload', uploadRoutes);
 app.use('/api/photo-reviews', photoReviewRoutes);
+
+// ── Serve the built client from the same origin as the API ──────────────────
+// The client calls /api with RELATIVE urls (see client/src/lib/api.js), so it
+// can only be served from the same origin as the API — there is no API base URL
+// to point a separately-hosted frontend at.
+//
+// Anything that is not /api or /uploads falls through to index.html so that
+// client-side routes survive a hard refresh or a pasted deep link.
+//
+// Guarded by existsSync: in development the client is served by Vite on :5173
+// and client/dist does not exist, so this whole block stays inert.
+const clientDist = path.join(rootDir, '..', 'client', 'dist');
+if (fs.existsSync(clientDist)) {
+  app.use(express.static(clientDist));
+  app.get(/^(?!\/api|\/uploads).*/, (_req, res) =>
+    res.sendFile(path.join(clientDist, 'index.html')));
+}
 
 // Central error handler
 app.use((err, _req, res, _next) => {
