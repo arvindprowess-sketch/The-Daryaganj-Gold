@@ -12,3 +12,9 @@ server/uploads/*
 .DS_Store
 coverage/
 .pgdata/
+.env.*
+*.env
+credentials.json
+*.pem
+*.key
+.credentials
