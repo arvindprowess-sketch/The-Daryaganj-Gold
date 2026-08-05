@@ -12,6 +12,14 @@ const FORBIDDEN_FOR_AUDITOR = new Set([
   'rate',
   'value',
   'amount',
+  // R4 splits the single `value` field into three. All three are rupee figures
+  // derived from the rate and must be stripped for exactly the same reason.
+  'physical_value',
+  'physicalValue',
+  'system_value',
+  'systemValue',
+  'variance_value',
+  'varianceValue',
   'system_qty',
   'systemQty',
   'expected_qty',

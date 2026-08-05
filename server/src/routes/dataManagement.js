@@ -341,6 +341,9 @@ router.get('/readiness', async (req, res) => {
             (SELECT count(*)::int FROM items WHERE is_active AND photo_url IS NULL) AS no_photo,
             (SELECT count(*)::int FROM items WHERE is_active AND is_liquor
                 AND (bottle_size_ml IS NULL OR bottle_size_ml = 0)) AS liquor_no_size,
+            -- Without a rate an item contributes no value to the variance
+            -- report, so its shortage has no rupee figure at all.
+            (SELECT count(*)::int FROM items WHERE is_active AND rate IS NULL) AS no_rate,
             (SELECT count(*)::int FROM users WHERE must_change_password AND is_active) AS default_pw,
             (SELECT count(*)::int FROM audits WHERE status = 'open') AS open_audits,
             (SELECT count(*)::int FROM audits WHERE status='open' AND audit_date < CURRENT_DATE) AS stale_audits`
@@ -385,6 +388,10 @@ router.get('/readiness', async (req, res) => {
     { key: 'photos', label: 'Items missing a photo', ok: s.no_photo === 0,
       detail: s.no_photo === 0 ? 'Every active item has a photo'
                                : `${s.no_photo} of ${s.items} active items have no photo` },
+    { key: 'rates', label: 'Items missing a rate', ok: s.no_rate === 0,
+      detail: s.no_rate === 0
+        ? 'Every active item has a rate'
+        : `${s.no_rate} of ${s.items} active items have no rate — they carry no value figures on the variance report` },
     { key: 'bottle_sizes', label: 'Liquor items missing bottle_size_ml', ok: s.liquor_no_size === 0,
       detail: s.liquor_no_size === 0 ? 'All liquor items have a bottle size'
                                      : `${s.liquor_no_size} liquor item(s) missing bottle_size_ml` },

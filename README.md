@@ -273,20 +273,70 @@ Super Category | Category | Item Name | Unit | ... figures ...
   **separate** and are never combined. Super category and category added for
   consistency. (Footnote: "Open bottle quantities are recorded by visual
   estimation.")
-- **R4** Variance Report — physical − system, with % and status bands read from
-  the **settings** table (liquor 2%/4%, others 1%/3% defaults — not hardcoded).
-  Includes Super Category and Category, **filters on both levels**, and a
-  **group-and-subtotal** option producing subtotals at category and super
-  category level; all apply to the on-screen view and to the Excel/PDF exports.
-  While an audit is `open` the variance is **PROVISIONAL**: a banner reports how
-  many items are still uncounted, an *Uncounted* column and an
-  [All items | Counted only] filter are available, and any export is stamped
-  `PROVISIONAL` in the file header and filename. The warning disappears once the
-  auditor submits the count (audit status `submitted`).
+- **R4** Variance Report — see [Variance and value](#variance-and-value) below
 - **R5** Consolidated — all stores, comparative aggregate variance, plus a
   **super-category-level comparison across stores**
 - **R6** Exception Report — voided entries, Not-Applicable items, items with
   multiple entries, zero-quantity entries, and items counted without a photo
+
+### Variance and value
+
+R4 is physical − system, with % and status bands read from the **settings**
+table (liquor 2%/4%, others 1%/3% defaults — not hardcoded).
+
+**The rupee impact is the point of the report**, so every row carries three
+separate money figures rather than one:
+
+| Field | Meaning |
+| --- | --- |
+| `physical_value` | `physical_qty × rate` — what is actually on the shelf |
+| `system_value` | `system_qty × rate` — what the books say should be there |
+| `variance_value` | `variance × rate` — **negative = shortage, positive = excess** |
+
+Columns, on screen and in both exports:
+
+```
+Super Category | Category | Item Name | Unit | Rate | Physical |
+System | Variance | % | Physical Value | Variance Value | Status
+```
+
+All numeric columns are right-aligned.
+
+**A missing rate is never treated as zero.** Where `rate` is null all three
+money figures are null and render as `—`; the quantity variance is still shown,
+because that part is still real. Subtotals sum only the items that have a rate
+and count the rest in `no_rate`, so a shortfall in the master can never quietly
+understate a total. The report header states it plainly —
+*"42 items have no rate — value figures exclude them"* — with a
+**[All] [With rate] [No rate]** filter to isolate them and a link to the item
+master. **Admin → System Readiness** carries the same check, *Items missing a
+rate*.
+
+**Subtotals** appear at category level, super-category level and as a
+**GRAND TOTAL** (matching R1). Every one of them carries the same figures in the
+same columns — items, physical, system, variance, variance %, physical value,
+variance value — so a column can be read straight down from an item line to the
+grand total. They all come from one accumulator in `reports.js`, so the grand
+total can never be computed on a different basis from the rows above it. The
+ungrouped view carries the same totals in its totals bar.
+
+The **group-and-subtotal** toggle now defaults to **ON**: the subtotals are the
+report, and off by default they were hidden behind a checkbox with no reason to
+find it.
+
+Filters: super category, category, [All items | Counted only],
+[All | With system data | No system data], [All | With rate | No rate]. Every
+one applies to the on-screen view and to the Excel and PDF exports alike.
+
+While an audit is `open` the variance is **PROVISIONAL**: a banner reports how
+many items are still uncounted, and any export is stamped `PROVISIONAL` in the
+file header and filename. The warning disappears once the auditor submits the
+count (audit status `submitted`).
+
+> **Value figures are admin-only.** `rate`, `physical_value`, `system_value` and
+> `variance_value` are all in the `FORBIDDEN_FOR_AUDITOR` set in
+> `blindCount.js`, and every report endpoint is admin-only — an auditor
+> requesting R4 gets a 403. This is design rule #1 and is enforced server-side.
 
 ## Finding an item while counting
 
