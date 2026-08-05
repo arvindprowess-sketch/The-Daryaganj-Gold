@@ -297,10 +297,11 @@ function CsvImport({ onClose, onDone }) {
   const [err, setErr] = useState('');
   const toast = useToast();
 
-  async function doPreview() {
+  async function doPreview(f = file) {
+    if (!f) return;
     setErr(''); setBusy(true);
     try {
-      const fd = new FormData(); fd.append('file', file);
+      const fd = new FormData(); fd.append('file', f);
       const p = await api.upload('/items/import/preview', fd);
       setPreview(p);
       // Default unmatched rows to 'skip' — nothing is created without a choice.
@@ -344,8 +345,21 @@ function CsvImport({ onClose, onDone }) {
                 onClick={() => downloadReport('/items/import/template', 'item_master_template.csv')}>
           ⬇ Download Template
         </button>
+        {/* Choosing a file runs the preview immediately. Previously the commit
+            button stayed disabled until a separate "Preview" click, so clicking
+            it appeared to do nothing at all. */}
         <input type="file" accept=".csv,text/csv"
-               onChange={(e) => { setFile(e.target.files?.[0]); setPreview(null); }} />
+               onChange={(e) => {
+                 const f = e.target.files?.[0];
+                 setFile(f);
+                 setPreview(null);
+                 setTyped('');
+                 doPreview(f);
+               }} />
+        {busy && <span className="text-sm text-slate-500">Reading file…</span>}
+        {file && !busy && (
+          <button className="btn-ghost text-sm py-1.5" onClick={() => doPreview()}>Re-check file</button>
+        )}
       </div>
       {/* Import mode. Nothing is ever deleted as a side effect — only the
           explicit "Replace entire master" removes anything. */}
@@ -391,7 +405,6 @@ function CsvImport({ onClose, onDone }) {
       )}
 
       <div className="flex gap-2 mb-4">
-        <button className="btn-ghost" disabled={!file || busy} onClick={doPreview}>Preview</button>
         <button
           className={mode === 'replace' ? 'btn-danger' : 'btn-primary'}
           disabled={
@@ -404,6 +417,18 @@ function CsvImport({ onClose, onDone }) {
             : mode === 'upsert' ? `Add and update${preview ? ` (${preview.modes.upsert.updated} updated, ${preview.modes.upsert.created} created, 0 deleted)` : ''}`
             : `Add new only${preview ? ` (${createCount} create)` : ''}`}
         </button>
+        {/* Never leave a dead button: say what is still required. */}
+        {(() => {
+          if (busy) return null;
+          let why = '';
+          if (!file) why = 'Choose a CSV file first.';
+          else if (!preview) why = 'Reading the file…';
+          else if (preview.invalid > 0) why = `${preview.invalid} invalid row(s) — fix them first.`;
+          else if (mode === 'replace' && preview.modes?.replace?.blocked) why = preview.modes.replace.blockedReason;
+          else if (mode === 'replace' && typed.trim().toUpperCase() !== 'REPLACE ITEM MASTER')
+            why = 'Type REPLACE ITEM MASTER above to enable this.';
+          return why ? <span className="self-center text-sm text-amber-700">{why}</span> : null;
+        })()}
       </div>
       {err && <p className="text-red-600 text-sm mb-2">{err}</p>}
 

@@ -8,10 +8,11 @@
     "dev": "node --watch src/index.js",
     "start": "node src/index.js",
     "migrate": "node migrations/run.js",
-    "seed": "node seed/demo.js",
+    "seed": "node seed/reference.js",
     "migrate:photos": "node scripts/migrate-photos-to-storage.js",
     "seed:reference": "node seed/reference.js",
-    "seed:demo": "node seed/demo.js"
+    "seed:demo": "node seed/demo.js",
+    "create:admin": "node scripts/create-admin.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.658.0",

@@ -256,20 +256,23 @@ async function importModeImpact(rows) {
   const unmatched = valid.filter((r) => !r.matched).length;
   const { rows: t } = await query(
     `SELECT (SELECT count(*)::int FROM items) AS total_items,
-            (SELECT count(*)::int FROM count_entries) AS entries,
-            (SELECT count(DISTINCT audit_id)::int FROM count_entries) AS audits`
+            (SELECT count(*)::int FROM count_entries WHERE NOT is_demo) AS entries,
+            (SELECT count(DISTINCT audit_id)::int FROM count_entries WHERE NOT is_demo) AS audits,
+            (SELECT count(*)::int FROM count_entries WHERE is_demo) AS demo_entries`
   );
-  const { total_items: totalItems, entries, audits } = t[0];
+  const { total_items: totalItems, entries, audits, demo_entries: demoEntries } = t[0];
   return {
     add:     { created: unmatched, updated: 0, deleted: 0 },
     upsert:  { created: unmatched, updated: matched, deleted: 0 },
     replace: {
       created: valid.length, updated: 0, deleted: totalItems,
-      // Same rule as "delete all items": blocked while any count entry exists.
+      // Blocked only by REAL audit history. Demo count entries are not
+      // history — they are removed as part of the replace.
       blocked: entries > 0,
       blockedReason: entries > 0
         ? `Cannot replace. ${entries.toLocaleString()} count entries exist across ${audits} audit(s). Delete or archive those audits first.`
         : null,
+      demoEntriesToRemove: demoEntries,
       requiredPhrase: REPLACE_PHRASE,
     },
   };
@@ -297,8 +300,8 @@ router.post('/import/commit', requireRole('admin'), upload.single('file'), async
   let photoUrls = [];
   if (mode === 'replace') {
     const { rows: chk } = await query(
-      `SELECT (SELECT count(*)::int FROM count_entries) AS entries,
-              (SELECT count(DISTINCT audit_id)::int FROM count_entries) AS audits`
+      `SELECT (SELECT count(*)::int FROM count_entries WHERE NOT is_demo) AS entries,
+              (SELECT count(DISTINCT audit_id)::int FROM count_entries WHERE NOT is_demo) AS audits`
     );
     if (chk[0].entries > 0) {
       return res.status(409).json({
@@ -355,6 +358,9 @@ router.post('/import/commit', requireRole('admin'), upload.single('file'), async
     // Replace mode: clear the master first, inside this same transaction, so a
     // failure cannot leave the audit with a half-deleted master.
     if (mode === 'replace') {
+      // Demo entries are sample data, not audit history: remove them so the
+      // real master can load. Real entries were rejected by the guard above.
+      await c.query('DELETE FROM count_entries WHERE is_demo');
       await c.query('DELETE FROM system_stock');
       await c.query('DELETE FROM photo_reviews');
       await c.query('DELETE FROM audit_na');

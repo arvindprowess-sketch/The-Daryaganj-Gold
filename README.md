@@ -129,57 +129,36 @@ createdb audix    # or: psql -c "CREATE DATABASE audix;"
 ## 3. Migrate and seed
 
 ```bash
-npm run migrate          # applies server/migrations/*.sql
-npm run seed:reference   # hierarchy only — SAFE anywhere, including production
-npm run seed:demo        # demo users/stores/items/audits — DEVELOPMENT ONLY
+npm run migrate    # applies server/migrations/*.sql
+npm run seed       # hierarchy only — NO users, NO items, NO demo data
 ```
 
-| Script | Creates | Safe in production |
-|---|---|---|
-| `seed:reference` | super categories + categories only | **Yes** — no users, items, stores, audits or entries |
-| `seed:demo` | demo users (console-printed passwords), sample store, item master, audit and entries | **No** |
+**`npm run seed` never creates demo data.** It loads only the super categories
+and categories, so running it on a live deployment is safe.
 
-`seed:demo` **refuses to run when `NODE_ENV=production`** — it exits with a
-clear message rather than prompting or partially running. For the rare case
-where seeding production is genuinely intended:
+### Going live (production)
 
 ```bash
-npm run seed:demo -- --force-seed
+npm run migrate
+npm run seed                                   # hierarchy only
+npm run create:admin -- --username arvind --name "Arvind"
 ```
 
-Everything `seed:demo` creates is flagged `is_demo = true`, and its accounts are
-flagged `must_change_password` so a console-printed password cannot stay in use.
+`create:admin` makes the first REAL admin (`is_demo = false`). Omit
+`--password` and a strong one is generated and printed once. That is the whole
+production setup — the database contains **zero demo rows**.
 
-The seed prints credentials to the console:
+Then sign in and load the real item master from Item master → CSV import.
 
-```
-ADMIN    username: admin    password: admin123
-AUDITOR  username: rakesh   password: rakesh123   (M3M)
-AUDITOR  username: sunil    password: sunil123    (M3M)
-```
+### Demo data (development only)
 
-It creates the client's hierarchy (5 super categories, 17 categories), the
-**M3M** store, 3 users, the **618-item master (64 liquor)**, and **one open
-audit** with sample entries — including an item with **two entries at different
-locations** (append-only) and a **voided entry**, so the append-only and void
-behaviour is visible immediately.
-
-### Seeding the real item master
-
-The seed prefers the client's own export. Drop it at:
-
-```
-server/seed/Item_Master_Import_Ready.csv
+```bash
+npm run seed:demo    # demo users, sample store, sample master, audit, entries
 ```
 
-with columns `item_name, super_category, category, unit, is_liquor,
-bottle_size_ml, rate`, then run `npm run seed`. It is used verbatim — units
-included.
-
-If that file is **absent**, the seed generates a **stand-in master** at the same
-volume and distribution (FOOD 299 · NON FOOD 128 · CCG 70 · LIQUOR 64 ·
-BEVERAGES 57 = 618) so the app can be exercised at realistic scale, and prints a
-warning saying so. Those names are placeholders, **not client data**.
+This is the ONLY thing that creates demo data, and it **refuses to run when
+`NODE_ENV=production`** (exit code 1; `--force-seed` overrides). Everything it
+creates is flagged `is_demo = true` so it can be removed exactly.
 
 ## 4. Run
 
