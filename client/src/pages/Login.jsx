@@ -55,9 +55,6 @@ export default function Login() {
             {busy ? 'Signing in…' : 'Sign in'}
           </button>
         </form>
-        <p className="text-center text-white/70 text-xs mt-6">
-          Auditor demo: rakesh / rakesh123 &nbsp;·&nbsp; Admin: admin / admin123
-        </p>
       </div>
     </div>
   );
