@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
+import fs from 'node:fs';
 import path from 'node:path';
 import { config, rootDir, assertProductionConfig } from './config.js';
 import { enableAsyncRouteSafety } from './lib/asyncRoutes.js';
@@ -89,6 +90,31 @@ app.use('/api/reports', reportRoutes);
 app.use('/api/data', dataManagementRoutes);
 app.use('/api/upload', uploadRoutes);
 app.use('/api/photo-reviews', photoReviewRoutes);
+
+// ── Built client (single-service deployment) ────────────────────────────────
+// When a production build exists, this process also serves the SPA, so the
+// whole app runs on one origin and one port. When it does not, the API keeps
+// running exactly as before as a standalone service and the client is deployed
+// separately — hence the CORS configuration above, which stays either way.
+const clientDist = process.env.CLIENT_DIST
+  ? path.resolve(process.env.CLIENT_DIST)
+  : path.join(rootDir, '..', 'client', 'dist');
+
+if (fs.existsSync(path.join(clientDist, 'index.html'))) {
+  // Hashed asset filenames are immutable; index.html must never be cached or a
+  // redeploy leaves browsers loading a bundle that no longer exists.
+  app.use(express.static(clientDist, { index: false, maxAge: '1y' }));
+
+  // SPA fallback: a hard refresh on /admin/reports must return index.html.
+  // Scoped to GET/HEAD and excluding the API and upload prefixes, so an unknown
+  // /api/* path still returns its JSON 404 instead of a page of HTML.
+  app.get(/^(?!\/api\/|\/uploads\/).*/, (req, res, next) => {
+    if (req.method !== 'GET' && req.method !== 'HEAD') return next();
+    res.sendFile(path.join(clientDist, 'index.html'));
+  });
+  console.log(`Serving built client from ${clientDist}`);
+}
+
 
 // Central error handler
 app.use((err, _req, res, _next) => {
