@@ -31,6 +31,21 @@ Build & preview the full-stack app from https://github.com/arvindprowess-sketch/
 - Set new passwords for all three demo accounts (new forced-password-change gate). See `memory/test_credentials.md`.
 - Verified in preview: login → forced password change → admin dashboard, Item Master (618 items, filters/search), Reports R1–R6 with super-category grouping, **System Readiness** (new), **Data Management** (new, with demo-data banner + typed confirmations).
 
+### 2026-06 — Deployment prep
+- Pulled `35e764f` (production hardening: helmet, auth rate limiting, `assertProductionConfig` startup guard, `xlsx`→`exceljs`, sharp 0.35) and `df7bc49` (R4 variance rupee impact + complete subtotals). Verified R4 values and all 10 report exports (5 reports × xlsx/pdf).
+- Pulled `361c0bc` + `5d32e6a` (item master replace fix, demo data kept out of production, user/store deletion, CSV import feedback). Migration `007_user_store_lifecycle.sql` applied.
+- **Database moved to Neon Postgres** (`ep-fragrant-rain-axpdjywl...us-east-2.aws.neon.tech/neondb`, PG 18.4, `sslmode=require`). All 7 migrations + `npm run seed` (reference hierarchy only) run there. In-pod Postgres no longer used by the app.
+- New strong `JWT_SECRET` (64 chars) generated. Readiness screen now green on jwt_secret / database_url / client_origin / demo_data / default_passwords.
+- Real admin created: `arvind` (see `memory/test_credentials.md`). No demo data in the Neon DB.
+- **Domain plan**: attach as a **subdomain** (e.g. `audit.<user-domain>`) via Emergent "Link domain" → Entri CNAME. Root domain's existing website untouched. Deployment = 50 credits/month, can be shut down after the 7-day trial; redeploys are free.
+
+## Pending before deploy
+- Set `CLIENT_ORIGIN` + `PUBLIC_BASE_URL` to the final subdomain.
+- Photos: `STORAGE_DRIVER=local` writes to ephemeral disk — needs S3/R2 or Emergent object storage before go-live.
+- Item master: Neon DB has **0 items**. Needs `Item_Master_Import_Ready.csv` via admin CSV import.
+- Stores + auditor users need creating from the admin console.
+- Client is served by the Vite dev server; deployment needs a production build.
+
 ## Known issues / notes
 - **P1 — real item master missing.** `server/seed/Item_Master_Import_Ready.csv` is absent, so the 618 items are MOCKED placeholders. Drop the CSV at that path and re-run `npm run seed` for real data.
 - **P1 — pod restart wipes `/var/lib/postgresql`.** `bash /app/scripts/init-pg.sh` restores everything. Supervisor conf is a READONLY platform file and cannot invoke it automatically, so run it manually after a wake-up if login fails.
