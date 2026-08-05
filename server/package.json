@@ -3,13 +3,15 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Audix stock audit — API server",
+  "description": "Audix stock audit \u2014 API server",
   "scripts": {
     "dev": "node --watch src/index.js",
     "start": "node src/index.js",
     "migrate": "node migrations/run.js",
-    "seed": "node seed/seed.js",
-    "migrate:photos": "node scripts/migrate-photos-to-storage.js"
+    "seed": "node seed/demo.js",
+    "migrate:photos": "node scripts/migrate-photos-to-storage.js",
+    "seed:reference": "node seed/reference.js",
+    "seed:demo": "node seed/demo.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.658.0",

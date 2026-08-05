@@ -4,6 +4,7 @@ import { Spinner } from './components/ui.jsx';
 import PendingBanner from './components/PendingBanner.jsx';
 
 import Login from './pages/Login.jsx';
+import ChangePassword from './pages/ChangePassword.jsx';
 
 // Auditor (mobile) flow
 import StoreSelect from './pages/auditor/StoreSelect.jsx';
@@ -22,6 +23,8 @@ import CountEntry from './pages/admin/CountEntry.jsx';
 import SystemStock from './pages/admin/SystemStock.jsx';
 import Settings from './pages/admin/Settings.jsx';
 import Reports from './pages/admin/Reports.jsx';
+import DataManagement from './pages/admin/DataManagement.jsx';
+import Readiness from './pages/admin/Readiness.jsx';
 import PhotoReview from './pages/admin/PhotoReview.jsx';
 
 function RequireRole({ role, children }) {
@@ -31,6 +34,9 @@ function RequireRole({ role, children }) {
   // cause of spurious redirects to /login.
   if (loading) return <Spinner />;
   if (!user) return <Navigate to="/login" state={{ from: loc }} replace />;
+  // A seeded account still carries a password that was printed to a console.
+  // It cannot use the app — on any route — until that password is replaced.
+  if (user.must_change_password) return <ChangePassword forced />;
   if (role && user.role !== role) {
     return <Navigate to={user.role === 'admin' ? '/admin' : '/a'} replace />;
   }
@@ -69,6 +75,8 @@ export default function App() {
           <Route path="audits/:auditId/system-stock" element={<SystemStock />} />
           <Route path="settings" element={<Settings />} />
           <Route path="reports" element={<Reports />} />
+          <Route path="data" element={<DataManagement />} />
+          <Route path="readiness" element={<Readiness />} />
         </Route>
 
         <Route path="*" element={<Navigate to="/" replace />} />

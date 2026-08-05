@@ -5,8 +5,9 @@ import { query, withTransaction } from '../db.js';
 import { requireAuth, requireRole } from '../middleware/auth.js';
 import { parseCsvObjects } from '../lib/csv.js';
 import { normalizeName, nameKey } from '../lib/itemName.js';
-import { storage } from '../lib/storage.js';
+import { storage, removePhotos } from '../lib/storage.js';
 import { toCsv } from '../lib/csvTemplate.js';
+import { logActivity } from '../lib/activityLog.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -34,7 +35,12 @@ router.get('/import/template', requireRole('admin'), (_req, res) => {
 // ── List items (admin only — carries rate) ──────────────────────────────────
 router.get('/', requireRole('admin'), async (req, res) => {
   const { search, super_category_id, category_id, photo } = req.query;
+  // [Active] [Inactive] [All] — inactive items are soft-deleted ones, kept so
+  // historical audit records are never orphaned.
+  const active = ['inactive', 'all'].includes(req.query.active) ? req.query.active : 'active';
   const conds = [];
+  if (active === 'active') conds.push('i.is_active = TRUE');
+  else if (active === 'inactive') conds.push('i.is_active = FALSE');
   const params = [];
   if (search) { params.push(`%${search}%`); conds.push(`i.name ILIKE $${params.length}`); }
   if (super_category_id) { params.push(super_category_id); conds.push(`i.super_category_id = $${params.length}`); }
@@ -55,9 +61,11 @@ router.get('/', requireRole('admin'), async (req, res) => {
   );
   // Header counts are over the whole master, not the filtered page.
   const { rows: totals } = await query(
-    `SELECT COUNT(*)::int AS total,
-            COUNT(photo_url)::int AS with_photo
-       FROM items WHERE is_active = TRUE`
+    `SELECT COUNT(*) FILTER (WHERE is_active)::int AS total,
+            COUNT(photo_url) FILTER (WHERE is_active)::int AS with_photo,
+            COUNT(*) FILTER (WHERE NOT is_active)::int AS inactive,
+            COUNT(*)::int AS all_items
+       FROM items`
   );
   res.json({ items: rows, counts: totals[0] });
 });
@@ -228,14 +236,52 @@ router.post('/import/preview', requireRole('admin'), upload.single('file'), asyn
     newSuperCategories: newSupers,
     newCategories: newCats,
     rows,
+    // Impact per import mode, so the screen can state plainly what will happen.
+    modes: await importModeImpact(rows),
   });
 });
 
-// Commit. `decisions` maps row number -> 'create' | 'skip' for unmatched rows.
-// Unmatched rows with no decision are skipped (never silently created).
+// ── Import modes ───────────────────────────────────────────────────────────
+//   add        — add new items only; existing items untouched
+//   upsert     — add new AND update existing (matched by item name)
+//   replace    — delete the entire master, then import
+// An item is NEVER deleted silently as a side effect of an import: only the
+// explicit `replace` mode removes anything, and it carries its own guards.
+const IMPORT_MODES = ['add', 'upsert', 'replace'];
+const REPLACE_PHRASE = 'REPLACE ITEM MASTER';
+
+async function importModeImpact(rows) {
+  const valid = rows.filter((r) => r.errors.length === 0);
+  const matched = valid.filter((r) => r.matched).length;
+  const unmatched = valid.filter((r) => !r.matched).length;
+  const { rows: t } = await query(
+    `SELECT (SELECT count(*)::int FROM items) AS total_items,
+            (SELECT count(*)::int FROM count_entries) AS entries,
+            (SELECT count(DISTINCT audit_id)::int FROM count_entries) AS audits`
+  );
+  const { total_items: totalItems, entries, audits } = t[0];
+  return {
+    add:     { created: unmatched, updated: 0, deleted: 0 },
+    upsert:  { created: unmatched, updated: matched, deleted: 0 },
+    replace: {
+      created: valid.length, updated: 0, deleted: totalItems,
+      // Same rule as "delete all items": blocked while any count entry exists.
+      blocked: entries > 0,
+      blockedReason: entries > 0
+        ? `Cannot replace. ${entries.toLocaleString()} count entries exist across ${audits} audit(s). Delete or archive those audits first.`
+        : null,
+      requiredPhrase: REPLACE_PHRASE,
+    },
+  };
+}
+
+// Commit. `mode` selects add / upsert / replace (see IMPORT_MODES).
+// In `add` mode `decisions` maps row number -> 'create' | 'skip' for unmatched
+// rows; unmatched rows with no decision are skipped, never silently created.
 router.post('/import/commit', requireRole('admin'), upload.single('file'), async (req, res) => {
   const text = req.file ? req.file.buffer.toString('utf8') : req.body?.csv;
   if (!text) return res.status(400).json({ error: 'No CSV provided' });
+  const mode = IMPORT_MODES.includes(req.body?.mode) ? req.body.mode : 'add';
   let decisions = {};
   try {
     decisions = typeof req.body?.decisions === 'string'
@@ -247,8 +293,31 @@ router.post('/import/commit', requireRole('admin'), upload.single('file'), async
   const bad = rows.filter((r) => r.errors.length > 0);
   if (bad.length) return res.status(400).json({ error: 'Fix errors before committing', rows: bad });
 
+  // ── `replace` carries the same guards as "delete all items" ──────────────
+  let photoUrls = [];
+  if (mode === 'replace') {
+    const { rows: chk } = await query(
+      `SELECT (SELECT count(*)::int FROM count_entries) AS entries,
+              (SELECT count(DISTINCT audit_id)::int FROM count_entries) AS audits`
+    );
+    if (chk[0].entries > 0) {
+      return res.status(409).json({
+        error: `Cannot replace. ${chk[0].entries.toLocaleString()} count entries exist across ${chk[0].audits} audit(s). Delete or archive those audits first.`,
+        blocked: true, entries: chk[0].entries, audits: chk[0].audits,
+      });
+    }
+    if ((req.body?.confirm || '').trim().toUpperCase() !== REPLACE_PHRASE) {
+      return res.status(400).json({
+        error: `Type "${REPLACE_PHRASE}" to confirm`, requiredPhrase: REPLACE_PHRASE,
+      });
+    }
+    const { rows: ph } = await query(
+      'SELECT photo_url FROM items WHERE photo_url IS NOT NULL');
+    photoUrls = ph.map((x) => x.photo_url);
+  }
+
   const result = await withTransaction(async (c) => {
-    let updated = 0, created = 0, skipped = 0;
+    let updated = 0, created = 0, skipped = 0, deleted = 0;
     const createdSupers = new Set();
     const createdCats = new Set();
 
@@ -283,13 +352,26 @@ router.post('/import/commit', requireRole('admin'), upload.single('file'), async
       return { superId, catId };
     }
 
+    // Replace mode: clear the master first, inside this same transaction, so a
+    // failure cannot leave the audit with a half-deleted master.
+    if (mode === 'replace') {
+      await c.query('DELETE FROM system_stock');
+      await c.query('DELETE FROM photo_reviews');
+      await c.query('DELETE FROM audit_na');
+      deleted = (await c.query('DELETE FROM items')).rowCount;
+    }
+
     for (const r of rows) {
       const d = r.data;
-      if (!r.matched && decisions[r.row] !== 'create') { skipped++; continue; }
+      // `add` only creates what the admin chose; `upsert` updates matches and
+      // creates the rest; `replace` re-inserts everything after the wipe above.
+      // An existing item is never deleted as a side effect of an import.
+      if (mode === 'add' && r.matched) { skipped++; continue; }
+      if (mode === 'add' && !r.matched && decisions[r.row] !== 'create') { skipped++; continue; }
 
       const { superId, catId } = await resolveHierarchy(d);
 
-      if (r.matched) {
+      if (r.matched && mode === 'upsert') {
         await c.query(
           `UPDATE items SET name=$2, category_id=$3, super_category_id=$4, unit=$5,
                             is_liquor=$6, bottle_size_ml=$7, rate=$8
@@ -307,13 +389,24 @@ router.post('/import/commit', requireRole('admin'), upload.single('file'), async
         created++;
       }
     }
+
+    await logActivity({
+      entityType: 'item_master', action: `import_${mode}`,
+      recordCount: created + updated,
+      detail: { mode, created, updated, deleted, skipped,
+                filename: req.file?.originalname || 'pasted-data.csv' },
+      userId: req.user.id,
+    }, c);
     return {
-      updated, created, skipped,
+      updated, created, skipped, deleted,
       createdSuperCategories: [...createdSupers],
       createdCategories: [...createdCats],
     };
   });
-  res.json({ ok: true, ...result });
+
+  // Orphaned photos are removed only after the transaction has committed.
+  const photosRemoved = photoUrls.length ? await removePhotos(photoUrls) : 0;
+  res.json({ ok: true, mode, photosRemoved, ...result });
 });
 
 // ── Bulk photo upload: match filename to item NAME ──────────────────────────

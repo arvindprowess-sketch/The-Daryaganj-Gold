@@ -118,8 +118,18 @@ export function AuthProvider({ children }) {
     endSession();
   }
 
+  // Re-reads the profile from the server (used after a password change so the
+  // must_change_password gate clears without a full re-login).
+  async function refreshUser() {
+    try {
+      const { user: fresh } = await api.get('/auth/me');
+      if (fresh) setUser(fresh);
+      return fresh;
+    } catch { return null; }
+  }
+
   return (
-    <AuthCtx.Provider value={{ user, loading, offline, login, logout }}>
+    <AuthCtx.Provider value={{ user, loading, offline, login, logout, refreshUser }}>
       {children}
     </AuthCtx.Provider>
   );

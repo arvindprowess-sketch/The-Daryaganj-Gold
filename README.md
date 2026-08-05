@@ -129,9 +129,26 @@ createdb audix    # or: psql -c "CREATE DATABASE audix;"
 ## 3. Migrate and seed
 
 ```bash
-npm run migrate    # applies server/migrations/*.sql
-npm run seed       # loads demo data and prints login credentials
+npm run migrate          # applies server/migrations/*.sql
+npm run seed:reference   # hierarchy only — SAFE anywhere, including production
+npm run seed:demo        # demo users/stores/items/audits — DEVELOPMENT ONLY
 ```
+
+| Script | Creates | Safe in production |
+|---|---|---|
+| `seed:reference` | super categories + categories only | **Yes** — no users, items, stores, audits or entries |
+| `seed:demo` | demo users (console-printed passwords), sample store, item master, audit and entries | **No** |
+
+`seed:demo` **refuses to run when `NODE_ENV=production`** — it exits with a
+clear message rather than prompting or partially running. For the rare case
+where seeding production is genuinely intended:
+
+```bash
+npm run seed:demo -- --force-seed
+```
+
+Everything `seed:demo` creates is flagged `is_demo = true`, and its accounts are
+flagged `must_change_password` so a console-printed password cannot stay in use.
 
 The seed prints credentials to the console:
 
@@ -399,6 +416,70 @@ separate, exactly as the physical count does.
 - Super-category and category progress counts are computed by a **single
   aggregate query** each (~0.6 ms measured), never by loading every item.
 - Reports and exports over 618 rows complete in well under a second.
+
+## Data management and production safety
+
+Admin only, enforced server-side. Every destructive operation requires its exact
+confirmation phrase **in the request body** — the server validates it
+independently, so the UI cannot wave anything through. Multi-table deletions run
+in one transaction, and object-storage deletion happens only **after** that
+transaction commits, so a storage failure can never orphan a row.
+
+| Action | Phrase | Guard |
+|---|---|---|
+| Delete all items | `DELETE ALL ITEMS` | **Blocked** while any count entry exists |
+| Replace master via CSV | `REPLACE ITEM MASTER` | Same block; preview first |
+| Delete an audit | `DELETE THIS AUDIT` | Removes its entries and system stock only |
+| Clear an audit's entries | `CLEAR ALL ENTRIES` | Audit stays open, resets to zero counted |
+| Delete demo data | `DELETE DEMO DATA` | Matches on the `is_demo` flag, never on names |
+
+### CSV import modes
+
+The import screen offers three explicit modes, with the impact of each shown
+before committing ("412 items will be updated, 206 created, 0 deleted"):
+
+- **Add new items only** — existing items untouched
+- **Add new and update existing** — matched by item name
+- **Replace entire master** — delete everything, then import (typed
+  confirmation, and blocked while count entries exist)
+
+**An item is never deleted silently as a side effect of an import.** Only the
+explicit replace mode removes anything.
+
+### Soft delete
+
+An item that has **ever been counted** is never hard deleted — that would orphan
+historical audit records. Deleting it sets `is_active = false`: it disappears
+from counting screens and new audits, stays visible in historical reports, and
+can be reactivated. The item master has an **[Active] [Inactive] [All]** filter.
+Only items with zero count entries anywhere are removed permanently.
+
+### Demo data
+
+`is_demo` marks every row created by `seed:demo` (users, stores, items, audits,
+count entries). Anything created through the UI or a CSV import is `false`, so
+cleanup is exact rather than guesswork. While any demo record exists the admin
+console shows a persistent banner with the counts — **including in production**,
+where the API also logs a prominent warning at startup. The account performing
+the deletion is never removed (it would lock the admin out mid-operation), and
+the response says so.
+
+### Activity log
+
+Every destructive action — master deletion and replacement, audit deletion,
+entry clearing, demo cleanup, item deactivation, password changes — is written
+to `activity_log` with who, when, how many records and a JSON detail payload.
+It is exposed read-only on Admin → Data management, newest first, with no
+delete endpoint: an audit firm must be able to answer "who removed that data
+and when".
+
+### System Readiness
+
+Admin → System Readiness is the pre-count checklist. It reports demo data
+present, users still on a seeded default password, item master loaded, items
+missing a photo, liquor items missing `bottle_size_ml`, **object storage
+reachable via a real write-then-delete probe**, and audits left open from a
+previous session. Run it before the pilot count and before each count night.
 
 ## Photo storage (object storage, never the database)
 

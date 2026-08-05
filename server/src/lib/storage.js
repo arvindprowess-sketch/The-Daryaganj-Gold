@@ -33,6 +33,25 @@ function buildKey(ext, name) {
   return `${stamp}/${slugify(name)}-${hash}${ext || ''}`;
 }
 
+// Recovers the storage key from a stored URL, so a deleted row's photo can be
+// removed from the bucket. Returns null for anything that is not ours.
+export function keyFromUrl(url) {
+  if (!url || typeof url !== 'string') return null;
+  const bases = [
+    `${config.publicBaseUrl}/uploads/`,
+    '/uploads/',
+    config.s3.publicBaseUrl ? `${config.s3.publicBaseUrl.replace(/\/+$/, '')}/` : null,
+    config.s3.endpoint && config.s3.bucket
+      ? `${config.s3.endpoint.replace(/\/+$/, '')}/${config.s3.bucket}/`
+      : null,
+  ].filter(Boolean);
+  for (const base of bases) {
+    const idx = url.indexOf(base);
+    if (idx !== -1) return url.slice(idx + base.length);
+  }
+  return null;
+}
+
 // ── Local disk driver ───────────────────────────────────────────────────────
 const localDriver = {
   async save(buffer, { ext, name } = {}) {
@@ -41,6 +60,20 @@ const localDriver = {
     fs.mkdirSync(path.dirname(full), { recursive: true });
     fs.writeFileSync(full, buffer);
     return { key, url: `${config.publicBaseUrl}/uploads/${key}` };
+  },
+
+  // Best-effort: a missing object is not an error. Never throws, so storage
+  // cleanup can never roll back an already-committed database change.
+  async remove(key) {
+    if (!key) return false;
+    try {
+      const full = path.join(rootDir, config.uploadDir, key);
+      // Refuse to escape the upload directory.
+      const root = path.resolve(rootDir, config.uploadDir);
+      if (!path.resolve(full).startsWith(root)) return false;
+      fs.rmSync(full, { force: true });
+      return true;
+    } catch { return false; }
   },
 };
 
@@ -84,8 +117,31 @@ function makeS3Driver() {
         `${config.s3.endpoint}/${config.s3.bucket}`.replace(/\/+$/, '');
       return { key, url: `${base}/${key}` };
     },
+
+    async remove(key) {
+      if (!key) return false;
+      try {
+        const { client } = await getClient();
+        const { DeleteObjectCommand } = await import('@aws-sdk/client-s3');
+        await client.send(new DeleteObjectCommand({ Bucket: config.s3.bucket, Key: key }));
+        return true;
+      } catch { return false; }
+    },
   };
 }
 
 export const storage =
   config.storageDriver === 's3' ? makeS3Driver() : localDriver;
+
+// Removes photos for a set of stored URLs. Called ONLY after the database
+// transaction has committed, so a storage failure can never orphan a row.
+// Returns the number successfully removed.
+export async function removePhotos(urls = []) {
+  let removed = 0;
+  for (const url of urls) {
+    const key = keyFromUrl(url);
+    if (!key) continue;
+    if (await storage.remove(key)) removed++;
+  }
+  return removed;
+}
