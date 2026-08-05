@@ -20,7 +20,7 @@ for i in $(seq 1 30); do
   if pg_isready -h 127.0.0.1 -p 5432 -q; then break; fi
   if [ "$i" = "1" ]; then
     echo "[init-pg] starting postgres"
-    su postgres -c "$PGBIN/pg_ctl -D $PGDATA -o '-c config_file=$PGCONF' -l /var/log/postgres-init.log start" || true
+    su postgres -c "$PGBIN/pg_ctl -D $PGDATA -o '-c config_file=$PGCONF' -l /tmp/postgres-init.log start" || true
   fi
   sleep 1
 done
@@ -40,7 +40,7 @@ npm run migrate
 COUNT=$(psql "postgres://audix:audix@127.0.0.1:5432/audix" -tAc "SELECT count(*) FROM users" 2>/dev/null || echo 0)
 if [ "$COUNT" = "0" ]; then
   echo "[init-pg] empty database — seeding demo data"
-  npm run seed
+  npm run seed:demo
 else
   echo "[init-pg] users already present ($COUNT) — skipping seed"
 fi
