@@ -1,8 +1,14 @@
 import express from 'express';
 import cors from 'cors';
+import helmet from 'helmet';
 import path from 'node:path';
-import { config, rootDir } from './config.js';
+import { config, rootDir, assertProductionConfig } from './config.js';
 import { enableAsyncRouteSafety } from './lib/asyncRoutes.js';
+
+// Before anything else. In production an insecure configuration — the public
+// development JWT secret, the default database URL, a wildcard CORS origin —
+// exits the process here rather than serving a single request.
+assertProductionConfig();
 
 // Must run BEFORE the route modules are imported, so their handlers are
 // registered through the patched Router. Without this an async handler that
@@ -25,7 +31,43 @@ import photoReviewRoutes from './routes/photoReviews.js';
 import dataManagementRoutes from './routes/dataManagement.js';
 
 const app = express();
-app.use(cors({ origin: config.clientOrigin === '*' ? true : config.clientOrigin.split(',') }));
+
+// Behind a reverse proxy (Render, Fly, nginx, Cloudflare) req.ip must come
+// from X-Forwarded-For, or every request looks like it originates at the proxy
+// and the login rate limiter would throttle the whole firm as one client.
+// One hop only — trusting the whole chain would let a client spoof its own IP
+// and walk straight past the limiter.
+if (config.nodeEnv === 'production') app.set('trust proxy', 1);
+
+// Security headers. Defaults, with one deliberate adjustment: photos are
+// served from the object-storage host (Cloudflare R2 / S3), which the default
+// img-src 'self' would block. The host is allow-listed rather than turning the
+// policy off.
+app.use(helmet({
+  contentSecurityPolicy: {
+    useDefaults: true,
+    directives: { 'img-src': ["'self'", 'data:', 'blob:', ...photoHosts()] },
+  },
+  // Photos are fetched cross-origin from the storage host by the browser.
+  crossOriginResourcePolicy: { policy: 'cross-origin' },
+}));
+
+// The hosts photos may be loaded from: the public bucket URL, and the S3
+// endpoint itself when no separate public URL is configured.
+function photoHosts() {
+  const hosts = new Set();
+  for (const url of [config.s3.publicBaseUrl, config.s3.endpoint]) {
+    if (!url) continue;
+    try { hosts.add(new URL(url).origin); } catch { /* not a URL — ignore */ }
+  }
+  return [...hosts];
+}
+
+app.use(cors({
+  // '*' is refused outright in production by assertProductionConfig(); in
+  // development it stays available for testing from a device on the LAN.
+  origin: config.clientOrigin === '*' ? true : config.clientOrigin.split(','),
+}));
 app.use(express.json({ limit: '2mb' }));
 
 // Serve locally-stored uploads in dev (S3/R2 serves its own URLs in prod).

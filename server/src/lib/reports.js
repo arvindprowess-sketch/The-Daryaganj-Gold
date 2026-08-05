@@ -189,36 +189,71 @@ export async function liquorReport(auditId) {
 // Groups variance rows by super category, then category, with subtotals at
 // both levels. Used by the on-screen report and by the Excel/PDF exports so
 // they always present the same structure.
+// A subtotal bucket carries every figure the row level carries, so a category
+// subtotal, a super-category subtotal and the grand total are all comparable.
+//
+// Rupee figures are summed ONLY over items that actually have a rate. An item
+// with no rate contributes nothing rather than a false zero, and `no_rate`
+// records how many were left out so the shortfall is always visible.
+function emptyBucket(extra) {
+  return {
+    ...extra, items: 0, no_rate: 0,
+    physical_qty: 0, system_qty: 0, variance: 0,
+    physical_value: 0, system_value: 0, variance_value: 0,
+  };
+}
+
+function addToBucket(bucket, r) {
+  bucket.items += 1;
+  bucket.physical_qty += Number(r.physical_qty || 0);
+  bucket.system_qty += Number(r.system_qty || 0);
+  bucket.variance += Number(r.variance || 0);
+  if (r.rate == null) { bucket.no_rate += 1; return; }
+  bucket.physical_value += Number(r.physical_value || 0);
+  bucket.system_value += Number(r.system_value || 0);
+  bucket.variance_value += Number(r.variance_value || 0);
+}
+
+// Money is rounded once, at the point it is reported.
+function finishBucket(b) {
+  return {
+    ...b,
+    physical_value: round2(b.physical_value),
+    system_value: round2(b.system_value),
+    variance_value: round2(b.variance_value),
+    variance_pct: pctOf(b.variance, b.system_qty),
+  };
+}
+
+const round2 = (n) => Number(Number(n || 0).toFixed(2));
+
+// Signed variance as a percentage of the system figure. A system figure of zero
+// with a variance is 100% (all of it is excess); zero against zero is 0%.
+function pctOf(variance, system) {
+  if (Number(system) !== 0) return Number(((variance / system) * 100).toFixed(2));
+  return variance ? 100 : 0;
+}
+
 function groupVariance(rows) {
   const bySuper = new Map();
   for (const r of rows) {
     const sKey = r.super_category || '—';
     const cKey = r.category || '—';
     if (!bySuper.has(sKey)) {
-      bySuper.set(sKey, {
-        super_category: sKey, items: 0, physical_qty: 0, system_qty: 0,
-        variance: 0, value: 0, categories: new Map(),
-      });
+      bySuper.set(sKey, { ...emptyBucket({ super_category: sKey }), categories: new Map() });
     }
     const s = bySuper.get(sKey);
     if (!s.categories.has(cKey)) {
-      s.categories.set(cKey, {
-        category: cKey, items: 0, physical_qty: 0, system_qty: 0,
-        variance: 0, value: 0, rows: [],
-      });
+      s.categories.set(cKey, { ...emptyBucket({ category: cKey, super_category: sKey }), rows: [] });
     }
     const c = s.categories.get(cKey);
-    for (const bucket of [s, c]) {
-      bucket.items += 1;
-      bucket.physical_qty += Number(r.physical_qty || 0);
-      bucket.system_qty += Number(r.system_qty || 0);
-      bucket.variance += Number(r.variance || 0);
-      bucket.value += Number(r.value || 0);
-    }
+    addToBucket(s, r);
+    addToBucket(c, r);
     c.rows.push(r);
   }
   return [...bySuper.values()].map((s) => ({
-    ...s, categories: [...s.categories.values()],
+    ...finishBucket(s),
+    categories: [...s.categories.values()].map(finishBucket),
   }));
 }
 
@@ -248,7 +283,8 @@ export async function systemStockSource(auditId) {
 
 export async function varianceReport(
   auditId,
-  { countedOnly = false, categoryId = null, superCategoryId = null, systemData = 'all' } = {}
+  { countedOnly = false, categoryId = null, superCategoryId = null, systemData = 'all',
+    rateFilter = 'all' } = {}
 ) {
   const items = await auditItemAggregates(auditId);
   const tol = await getTolerances();
@@ -262,6 +298,10 @@ export async function varianceReport(
   // [All] [With system data] [No system data]
   if (systemData === 'with') source = source.filter((i) => i.has_system);
   else if (systemData === 'without') source = source.filter((i) => !i.has_system);
+  // [All] [With rate] [No rate] — an item with no rate contributes no value
+  // figures, so this isolates exactly what the value columns are missing.
+  if (rateFilter === 'with') source = source.filter((i) => i.rate != null);
+  else if (rateFilter === 'without') source = source.filter((i) => i.rate == null);
 
   const rows = source.map((i) => {
     // A MISSING system row is NULL, never zero.
@@ -275,20 +315,36 @@ export async function varianceReport(
       : null;
     const physical = i.physical_qty;
     const variance = hasSystem ? physical - system : null;
-    const pct = hasSystem
-      ? (system !== 0 ? (variance / system) * 100 : (variance ? 100 : 0))
-      : null;
+    const pct = hasSystem ? pctOf(variance, system) : null;
+
+    // ── Rupee impact ───────────────────────────────────────────────────────
+    // A variance report is about the money, not just the count. Three separate
+    // figures, because they answer three different questions:
+    //   physical_value — what is actually on the shelf
+    //   system_value   — what the books say should be there
+    //   variance_value — the rupee impact of the difference
+    //                    (negative = shortage, positive = excess)
+    //
+    // A NULL rate is NOT zero. An item priced at ₹0 and an item nobody has
+    // priced yet are different things, and averaging a missing rate in as zero
+    // would understate every total silently. So all three stay null.
+    const rate = i.rate == null ? null : Number(i.rate);
+    const money = (qty) => (rate == null || qty == null ? null : round2(qty * rate));
+
     return {
       name: i.name, unit: i.unit, is_liquor: i.is_liquor,
       super_category: i.super_category_name || '—', category: i.category_name || '—',
       super_category_id: i.super_category_id, category_id: i.category_id,
+      rate,
       physical_qty: physical,
       physical_open_ml: i.is_liquor ? Number(i.total_open_ml) : null,
       system_qty: system,
       system_open_ml: i.is_liquor && hasSystem ? Number(i.system_open_ml ?? 0) : null,
       variance,
-      variance_pct: pct == null ? null : Number(pct.toFixed(2)),
-      value: i.value,
+      variance_pct: pct,
+      physical_value: money(physical),
+      system_value: money(system),
+      variance_value: money(variance),
       counted: i.counted,
       has_system: hasSystem,
       // Items with no figure are reported as a data gap, not as a shortage.
@@ -299,15 +355,25 @@ export async function varianceReport(
   // Totals and the overall variance % EXCLUDE rows with no system data.
   const withSystem = rows.filter((r) => r.has_system);
   const noSystem = rows.filter((r) => !r.has_system);
-  const totalPhysical = withSystem.reduce((s, r) => s + Number(r.physical_qty || 0), 0);
-  const totalSystem = withSystem.reduce((s, r) => s + Number(r.system_qty || 0), 0);
-  const totalVariance = withSystem.reduce((s, r) => s + Number(r.variance || 0), 0);
+
+  // The same accumulator the category and super-category subtotals use, so the
+  // grand total can never be computed on a different basis from the rows above
+  // it. Rupee columns skip items with no rate rather than counting them as 0.
+  const totalBucket = emptyBucket({});
+  for (const r of withSystem) addToBucket(totalBucket, r);
+  const totals = finishBucket(totalBucket);
+
+  const groups = groupVariance(withSystem);
 
   const total = items.length;
   const counted = items.filter((i) => i.counted || i.not_applicable).length;
   return {
     rows,
-    groups: groupVariance(withSystem),
+    groups,
+    // GRAND TOTAL for grouped mode, matching R1. Identical to `totals` by
+    // construction — both come from the same bucket arithmetic — but exposed
+    // separately so the grouped view does not have to reach for the flat one.
+    grand: totals,
     provisional,
     progress: { total, counted, uncounted: total - counted },
     // True only when nothing at all has been imported or entered.
@@ -316,13 +382,19 @@ export async function varianceReport(
     totals: {
       with_system: withSystem.length,
       no_system_data: noSystem.length,
-      physical_qty: totalPhysical,
-      system_qty: totalSystem,
-      variance: totalVariance,
+      // Counted over EVERY row in the current filter, not just those with a
+      // system figure: the header states how many items the value columns
+      // cannot speak for.
+      no_rate: rows.filter((r) => r.rate == null).length,
+      no_rate_with_system: totals.no_rate,
+      physical_qty: totals.physical_qty,
+      system_qty: totals.system_qty,
+      variance: totals.variance,
       // Overall %, computed only over rows that actually have a system figure.
-      variance_pct: totalSystem !== 0
-        ? Number(((totalVariance / totalSystem) * 100).toFixed(2))
-        : null,
+      variance_pct: totals.system_qty !== 0 ? totals.variance_pct : null,
+      physical_value: totals.physical_value,
+      system_value: totals.system_value,
+      variance_value: totals.variance_value,
     },
   };
 }
@@ -338,14 +410,18 @@ export async function consolidated(auditIds) {
     if (!audit) continue;
     const { rows, groups, provisional, progress, totals, hasSystemStock, provenance } =
       await varianceReport(id);
-    const physicalValue = rows.reduce((s, r) => s + (r.value || 0), 0);
+    // `value` became `physical_value` when R4 split it into physical / system /
+    // variance. Items with no rate contribute nothing, never a false zero.
+    const physicalValue = rows.reduce((s, r) => s + (r.physical_value || 0), 0);
     const critical = rows.filter((r) => r.status === 'Critical').length;
     stores.push({
       audit_id: id, store_name: audit.store_name,
       audit_date: audit.audit_date, status: audit.status,
-      items: rows.length, physical_value: physicalValue,
+      items: rows.length, physical_value: round2(physicalValue),
       // Variance totals exclude rows with no system figure.
-      total_variance_qty: totals.variance, critical_items: critical,
+      total_variance_qty: totals.variance,
+      total_variance_value: totals.variance_value,
+      critical_items: critical,
       no_system_data: totals.no_system_data,
       has_system_stock: hasSystemStock,
       system_source: provenance.source?.filename ?? null,
@@ -356,7 +432,8 @@ export async function consolidated(auditIds) {
         store_name: audit.store_name, audit_id: id,
         super_category: g.super_category, items: g.items,
         physical_qty: g.physical_qty, system_qty: g.system_qty,
-        variance: g.variance, value: g.value,
+        variance: g.variance,
+        physical_value: g.physical_value, variance_value: g.variance_value,
       });
     }
   }

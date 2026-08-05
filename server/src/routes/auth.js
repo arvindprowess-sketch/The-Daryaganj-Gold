@@ -3,10 +3,37 @@ import { query } from '../db.js';
 import { verifyPassword, hashPassword, signTokens, signAccessToken, verifyRefreshToken } from '../lib/auth.js';
 import { requireAuth } from '../middleware/auth.js';
 import { logActivity } from '../lib/activityLog.js';
+import { loginLimiter, refreshLimiter } from '../middleware/rateLimit.js';
 
 const router = Router();
 
-router.post('/login', async (req, res) => {
+// The client IP as the proxy reports it. `app.set('trust proxy', …)` in
+// index.js decides how much of X-Forwarded-For is believed.
+const clientIp = (req) => req.ip || req.socket?.remoteAddress || 'unknown';
+
+// Every rejected sign-in goes to the audit trail with the username tried and
+// the source address, so a password-guessing run is visible after the fact
+// rather than only in whatever the process happened to log to stdout.
+// The password itself is NEVER recorded.
+async function logFailedLogin(req, username, reason, userId = null) {
+  try {
+    await logActivity({
+      entityType: 'auth', entityId: userId, action: 'login_failed', recordCount: 1,
+      detail: {
+        username: String(username || '').slice(0, 100),
+        reason,
+        ip: clientIp(req),
+        user_agent: String(req.headers['user-agent'] || '').slice(0, 200),
+      },
+      userId,
+    });
+  } catch (err) {
+    // A logging failure must never turn a rejected login into a 500.
+    console.error('Failed to record a failed login:', err.message);
+  }
+}
+
+router.post('/login', loginLimiter, async (req, res) => {
   const { username, password } = req.body || {};
   if (!username || !password) {
     return res.status(400).json({ error: 'Username and password required' });
@@ -17,10 +44,17 @@ router.post('/login', async (req, res) => {
   );
   const user = rows[0];
   if (!user || !user.is_active) {
+    // The response stays deliberately identical for both cases — it must not
+    // reveal whether the username exists — but the log distinguishes them.
+    await logFailedLogin(req, username, user ? 'account_inactive' : 'unknown_username',
+      user ? user.id : null);
     return res.status(401).json({ error: 'Invalid credentials' });
   }
   const ok = await verifyPassword(password, user.password_hash);
-  if (!ok) return res.status(401).json({ error: 'Invalid credentials' });
+  if (!ok) {
+    await logFailedLogin(req, username, 'wrong_password', user.id);
+    return res.status(401).json({ error: 'Invalid credentials' });
+  }
 
   const { token, refreshToken } = signTokens(user);
   res.json({
@@ -67,7 +101,7 @@ router.post('/change-password', requireAuth, async (req, res) => {
 
 // Exchange a valid refresh token for a fresh access token. The client calls
 // this transparently on a 401 so an active session never drops.
-router.post('/refresh', async (req, res) => {
+router.post('/refresh', refreshLimiter, async (req, res) => {
   const { refreshToken } = req.body || {};
   if (!refreshToken) return res.status(400).json({ error: 'refreshToken required' });
   let payload;

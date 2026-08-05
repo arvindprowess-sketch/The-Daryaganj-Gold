@@ -37,17 +37,27 @@ export default function Readiness() {
                    : 'bg-amber-50 border-2 border-amber-400 text-amber-900'}`}>
         {data.ready
           ? '✓ All checks passed — ready to count.'
-          : `${data.checks.filter((c) => !c.ok).length} check(s) need attention before counting.`}
+          : `${data.checks.filter((c) => !c.ok && !c.advisory).length} check(s) need attention before counting.`}
       </div>
 
       <div className="card divide-y">
         {data.checks.map((c) => (
           <div key={c.key} className="flex items-start gap-3 px-4 py-3">
-            <span className={`text-lg leading-none mt-0.5 ${c.ok ? 'text-green-600' : 'text-red-600'}`}>
-              {c.ok ? '✓' : '✗'}
+            {/* Advisory = a production configuration check seen from a
+                development environment: fix before deploying, not right now. */}
+            <span className={`text-lg leading-none mt-0.5 ${
+              c.ok ? 'text-green-600' : c.advisory ? 'text-amber-600' : 'text-red-600'}`}>
+              {c.ok ? '✓' : c.advisory ? '⚠' : '✗'}
             </span>
             <div className="flex-1 min-w-0">
-              <div className="font-medium">{c.label}</div>
+              <div className="font-medium">
+                {c.label}
+                {!c.ok && c.blocking && (
+                  <span className="ml-2 chip bg-red-100 text-red-700 border-red-200">
+                    blocks startup
+                  </span>
+                )}
+              </div>
               <div className="text-sm text-slate-500">{c.detail}</div>
             </div>
             {c.action === 'delete_demo' && (

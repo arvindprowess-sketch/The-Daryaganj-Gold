@@ -11,6 +11,12 @@ const REPORTS = [
   ['exceptions', 'R6 Exceptions'],
 ];
 
+// A missing figure is shown as '—', never as 0. On an audit report "priced at
+// zero" and "nobody has priced this yet" must never look the same.
+const num = (v) => (v == null ? '—' : v);
+const money = (v) => (v == null ? '—' : Number(v).toLocaleString('en-IN',
+  { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
+
 // Reports are the client deliverable: TOTALS ONLY, one line per item.
 // The per-entry breakdown lives on the admin count-entry screen.
 export default function Reports() {
@@ -23,8 +29,11 @@ export default function Reports() {
   const [vFilter, setVFilter] = useState('all'); // variance: all | counted
   const [vSuper, setVSuper] = useState('');         // variance: super category filter
   const [vCategory, setVCategory] = useState('');   // variance: category filter
-  const [vGroup, setVGroup] = useState(false);      // variance: group by category
+  // ON by default: the subtotals ARE the variance report. Off, they were hidden
+  // behind a checkbox nobody had reason to find.
+  const [vGroup, setVGroup] = useState(true);       // variance: group by category
   const [vSystem, setVSystem] = useState('all');    // all | with | without
+  const [vRate, setVRate] = useState('all');        // all | with | without
   const [categories, setCategories] = useState([]);
   const [supers, setSupers] = useState([]);
   const [consolidateIds, setConsolidateIds] = useState([]);
@@ -45,6 +54,7 @@ export default function Reports() {
         vCategory ? `category_id=${vCategory}` : '',
         vGroup ? 'group_by=category' : '',
         vSystem !== 'all' ? `system_data=${vSystem}` : '',
+        vRate !== 'all' ? `rate=${vRate}` : '',
       ].filter(Boolean)
     : [];
 
@@ -58,7 +68,7 @@ export default function Reports() {
       .catch((e) => { setData({ error: e.message }); setLoadedReport(forReport); })
       .finally(() => setLoading(false));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [report, auditId, vFilter, vSuper, vCategory, vGroup, vSystem]);
+  }, [report, auditId, vFilter, vSuper, vCategory, vGroup, vSystem, vRate]);
 
   const store = audits.find((a) => String(a.id) === String(auditId));
   const filterQs = varianceParams.length ? `&${varianceParams.join('&')}` : '';
@@ -98,6 +108,21 @@ export default function Reports() {
         </div>
       )}
 
+      {/* Value figures are only as complete as the rates behind them. Say so up
+          front rather than letting a reader assume the totals are the whole
+          picture. */}
+      {report === 'variance' && loadedReport === 'variance' && data?.totals?.no_rate > 0 && (
+        <div className="mb-4 rounded-xl border-2 border-amber-300 bg-amber-50 px-4 py-3 text-amber-900">
+          <span className="font-bold">{data.totals.no_rate} items have no rate</span>
+          {' '}— value figures exclude them.{' '}
+          <button className="underline font-medium" onClick={() => setVRate('without')}>
+            Show only those items
+          </button>
+          {' · '}
+          <Link className="underline font-medium" to="/admin/items">Set rates in the item master</Link>
+        </div>
+      )}
+
       {report === 'variance' && (
         <div className="flex flex-wrap items-center gap-2 mb-4">
           <button className={vFilter === 'all' ? 'chip-on' : 'chip-off'} onClick={() => setVFilter('all')}>All items</button>
@@ -116,6 +141,13 @@ export default function Reports() {
             {[['all', 'All'], ['with', 'With system data'], ['without', 'No system data']].map(([k, l]) => (
               <button key={k} className={vSystem === k ? 'chip-on' : 'chip-off'}
                       onClick={() => setVSystem(k)}>{l}</button>
+            ))}
+          </span>
+          {/* Isolates the items the value columns cannot speak for. */}
+          <span className="flex gap-1">
+            {[['all', 'All'], ['with', 'With rate'], ['without', 'No rate']].map(([k, l]) => (
+              <button key={k} className={vRate === k ? 'chip-on' : 'chip-off'}
+                      onClick={() => setVRate(k)}>{l}</button>
             ))}
           </span>
           <label className="flex items-center gap-2 text-sm text-slate-600 select-none">
@@ -199,15 +231,20 @@ export default function Reports() {
               </div>
             )}
             <h3 className="font-bold mb-2">By store</h3>
-            <Table cols={['Store', 'Date', 'Status', 'Items', 'Uncounted', 'Physical value', 'Total variance', 'Critical']}
+            <Table cols={['Store', 'Date', 'Status', 'Items', 'Uncounted', 'Physical value',
+                          'Total variance', 'Variance value', 'Critical']}
+                   align={['', '', '', 'right', 'right', 'right', 'right', 'right', 'right']}
                    rows={consolidated.rows.map((r) => [r.store_name, new Date(r.audit_date).toLocaleDateString(),
-                     r.status, r.items, r.uncounted, (r.physical_value || 0).toFixed(2), r.total_variance_qty, r.critical_items])} />
+                     r.status, r.items, r.uncounted, money(r.physical_value),
+                     r.total_variance_qty, money(r.total_variance_value), r.critical_items])} />
             {/* Super-category-level comparison across stores. */}
             <h3 className="font-bold mt-6 mb-2">By super category</h3>
-            <Table cols={['Super Category', 'Store', 'Items', 'Physical', 'System', 'Variance', 'Value']}
+            <Table cols={['Super Category', 'Store', 'Items', 'Physical', 'System', 'Variance',
+                          'Physical value', 'Variance value']}
+                   align={['', '', 'right', 'right', 'right', 'right', 'right', 'right']}
                    rows={(consolidated.superCategories || []).map((r) => [
                      r.super_category, r.store_name, r.items, r.physical_qty,
-                     r.system_qty, r.variance, (r.value || 0).toFixed(2)])} />
+                     r.system_qty, r.variance, money(r.physical_value), money(r.variance_value)])} />
           </div>
         )}
       </div>
@@ -215,12 +252,23 @@ export default function Reports() {
   );
 }
 
-function Table({ cols, rows }) {
+// `align` marks columns that hold numbers so figures line up on the decimal
+// point instead of drifting left. `rowClass` lets a caller emphasise subtotal
+// and total lines without a second table component.
+function Table({ cols, rows, align = [], rowClass }) {
+  const cell = (j) => (align[j] === 'right' ? 'px-3 py-2 text-right tabular-nums' : 'px-3 py-2');
+  const head = (j) => (align[j] === 'right' ? 'px-3 py-2 text-right' : 'px-3 py-2');
   return (
     <table className="w-full text-sm">
-      <thead className="bg-slate-50 text-left text-slate-500"><tr>{cols.map((c) => <th key={c} className="px-3 py-2">{c}</th>)}</tr></thead>
+      <thead className="bg-slate-50 text-left text-slate-500">
+        <tr>{cols.map((c, j) => <th key={c} className={head(j)}>{c}</th>)}</tr>
+      </thead>
       <tbody className="divide-y">
-        {rows.map((r, i) => <tr key={i}>{r.map((c, j) => <td key={j} className="px-3 py-2">{c}</td>)}</tr>)}
+        {rows.map((r, i) => (
+          <tr key={i} className={rowClass ? rowClass(r, i) : undefined}>
+            {r.map((c, j) => <td key={j} className={cell(j)}>{c}</td>)}
+          </tr>
+        ))}
         {rows.length === 0 && <tr><td colSpan={cols.length} className="p-6 text-center text-slate-400">No data.</td></tr>}
       </tbody>
     </table>
@@ -295,10 +343,33 @@ function ReportView({ report, data, grouped }) {
         </div>
       );
     }
-    const cols = ['Super Category', 'Category', 'Item Name', 'Unit', 'Physical', 'System', 'Variance', '%', 'Counted', 'Status'];
-    const toRow = (r) => [r.super_category, r.category, r.name, r.unit, r.physical_qty,
-                          r.system_qty ?? '—', r.variance ?? '—', r.variance_pct ?? '—',
-                          r.counted ? 'Yes' : 'No', r.status];
+    // Rate and the two rupee columns are the point of a variance report: a
+    // negative Variance Value is a shortage, positive is an excess.
+    const cols = ['Super Category', 'Category', 'Item Name', 'Unit', 'Rate', 'Physical',
+                  'System', 'Variance', '%', 'Physical Value', 'Variance Value', 'Status'];
+    // Every numeric column right-aligned so figures line up down the page.
+    const align = ['', '', '', '', 'right', 'right', 'right', 'right', 'right',
+                   'right', 'right', ''];
+    // A null rate or a missing system figure shows as '—', never as 0 — the two
+    // mean completely different things on an audit report.
+    const toRow = (r) => [r.super_category, r.category, r.name, r.unit,
+                          money(r.rate), r.physical_qty,
+                          num(r.system_qty), num(r.variance),
+                          r.variance_pct == null ? '—' : `${r.variance_pct}%`,
+                          money(r.physical_value), money(r.variance_value), r.status];
+
+    // Subtotal / total lines carry the same figures in the same columns, so a
+    // reader can run straight down any column from item to grand total.
+    const summaryRow = (label, b, labelCol = 1) => {
+      const r = ['', '', '', '', '', b.physical_qty, b.system_qty, b.variance,
+                 b.variance_pct == null ? '—' : `${b.variance_pct}%`,
+                 money(b.physical_value), money(b.variance_value), `${b.items} items`];
+      r[labelCol] = label;
+      return r;
+    };
+    const isSummary = (r) => /SUBTOTAL|GRAND TOTAL/.test(`${r[0]} ${r[1]}`);
+    const emphasise = (r) => (isSummary(r) ? 'bg-slate-50 font-semibold' : undefined);
+
     if (grouped) {
       const groups = data.groups || [];
       return (
@@ -315,34 +386,71 @@ function ReportView({ report, data, grouped }) {
                     <h4 className="font-semibold text-sm text-slate-600 mb-1">
                       {c.category} <span className="font-normal text-slate-400">({c.items})</span>
                     </h4>
-                    <Table cols={cols} rows={[
+                    <Table cols={cols} align={align} rowClass={emphasise} rows={[
                       ...c.rows.map(toRow),
-                      ['', `${c.category} SUBTOTAL`, '', '', c.physical_qty, c.system_qty, c.variance, '', '', ''],
+                      summaryRow(`${c.category} SUBTOTAL`, c),
                     ]} />
                   </div>
                 ))}
               </div>
-              <div className="mt-2 rounded-lg bg-slate-100 px-3 py-2 text-sm font-bold text-slate-700">
-                {g.super_category} subtotal — physical {g.physical_qty} · system {g.system_qty} · variance {g.variance}
+              {/* Super category subtotal — same columns as the rows above it. */}
+              <div className="mt-2">
+                <Table cols={cols} align={align} rowClass={() => 'bg-slate-100 font-bold'}
+                       rows={[summaryRow(`${g.super_category} SUBTOTAL`, g, 0)]} />
               </div>
             </div>
           ))}
+          {/* GRAND TOTAL, matching R1. */}
+          {groups.length > 0 && data.grand && (
+            <div>
+              <h3 className="font-bold text-lg mb-2">Grand total</h3>
+              <Table cols={cols} align={align} rowClass={() => 'bg-teal-50 font-bold'}
+                     rows={[summaryRow('GRAND TOTAL', data.grand, 0)]} />
+              <p className="mt-2 text-sm text-slate-600">
+                Total variance value:{' '}
+                <span className={`font-bold ${data.grand.variance_value < 0 ? 'text-red-700' : 'text-green-700'}`}>
+                  ₹{money(data.grand.variance_value)}
+                </span>{' '}
+                <span className="text-slate-500">
+                  ({data.grand.variance_value < 0 ? 'net shortage' : 'net excess'})
+                </span>
+                {data.totals?.no_rate > 0 && (
+                  <span className="text-amber-700">
+                    {' '}· excludes {data.totals.no_rate} item(s) with no rate
+                  </span>
+                )}
+              </p>
+            </div>
+          )}
           {groups.length === 0 && <p className="text-slate-400">No data.</p>}
         </div>
       );
     }
     return (
       <>
-        <Table cols={cols} rows={data.rows.map(toRow)} />
+        <Table cols={cols} align={align} rows={data.rows.map(toRow)} />
         {data.totals && (
-          <div className="mt-3 rounded-lg bg-slate-100 px-3 py-2 text-sm font-semibold text-slate-700">
-            Totals (rows with system data only) — physical {data.totals.physical_qty} · system{' '}
-            {data.totals.system_qty} · variance {data.totals.variance}
-            {data.totals.variance_pct != null && <> ({data.totals.variance_pct}%)</>}
-            {data.totals.no_system_data > 0 && (
-              <span className="font-normal text-amber-700">
-                {' '}· {data.totals.no_system_data} item(s) with NO SYSTEM DATA excluded
+          <div className="mt-3 rounded-lg bg-slate-100 px-3 py-2 text-sm text-slate-700">
+            <div className="font-semibold">
+              Totals (rows with system data only) — physical {data.totals.physical_qty} · system{' '}
+              {data.totals.system_qty} · variance {data.totals.variance}
+              {data.totals.variance_pct != null && <> ({data.totals.variance_pct}%)</>}
+            </div>
+            <div className="mt-1">
+              Physical value <span className="font-semibold tabular-nums">₹{money(data.totals.physical_value)}</span>
+              {' '}· system value <span className="font-semibold tabular-nums">₹{money(data.totals.system_value)}</span>
+              {' '}· variance value{' '}
+              <span className={`font-bold tabular-nums ${data.totals.variance_value < 0 ? 'text-red-700' : 'text-green-700'}`}>
+                ₹{money(data.totals.variance_value)}
               </span>
+            </div>
+            {(data.totals.no_system_data > 0 || data.totals.no_rate > 0) && (
+              <div className="mt-1 text-amber-700">
+                {data.totals.no_system_data > 0 &&
+                  <>{data.totals.no_system_data} item(s) with NO SYSTEM DATA excluded from variance totals. </>}
+                {data.totals.no_rate > 0 &&
+                  <>{data.totals.no_rate} item(s) have no rate — value figures exclude them.</>}
+              </div>
             )}
           </div>
         )}

@@ -16,8 +16,8 @@ const n = (v) => (v == null ? '' : v);
 // Reports given to the client show TOTALS ONLY — one line per item. The
 // per-entry breakdown lives on the admin count screen, never in a report.
 
-function sendXlsx(res, filename, sheets) {
-  const buf = buildWorkbook(sheets);
+async function sendXlsx(res, filename, sheets) {
+  const buf = await buildWorkbook(sheets);
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
   res.setHeader('Content-Disposition', `attachment; filename="${filename}.xlsx"`);
   res.send(buf);
@@ -143,8 +143,13 @@ router.get('/variance/:auditId', async (req, res) => {
   // [All] [With system data] [No system data]
   const systemData = ['with', 'without'].includes(req.query.system_data)
     ? req.query.system_data : 'all';
-  const { rows, groups, provisional, progress, totals, hasSystemStock, provenance } =
-    await varianceReport(req.params.auditId, { countedOnly, categoryId, superCategoryId, systemData });
+  // [All] [With rate] [No rate] — isolates the items the value columns cannot
+  // speak for.
+  const rateFilter = ['with', 'without'].includes(req.query.rate)
+    ? req.query.rate : 'all';
+  const { rows, groups, grand, provisional, progress, totals, hasSystemStock, provenance } =
+    await varianceReport(req.params.auditId,
+      { countedOnly, categoryId, superCategoryId, systemData, rateFilter });
   const format = req.query.format;
 
   // No system stock at all → do NOT render a table of 100% shortages. An empty
@@ -166,7 +171,7 @@ router.get('/variance/:auditId', async (req, res) => {
       });
     }
     return res.json({
-      audit, rows: [], groups: [], provisional, progress,
+      audit, rows: [], groups: [], grand, provisional, progress,
       hasSystemStock: false, provenance, totals,
       message,
     });
@@ -185,13 +190,32 @@ router.get('/variance/:auditId', async (req, res) => {
     totals.no_system_data > 0
       ? `${totals.no_system_data} item(s) shown as NO SYSTEM DATA and excluded from variance totals`
       : null,
+    // The value columns cannot speak for an item with no rate, so the export
+    // says how many there are rather than letting the reader assume zero.
+    totals.no_rate > 0
+      ? `${totals.no_rate} item(s) have no rate — value figures exclude them`
+      : null,
   ].filter(Boolean);
+
   // Standard column order: Super Category | Category | Item Name | Unit | …
-  const cols = ['Super Category', 'Category', 'Item Name', 'Unit', 'Physical', 'System',
-                'Variance', 'Variance %', 'Counted', 'Status'];
-  const toRow = (d) => [d.super_category, d.category, d.name, d.unit, d.physical_qty,
-                        n(d.system_qty), n(d.variance), n(d.variance_pct),
-                        d.counted ? 'Yes' : 'No', d.status];
+  // Rate and the two rupee columns are what make this a variance report rather
+  // than a count comparison: negative variance value = shortage.
+  const cols = ['Super Category', 'Category', 'Item Name', 'Unit', 'Rate', 'Physical',
+                'System', 'Variance', 'Variance %', 'Physical Value', 'Variance Value',
+                'Status'];
+  const toRow = (d) => [d.super_category, d.category, d.name, d.unit, n(d.rate),
+                        d.physical_qty, n(d.system_qty), n(d.variance), n(d.variance_pct),
+                        n(d.physical_value), n(d.variance_value), d.status];
+
+  // A subtotal / total line carries every figure a row carries, in the same
+  // columns, so it can be read straight down the page.
+  const summaryRow = (label, b, labelCol = 1) => {
+    const r = ['', '', '', '', '', b.physical_qty, b.system_qty, b.variance,
+               n(b.variance_pct), n(b.physical_value), n(b.variance_value),
+               `${b.items} items`];
+    r[labelCol] = label;
+    return r;
+  };
 
   if (format === 'xlsx') {
     const aoa = [];
@@ -201,41 +225,48 @@ router.get('/variance/:auditId', async (req, res) => {
     aoa.push([]);
     aoa.push(cols);
     if (grouped) {
-      // Subtotals at category and super category level.
+      // Subtotals at category and super category level, then a grand total.
       for (const g of groups) {
         for (const c of g.categories) {
           aoa.push(...c.rows.map(toRow));
-          aoa.push([g.super_category, `${c.category} — SUBTOTAL`, '', '',
-                    c.physical_qty, c.system_qty, c.variance, '', '', '']);
+          aoa.push(summaryRow(`${c.category} — SUBTOTAL`, c));
         }
-        aoa.push([`${g.super_category} — SUBTOTAL`, '', '', '',
-                  g.physical_qty, g.system_qty, g.variance, '', '', '']);
+        aoa.push(summaryRow(`${g.super_category} — SUPER CATEGORY SUBTOTAL`, g, 0));
         aoa.push([]);
       }
+      aoa.push(summaryRow('GRAND TOTAL', grand, 0));
     } else {
       aoa.push(...rows.map(toRow));
     }
     // Overall totals — computed only over rows that have a system figure.
     aoa.push([]);
-    aoa.push(['TOTAL (rows with system data only)', '', '', '',
-              totals.physical_qty, totals.system_qty, totals.variance,
-              n(totals.variance_pct), '', `${totals.with_system} items`]);
+    // `totals` counts its rows as with_system; the summary row wants `items`.
+    aoa.push(summaryRow('TOTAL (rows with system data only)',
+                        { ...totals, items: totals.with_system }, 0));
     if (totals.no_system_data > 0) {
       aoa.push([`${totals.no_system_data} item(s) with NO SYSTEM DATA — excluded from the totals above`]);
+    }
+    if (totals.no_rate > 0) {
+      aoa.push([`${totals.no_rate} item(s) have no rate — value figures exclude them`]);
     }
     return sendXlsx(res, fname, [{ name: 'Variance', aoa }]);
   }
   if (format === 'pdf') {
-    const widths = [80, 80, 120, 60, 50, 50, 50, 50, 40, 55];
+    const widths = [70, 70, 105, 50, 40, 45, 45, 45, 40, 60, 60, 50];
     // Overall totals, excluding rows with no system figure.
     const totalsBlock = {
       title: 'Totals (rows with system data only)',
-      columns: ['Items', 'Physical', 'System', 'Variance', 'Variance %'],
+      columns: ['Items', 'Physical', 'System', 'Variance', 'Variance %',
+                'Physical Value', 'Variance Value'],
       rows: [[totals.with_system, totals.physical_qty, totals.system_qty,
-              totals.variance, n(totals.variance_pct)]],
-      note: totals.no_system_data > 0
-        ? `${totals.no_system_data} item(s) with NO SYSTEM DATA are excluded from these totals.`
-        : null,
+              totals.variance, n(totals.variance_pct),
+              n(totals.physical_value), n(totals.variance_value)]],
+      note: [
+        totals.no_system_data > 0
+          ? `${totals.no_system_data} item(s) with NO SYSTEM DATA are excluded from these totals.` : null,
+        totals.no_rate > 0
+          ? `${totals.no_rate} item(s) have no rate — value figures exclude them.` : null,
+      ].filter(Boolean).join(' ') || null,
     };
     return sendPdf(res, fname, {
       title: `R4 — Variance Report${provisional ? ' (PROVISIONAL)' : ''}`,
@@ -246,18 +277,25 @@ router.get('/variance/:auditId', async (req, res) => {
             ...g.categories.map((c) => ({
               title: `${g.super_category} › ${c.category}`,
               columns: cols, widths,
-              rows: [...c.rows.map(toRow),
-                     ['', 'SUBTOTAL', '', '', c.physical_qty, c.system_qty, c.variance, '', '', '']],
+              rows: [...c.rows.map(toRow), summaryRow('SUBTOTAL', c)],
             })),
             { title: `${g.super_category} — SUPER CATEGORY SUBTOTAL`,
-              columns: ['Items', 'Physical', 'System', 'Variance'],
-              rows: [[g.items, g.physical_qty, g.system_qty, g.variance]] },
-          ]), totalsBlock]
+              columns: ['Items', 'Physical', 'System', 'Variance', 'Variance %',
+                        'Physical Value', 'Variance Value'],
+              rows: [[g.items, g.physical_qty, g.system_qty, g.variance, n(g.variance_pct),
+                      n(g.physical_value), n(g.variance_value)]] },
+          ]),
+          { title: 'GRAND TOTAL',
+            columns: ['Items', 'Physical', 'System', 'Variance', 'Variance %',
+                      'Physical Value', 'Variance Value'],
+            rows: [[grand.items, grand.physical_qty, grand.system_qty, grand.variance,
+                    n(grand.variance_pct), n(grand.physical_value), n(grand.variance_value)]] },
+          totalsBlock]
         : [{ title: 'Variance (Physical − System)', columns: cols, widths, rows: rows.map(toRow) },
            totalsBlock],
     });
   }
-  res.json({ audit, rows, groups, provisional, progress, totals, hasSystemStock, provenance });
+  res.json({ audit, rows, groups, grand, provisional, progress, totals, hasSystemStock, provenance });
 });
 
 // ── R5 Consolidated (all stores) ─────────────────────────────────────────────
@@ -270,13 +308,16 @@ router.get('/consolidated', async (req, res) => {
   const fname = `${anyProvisional ? 'PROVISIONAL_' : ''}R5_consolidated`;
   const stamp = anyProvisional
     ? 'PROVISIONAL — one or more audits are still in progress.' : null;
-  const cols = ['Store', 'Date', 'Status', 'Items', 'Uncounted', 'Physical Value', 'Total Variance Qty', 'Critical Items'];
+  const cols = ['Store', 'Date', 'Status', 'Items', 'Uncounted', 'Physical Value',
+                'Total Variance Qty', 'Total Variance Value', 'Critical Items'];
   const toRow = (d) => [d.store_name, d.audit_date, d.status, d.items, d.uncounted,
-                        d.physical_value, d.total_variance_qty, d.critical_items];
+                        d.physical_value, d.total_variance_qty, n(d.total_variance_value),
+                        d.critical_items];
   // Super-category-level comparison across stores.
-  const scCols = ['Super Category', 'Store', 'Items', 'Physical', 'System', 'Variance', 'Value'];
+  const scCols = ['Super Category', 'Store', 'Items', 'Physical', 'System', 'Variance',
+                  'Physical Value', 'Variance Value'];
   const scRow = (r) => [r.super_category, r.store_name, r.items, r.physical_qty,
-                        r.system_qty, r.variance, Number((r.value || 0).toFixed(2))];
+                        r.system_qty, r.variance, n(r.physical_value), n(r.variance_value)];
   const scSorted = [...superCategories].sort(
     (a, b) => a.super_category.localeCompare(b.super_category) || a.store_name.localeCompare(b.store_name)
   );

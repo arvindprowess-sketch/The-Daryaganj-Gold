@@ -1,15 +1,30 @@
-import * as XLSX from 'xlsx';
+import ExcelJS from 'exceljs';
 import PDFDocument from 'pdfkit';
 
 // ── Excel ────────────────────────────────────────────────────────────────────
 // sheets: [{ name, aoa }] where aoa is an array-of-arrays (rows of cells).
-export function buildWorkbook(sheets) {
-  const wb = XLSX.utils.book_new();
-  for (const { name, aoa } of sheets) {
-    const ws = XLSX.utils.aoa_to_sheet(aoa);
-    XLSX.utils.book_append_sheet(wb, ws, name.slice(0, 31));
-  }
-  return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+//
+// Built with exceljs. SheetJS (xlsx@0.18.5) carried two unfixable high-severity
+// advisories — prototype pollution and a ReDoS — with no patched release. The
+// output is unchanged: the same rows, in the same order, one sheet per entry.
+
+// Excel rejects these characters in a sheet name, and caps it at 31 chars.
+function sheetName(name, index) {
+  const cleaned = String(name || `Sheet${index + 1}`).replace(/[*?:\\/[\]]/g, '-').slice(0, 31);
+  return cleaned.trim() || `Sheet${index + 1}`;
+}
+
+export async function buildWorkbook(sheets) {
+  const wb = new ExcelJS.Workbook();
+  wb.creator = 'Audix Solutions & Co.';
+  wb.created = new Date();
+  sheets.forEach(({ name, aoa }, i) => {
+    const ws = wb.addWorksheet(sheetName(name, i));
+    // A null or undefined cell must stay blank, not become the text "null".
+    ws.addRows((aoa || []).map((row) => row.map((cell) => (cell == null ? '' : cell))));
+  });
+  // Node returns a Buffer here; res.send() takes it directly.
+  return Buffer.from(await wb.xlsx.writeBuffer());
 }
 
 // ── PDF ──────────────────────────────────────────────────────────────────────
