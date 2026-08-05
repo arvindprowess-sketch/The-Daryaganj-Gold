@@ -132,6 +132,10 @@ export const api = {
     request(path, { method: 'POST', headers: authHeaders(), body: formData }),
   // returns a Blob (for report downloads)
   blob: (path) => request(path, { headers: authHeaders() }),
+  // multipart POST that returns a file (e.g. downloading an import's
+  // unmatched / missing list, which is derived from the uploaded file)
+  uploadBlob: (path, formData) =>
+    request(path, { method: 'POST', headers: authHeaders(), body: formData }),
 };
 
 // Trigger a browser download from a report endpoint.

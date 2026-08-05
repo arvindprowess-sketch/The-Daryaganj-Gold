@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { api, downloadReport } from '../../lib/api.js';
 import { Spinner } from '../../components/ui.jsx';
 
@@ -23,6 +24,7 @@ export default function Reports() {
   const [vSuper, setVSuper] = useState('');         // variance: super category filter
   const [vCategory, setVCategory] = useState('');   // variance: category filter
   const [vGroup, setVGroup] = useState(false);      // variance: group by category
+  const [vSystem, setVSystem] = useState('all');    // all | with | without
   const [categories, setCategories] = useState([]);
   const [supers, setSupers] = useState([]);
   const [consolidateIds, setConsolidateIds] = useState([]);
@@ -42,6 +44,7 @@ export default function Reports() {
         vSuper ? `super_category_id=${vSuper}` : '',
         vCategory ? `category_id=${vCategory}` : '',
         vGroup ? 'group_by=category' : '',
+        vSystem !== 'all' ? `system_data=${vSystem}` : '',
       ].filter(Boolean)
     : [];
 
@@ -55,7 +58,7 @@ export default function Reports() {
       .catch((e) => { setData({ error: e.message }); setLoadedReport(forReport); })
       .finally(() => setLoading(false));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [report, auditId, vFilter, vSuper, vCategory, vGroup]);
+  }, [report, auditId, vFilter, vSuper, vCategory, vGroup, vSystem]);
 
   const store = audits.find((a) => String(a.id) === String(auditId));
   const filterQs = varianceParams.length ? `&${varianceParams.join('&')}` : '';
@@ -109,6 +112,12 @@ export default function Reports() {
             {(vSuper ? categories.filter((c) => String(c.super_category_id) === String(vSuper)) : categories)
               .map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
           </select>
+          <span className="flex gap-1">
+            {[['all', 'All'], ['with', 'With system data'], ['without', 'No system data']].map(([k, l]) => (
+              <button key={k} className={vSystem === k ? 'chip-on' : 'chip-off'}
+                      onClick={() => setVSystem(k)}>{l}</button>
+            ))}
+          </span>
           <label className="flex items-center gap-2 text-sm text-slate-600 select-none">
             <input type="checkbox" className="h-5 w-5 accent-teal-700"
                    checked={vGroup} onChange={(e) => setVGroup(e.target.checked)} />
@@ -122,6 +131,34 @@ export default function Reports() {
           <button className="btn-ghost" onClick={() => downloadReport(`/reports/${base}?format=xlsx${filterQs}`, `${fname}.xlsx`)}>⬇ Excel</button>
           <button className="btn-ghost" onClick={() => downloadReport(`/reports/${base}?format=pdf${filterQs}`, `${fname}.pdf`)}>⬇ PDF</button>
           {provisional && <span className="self-center text-xs text-amber-700">Exports are stamped PROVISIONAL.</span>}
+        </div>
+      )}
+
+      {/* Provenance — the variance report always states where the system
+          figures came from, so a wrong file is noticeable. */}
+      {report === 'variance' && loadedReport === 'variance' && data?.provenance && data?.hasSystemStock && (
+        <div className="mb-4 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm">
+          <div className="font-semibold text-slate-700">System stock source</div>
+          <div className="text-slate-600">
+            {data.provenance.source?.filename
+              ? <span className="font-mono">{data.provenance.source.filename}</span>
+              : 'Entered manually'}
+          </div>
+          {data.provenance.source && (
+            <div className="text-slate-500">
+              Imported: {new Date(data.provenance.source.imported_at).toLocaleString()}
+              {data.provenance.source.imported_by_name ? ` by ${data.provenance.source.imported_by_name}` : ''}
+            </div>
+          )}
+          <div className="text-slate-500">
+            Coverage: {data.provenance.with_system} of {data.provenance.master_total} master items
+          </div>
+          {data.totals?.no_system_data > 0 && (
+            <div className="text-amber-700 mt-1">
+              {data.totals.no_system_data} item(s) have no system figure — shown as NO SYSTEM DATA and
+              excluded from variance totals.
+            </div>
+          )}
         </div>
       )}
 
@@ -241,6 +278,23 @@ function ReportView({ report, data, grouped }) {
   // R4 — super category AND category included, exactly as in the item master.
   // Optionally grouped with subtotals at category and super category level.
   if (report === 'variance') {
+    // An empty import must never be mistaken for a total shortage.
+    if (data.hasSystemStock === false) {
+      return (
+        <div className="p-8 text-center">
+          <div className="text-4xl mb-3">📥</div>
+          <p className="font-semibold text-slate-700 mb-1">
+            No system stock has been imported for this audit.
+          </p>
+          <p className="text-slate-500 text-sm mb-4">
+            The variance report cannot be produced until system figures exist.
+          </p>
+          <Link className="btn-primary" to={`/admin/audits/${data.audit?.id}/system-stock`}>
+            Import system stock
+          </Link>
+        </div>
+      );
+    }
     const cols = ['Super Category', 'Category', 'Item Name', 'Unit', 'Physical', 'System', 'Variance', '%', 'Counted', 'Status'];
     const toRow = (r) => [r.super_category, r.category, r.name, r.unit, r.physical_qty,
                           r.system_qty ?? '—', r.variance ?? '—', r.variance_pct ?? '—',
@@ -277,7 +331,23 @@ function ReportView({ report, data, grouped }) {
         </div>
       );
     }
-    return <Table cols={cols} rows={data.rows.map(toRow)} />;
+    return (
+      <>
+        <Table cols={cols} rows={data.rows.map(toRow)} />
+        {data.totals && (
+          <div className="mt-3 rounded-lg bg-slate-100 px-3 py-2 text-sm font-semibold text-slate-700">
+            Totals (rows with system data only) — physical {data.totals.physical_qty} · system{' '}
+            {data.totals.system_qty} · variance {data.totals.variance}
+            {data.totals.variance_pct != null && <> ({data.totals.variance_pct}%)</>}
+            {data.totals.no_system_data > 0 && (
+              <span className="font-normal text-amber-700">
+                {' '}· {data.totals.no_system_data} item(s) with NO SYSTEM DATA excluded
+              </span>
+            )}
+          </div>
+        )}
+      </>
+    );
   }
 
   if (report === 'exceptions') {
@@ -291,6 +361,9 @@ function ReportView({ report, data, grouped }) {
                  rows={data.multiEntry.map((v) => [v.super_category, v.category, v.name, v.entries, v.physical_qty])} />
         <Section title="Zero quantity" cols={['Super Category', 'Category', 'Item Name', 'Zero entries']}
                  rows={data.zeroQty.map((v) => [v.super_category, v.category, v.name, v.zero_entries])} />
+        <Section title={`No system data (${data.noSystemData?.length || 0}) — data gap, not a variance`}
+                 cols={['Super Category', 'Category', 'Item Name', 'Unit', 'Physical qty']}
+                 rows={(data.noSystemData || []).map((v) => [v.super_category, v.category, v.name, v.unit, v.physical_qty])} />
         <Section title="Counted without photo" cols={['Super Category', 'Category', 'Item Name', 'Entries']}
                  rows={data.noPhoto.map((v) => [v.super_category, v.category, v.name, v.entries])} />
       </div>

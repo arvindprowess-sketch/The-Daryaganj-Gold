@@ -129,9 +129,26 @@ createdb audix    # or: psql -c "CREATE DATABASE audix;"
 ## 3. Migrate and seed
 
 ```bash
-npm run migrate    # applies server/migrations/*.sql
-npm run seed       # loads demo data and prints login credentials
+npm run migrate          # applies server/migrations/*.sql
+npm run seed:reference   # hierarchy only — SAFE anywhere, including production
+npm run seed:demo        # demo users/stores/items/audits — DEVELOPMENT ONLY
 ```
+
+| Script | Creates | Safe in production |
+|---|---|---|
+| `seed:reference` | super categories + categories only | **Yes** — no users, items, stores, audits or entries |
+| `seed:demo` | demo users (console-printed passwords), sample store, item master, audit and entries | **No** |
+
+`seed:demo` **refuses to run when `NODE_ENV=production`** — it exits with a
+clear message rather than prompting or partially running. For the rare case
+where seeding production is genuinely intended:
+
+```bash
+npm run seed:demo -- --force-seed
+```
+
+Everything `seed:demo` creates is flagged `is_demo = true`, and its accounts are
+flagged `must_change_password` so a console-printed password cannot stay in use.
 
 The seed prints credentials to the console:
 
@@ -300,10 +317,74 @@ scrolls.
 
 ---
 
-## System stock import
+## System stock — import, correct, remove, trace
 
-Admin only; never exposed to the auditor role. The importer accepts **the
-client's own system export directly**:
+Admin only; never exposed to the auditor role (every endpoint is 403 for an
+auditor, including the import history and activity log).
+
+A wrong file imported against the wrong audit used to produce a complete but
+entirely wrong variance report, with nothing to show where the figures came
+from and no way to undo it. That is now closed off on four fronts.
+
+### Correcting figures
+
+- **Edit one figure inline** — the commonest correction; no re-import needed.
+  The change is logged with its old and new values, and the row is marked
+  *hand-corrected* (it is no longer attributed to the import file).
+- **Delete a single row** — for one wrong figure rather than the whole file.
+- **Clear all system stock** — requires typing `CLEAR SYSTEM STOCK`, and states
+  exactly what will go ("system stock for 594 items, imported … by …").
+  **Physical count entries are never touched.**
+
+The variance report recalculates immediately after any of these.
+
+### Wrong-file guards
+
+Before anything is written, the preview states the audit, the file, the row
+count, and **what will be replaced**, then challenges suspicious imports:
+
+| Guard | Behaviour |
+|---|---|
+| **Store mismatch** — every row carries a `LOC` that isn't this audit's store | **Blocked.** Override needs `IMPORT ANYWAY` typed *plus* a reason, both recorded. Re-checked server-side, so the UI cannot wave it through. |
+| **Low match rate** — under 80% of rows match the master | Warning + explicit acknowledgement |
+| **Coverage gap** — over 20% of master items absent from the file | Warning + explicit acknowledgement |
+| **Duplicate import** — same filename already imported for this audit | Warning + explicit acknowledgement |
+
+The **not matched** and **in master, not in file** lists are always shown in
+full and are downloadable as CSV. Neither is ever hidden.
+
+A replace runs as **clear-then-insert inside one transaction**, so a failed
+import can never leave the audit with half the old data and half the new.
+
+### Provenance and history
+
+Every import records filename, row/matched/unmatched counts, who and when. A
+superseded import is marked `replaced` (never deleted) so a re-import is always
+visible; a cleared one is marked `cleared`. Clears, replacements and
+single-figure corrections are written to `activity_log` with before/after
+values. Both are shown on the system stock screen, and the source file, import
+time, importer and coverage appear in the **variance report header and in every
+variance export**.
+
+### No system figure ≠ zero
+
+- *system says 0, physical found 5* → a genuine excess, a real variance
+- *no system row for this item* → a **data gap**, not a variance
+
+A missing row is `NULL`, never zero. Such items show the status
+**`NO SYSTEM DATA`**, carry no percentage, are **excluded from variance totals
+and from the overall variance %**, are counted separately in the exception
+report, and can be isolated with the
+**[All] [With system data] [No system data]** filter.
+
+If **no** system stock exists at all, the variance report does not render a
+table of 100% shortages — it shows "No system stock has been imported for this
+audit" with a link to import, so an empty import is never mistaken for a total
+shortage.
+
+### Accepted file format
+
+The importer accepts **the client's own system export directly**:
 
 ```
 LOC, Super Category Name, Category Name, Item Name, Unit, Closing Qty
@@ -335,6 +416,70 @@ separate, exactly as the physical count does.
 - Super-category and category progress counts are computed by a **single
   aggregate query** each (~0.6 ms measured), never by loading every item.
 - Reports and exports over 618 rows complete in well under a second.
+
+## Data management and production safety
+
+Admin only, enforced server-side. Every destructive operation requires its exact
+confirmation phrase **in the request body** — the server validates it
+independently, so the UI cannot wave anything through. Multi-table deletions run
+in one transaction, and object-storage deletion happens only **after** that
+transaction commits, so a storage failure can never orphan a row.
+
+| Action | Phrase | Guard |
+|---|---|---|
+| Delete all items | `DELETE ALL ITEMS` | **Blocked** while any count entry exists |
+| Replace master via CSV | `REPLACE ITEM MASTER` | Same block; preview first |
+| Delete an audit | `DELETE THIS AUDIT` | Removes its entries and system stock only |
+| Clear an audit's entries | `CLEAR ALL ENTRIES` | Audit stays open, resets to zero counted |
+| Delete demo data | `DELETE DEMO DATA` | Matches on the `is_demo` flag, never on names |
+
+### CSV import modes
+
+The import screen offers three explicit modes, with the impact of each shown
+before committing ("412 items will be updated, 206 created, 0 deleted"):
+
+- **Add new items only** — existing items untouched
+- **Add new and update existing** — matched by item name
+- **Replace entire master** — delete everything, then import (typed
+  confirmation, and blocked while count entries exist)
+
+**An item is never deleted silently as a side effect of an import.** Only the
+explicit replace mode removes anything.
+
+### Soft delete
+
+An item that has **ever been counted** is never hard deleted — that would orphan
+historical audit records. Deleting it sets `is_active = false`: it disappears
+from counting screens and new audits, stays visible in historical reports, and
+can be reactivated. The item master has an **[Active] [Inactive] [All]** filter.
+Only items with zero count entries anywhere are removed permanently.
+
+### Demo data
+
+`is_demo` marks every row created by `seed:demo` (users, stores, items, audits,
+count entries). Anything created through the UI or a CSV import is `false`, so
+cleanup is exact rather than guesswork. While any demo record exists the admin
+console shows a persistent banner with the counts — **including in production**,
+where the API also logs a prominent warning at startup. The account performing
+the deletion is never removed (it would lock the admin out mid-operation), and
+the response says so.
+
+### Activity log
+
+Every destructive action — master deletion and replacement, audit deletion,
+entry clearing, demo cleanup, item deactivation, password changes — is written
+to `activity_log` with who, when, how many records and a JSON detail payload.
+It is exposed read-only on Admin → Data management, newest first, with no
+delete endpoint: an audit firm must be able to answer "who removed that data
+and when".
+
+### System Readiness
+
+Admin → System Readiness is the pre-count checklist. It reports demo data
+present, users still on a seeded default password, item master loaded, items
+missing a photo, liquor items missing `bottle_size_ml`, **object storage
+reachable via a real write-then-delete probe**, and audits left open from a
+previous session. Run it before the pilot count and before each count night.
 
 ## Photo storage (object storage, never the database)
 

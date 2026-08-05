@@ -3,6 +3,7 @@ import { api, bustCache, downloadReport } from '../../lib/api.js';
 import { Spinner, PhotoThumb } from '../../components/ui.jsx';
 import PhotoInput from '../../components/PhotoInput.jsx';
 import { useToast } from '../../components/Toast.jsx';
+import ConfirmDialog from '../../components/ConfirmDialog.jsx';
 
 const blank = { name: '', super_category_id: '', category_id: '', unit: '', is_liquor: false, bottle_size_ml: '', rate: '' };
 
@@ -16,8 +17,11 @@ export default function ItemMaster() {
   const [fSuper, setFSuper] = useState('');
   const [fCat, setFCat] = useState('');
   const [fPhoto, setFPhoto] = useState('');   // '' | 'has' | 'none'
+  const [fActive, setFActive] = useState('active'); // active | inactive | all
+  const [confirmDel, setConfirmDel] = useState(null);
   const [editing, setEditing] = useState(null);
   const [panel, setPanel] = useState(null); // 'csv' | 'photos'
+  const toast = useToast();
 
   const load = useCallback(() => {
     const qs = new URLSearchParams();
@@ -25,8 +29,9 @@ export default function ItemMaster() {
     if (fSuper) qs.set('super_category_id', fSuper);
     if (fCat) qs.set('category_id', fCat);
     if (fPhoto) qs.set('photo', fPhoto);
+    if (fActive !== 'active') qs.set('active', fActive);
     return api.get(`/items?${qs}`).then((r) => { setItems(r.items); setCounts(r.counts); });
-  }, [search, fSuper, fCat, fPhoto]);
+  }, [search, fSuper, fCat, fPhoto, fActive]);
 
   useEffect(() => { load(); }, [load]);
   useEffect(() => {
@@ -50,6 +55,26 @@ export default function ItemMaster() {
     }
   }
 
+  // An item that has ever been counted is DEACTIVATED, never hard deleted —
+  // hard deleting would orphan historical audit records. The server decides.
+  async function removeItem(item) {
+    setConfirmDel(null);
+    try {
+      const r = await api.del(`/data/items/${item.id}`);
+      toast(r.softDeleted
+        ? `${item.name} deactivated — it has ${r.entries} count entries and stays in historical reports`
+        : `${item.name} deleted`);
+      load();
+    } catch (e) { toast(e.message, 'error'); }
+  }
+  async function reactivate(item) {
+    try {
+      await api.post(`/data/items/${item.id}/reactivate`, {});
+      toast(`${item.name} reactivated`);
+      load();
+    } catch (e) { toast(e.message, 'error'); }
+  }
+
   if (!items) return <Spinner />;
 
   return (
@@ -60,6 +85,7 @@ export default function ItemMaster() {
           {/* Photo coverage at a glance while photos are collected. */}
           <p className="text-slate-500 text-sm">
             {counts.total} items · {counts.with_photo} with photos
+            {counts.inactive > 0 && <span className="text-slate-400"> · {counts.inactive} inactive</span>}
             {counts.total > counts.with_photo && (
               <span className="text-amber-600"> · {counts.total - counts.with_photo} missing</span>
             )}
@@ -88,6 +114,13 @@ export default function ItemMaster() {
                     onClick={() => setFPhoto(k)}>{label}</button>
           ))}
         </div>
+        {/* Inactive = soft-deleted: hidden from counting, kept for history. */}
+        <div className="flex gap-2">
+          {[['active', 'Active'], ['inactive', 'Inactive'], ['all', 'All']].map(([k, label]) => (
+            <button key={k} className={fActive === k ? 'chip-on' : 'chip-off'}
+                    onClick={() => setFActive(k)}>{label}</button>
+          ))}
+        </div>
       </div>
 
       <p className="text-sm text-slate-500 mb-2">Showing {items.length} of {counts.total} items.</p>
@@ -110,13 +143,23 @@ export default function ItemMaster() {
                 <td className="px-3 py-2"><PhotoThumb src={bustCache(i.photo_url, i.photo_version)} size={44} /></td>
                 <td className="px-3 py-2 text-slate-500">{i.super_category_name || '—'}</td>
                 <td className="px-3 py-2 text-slate-500">{i.category_name || '—'}</td>
-                <td className="px-3 py-2 font-medium">{i.name}</td>
+                <td className="px-3 py-2 font-medium">
+                  {i.name}
+                  {!i.is_active && (
+                    <span className="ml-2 chip bg-slate-100 text-slate-500 border-slate-200">inactive</span>
+                  )}
+                </td>
                 {/* Unit is displayed exactly as uploaded. */}
                 <td className="px-3 py-2">{i.unit}</td>
                 <td className="px-3 py-2">{i.is_liquor ? `Yes (${i.bottle_size_ml || '?'}ml)` : ''}</td>
                 <td className="px-3 py-2 text-right">{i.rate != null ? Number(i.rate).toFixed(2) : '—'}</td>
-                <td className="px-3 py-2 text-right">
+                <td className="px-3 py-2 text-right whitespace-nowrap">
                   <button className="text-brand font-medium" onClick={() => setEditing(i)}>Edit</button>
+                  {i.is_active
+                    ? <button className="text-red-600 font-medium ml-3"
+                              onClick={() => setConfirmDel(i)}>Delete</button>
+                    : <button className="text-green-600 font-medium ml-3"
+                              onClick={() => reactivate(i)}>Reactivate</button>}
                 </td>
               </tr>
             ))}
@@ -129,6 +172,15 @@ export default function ItemMaster() {
         <ItemEditor item={editing} supers={supers} categories={categories}
                     onClose={() => setEditing(null)} onSaved={() => { setEditing(null); load(); }} />
       )}
+      <ConfirmDialog
+        open={!!confirmDel}
+        title={`Delete "${confirmDel?.name}"?`}
+        message="If this item has ever been counted it will be deactivated rather than deleted, so historical audit records stay intact. Items never counted are removed permanently."
+        confirmLabel="Delete"
+        danger
+        onCancel={() => setConfirmDel(null)}
+        onConfirm={() => removeItem(confirmDel)}
+      />
       {panel === 'csv' && <CsvImport onClose={() => setPanel(null)} onDone={() => { setPanel(null); load(); }} />}
       {panel === 'photos' && <BulkPhotos onClose={() => setPanel(null)} onDone={() => { setPanel(null); load(); }} />}
     </div>
@@ -239,6 +291,8 @@ function CsvImport({ onClose, onDone }) {
   const [file, setFile] = useState(null);
   const [preview, setPreview] = useState(null);
   const [decisions, setDecisions] = useState({}); // row -> 'create' | 'skip'
+  const [mode, setMode] = useState('add');        // add | upsert | replace
+  const [typed, setTyped] = useState('');         // replace confirmation
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
   const toast = useToast();
@@ -261,9 +315,11 @@ function CsvImport({ onClose, onDone }) {
     try {
       const fd = new FormData();
       fd.append('file', file);
+      fd.append('mode', mode);
       fd.append('decisions', JSON.stringify(decisions));
+      if (mode === 'replace') fd.append('confirm', typed);
       const r = await api.upload('/items/import/commit', fd);
-      toast(`Import done — ${r.updated} updated, ${r.created} created, ${r.skipped} skipped`);
+      toast(`Import done — ${r.created} created, ${r.updated} updated, ${r.deleted} deleted, ${r.skipped} skipped`);
       onDone();
     } catch (e) { setErr(e.message); } finally { setBusy(false); }
   }
@@ -291,10 +347,62 @@ function CsvImport({ onClose, onDone }) {
         <input type="file" accept=".csv,text/csv"
                onChange={(e) => { setFile(e.target.files?.[0]); setPreview(null); }} />
       </div>
+      {/* Import mode. Nothing is ever deleted as a side effect — only the
+          explicit "Replace entire master" removes anything. */}
+      <div className="rounded-xl border border-slate-200 p-3 mb-3 space-y-2">
+        {[
+          ['add', 'Add new items only', 'Existing items are untouched.'],
+          ['upsert', 'Add new and update existing', 'Matched by item name.'],
+          ['replace', 'Replace entire master', 'Deletes everything, then imports.'],
+        ].map(([k, label, hint]) => (
+          <label key={k} className="flex items-start gap-2 text-sm cursor-pointer">
+            <input type="radio" name="import-mode" className="mt-1 h-4 w-4 accent-teal-700"
+                   checked={mode === k} onChange={() => setMode(k)} />
+            <span>
+              <span className={k === 'replace' ? 'font-semibold text-red-700' : 'font-medium'}>{label}</span>
+              <span className="text-slate-500"> — {hint}</span>
+              {preview?.modes?.[k] && (
+                <span className="block text-xs text-slate-500">
+                  {preview.modes[k].updated} updated, {preview.modes[k].created} created,{' '}
+                  {preview.modes[k].deleted} deleted
+                </span>
+              )}
+            </span>
+          </label>
+        ))}
+      </div>
+
+      {mode === 'replace' && preview?.modes?.replace?.blocked && (
+        <div className="rounded-xl border-2 border-red-400 bg-red-50 p-3 text-sm text-red-800 mb-3">
+          ⛔ {preview.modes.replace.blockedReason}
+        </div>
+      )}
+      {mode === 'replace' && preview && !preview.modes?.replace?.blocked && (
+        <div className="rounded-xl border-2 border-red-400 bg-red-50 p-3 mb-3">
+          <p className="text-sm text-red-800 mb-2">
+            This will permanently delete <strong>{preview.modes.replace.deleted} existing item(s)</strong>{' '}
+            and import {preview.modes.replace.created} from the file.
+          </p>
+          <label className="block text-xs text-red-800 mb-1">
+            Type <span className="font-mono font-bold">REPLACE ITEM MASTER</span> to confirm:
+          </label>
+          <input className="field font-mono" value={typed} onChange={(e) => setTyped(e.target.value)} />
+        </div>
+      )}
+
       <div className="flex gap-2 mb-4">
         <button className="btn-ghost" disabled={!file || busy} onClick={doPreview}>Preview</button>
-        <button className="btn-primary" disabled={!preview || preview.invalid > 0 || busy} onClick={commit}>
-          Commit{preview ? ` (${preview.matched} update, ${createCount} create)` : ''}
+        <button
+          className={mode === 'replace' ? 'btn-danger' : 'btn-primary'}
+          disabled={
+            !preview || preview.invalid > 0 || busy ||
+            (mode === 'replace' && (preview.modes?.replace?.blocked ||
+                                    typed.trim().toUpperCase() !== 'REPLACE ITEM MASTER'))
+          }
+          onClick={commit}>
+          {mode === 'replace' ? 'Replace item master'
+            : mode === 'upsert' ? `Add and update${preview ? ` (${preview.modes.upsert.updated} updated, ${preview.modes.upsert.created} created, 0 deleted)` : ''}`
+            : `Add new only${preview ? ` (${createCount} create)` : ''}`}
         </button>
       </div>
       {err && <p className="text-red-600 text-sm mb-2">{err}</p>}

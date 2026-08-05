@@ -1,7 +1,8 @@
-import { NavLink, Outlet, useNavigate } from 'react-router-dom';
+import { NavLink, Outlet, useNavigate, Link } from 'react-router-dom';
 import { useAuth } from '../../lib/auth.jsx';
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import ConfirmDialog from '../../components/ConfirmDialog.jsx';
+import { api } from '../../lib/api.js';
 
 const nav = [
   ['', 'Dashboard', '📊'],
@@ -11,6 +12,8 @@ const nav = [
   ['audits', 'Audit Sessions', '🗓️'],
   ['settings', 'Settings', '⚙️'],
   ['reports', 'Reports', '📈'],
+  ['readiness', 'System Readiness', '✅'],
+  ['data', 'Data Management', '🗑️'],
 ];
 
 export default function AdminLayout() {
@@ -18,6 +21,10 @@ export default function AdminLayout() {
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
   const [confirm, setConfirm] = useState(false);
+  // Persistent while ANY demo record exists — including in production, where
+  // demo data should never have arrived in the first place.
+  const [demo, setDemo] = useState(null);
+  useEffect(() => { api.get('/data/demo').then(setDemo).catch(() => {}); }, []);
 
   const Links = () => (
     <nav className="space-y-1">
@@ -66,6 +73,21 @@ export default function AdminLayout() {
       )}
 
       <main className="flex-1 min-w-0 p-4 md:p-8 pt-16 md:pt-8">
+        {demo?.present && (
+          <div className="mb-4 rounded-xl border-2 border-amber-400 bg-amber-50 px-4 py-3
+                          flex flex-wrap items-center justify-between gap-3">
+            <span className="text-amber-900 text-sm">
+              <strong>Demo data present</strong> — {demo.users} users, {demo.stores} stores,{' '}
+              {demo.items} items, {demo.audits} audits, {demo.entries} entries. Remove it before go-live.
+              {demo.users === 1 && demo.stores + demo.items + demo.audits + demo.entries === 0 && (
+                <span className="block text-amber-700">
+                  Only your own signed-in demo account remains — create a real admin, then remove it.
+                </span>
+              )}
+            </span>
+            <Link className="btn-ghost text-sm py-1.5 shrink-0" to="/admin/data">Delete demo data</Link>
+          </div>
+        )}
         <Outlet />
       </main>
 

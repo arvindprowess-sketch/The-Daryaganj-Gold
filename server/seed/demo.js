@@ -1,10 +1,24 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// seed:demo — DEVELOPMENT ONLY.
+//
+// Creates demo users (passwords printed to the console), a sample store, the
+// sample item master, a sample audit and sample count entries. Everything it
+// creates is flagged is_demo = TRUE so "Delete demo data" can remove exactly
+// these rows and nothing else. Refuses to run under NODE_ENV=production
+// unless --force-seed is passed.
+// ═══════════════════════════════════════════════════════════════════════════
 import { pool, withTransaction } from '../src/db.js';
 import { hashPassword } from '../src/lib/auth.js';
 import { ensureHierarchy } from './hierarchy.js';
 import { loadItemMaster, REAL_CSV } from './itemMaster.js';
+import { assertSeedAllowed } from './guard.js';
 
-// Deterministic demo dataset. Safe to re-run: it clears the demo tables first.
+// Usernames this script creates. The server warns at startup if any survive
+// into production.
+export const DEMO_USERNAMES = ['admin', 'rakesh', 'sunil'];
+
 async function seed() {
+  assertSeedAllowed('seed:demo');
   const { items: master, source } = loadItemMaster();
 
   const summary = await withTransaction(async (c) => {
@@ -17,7 +31,7 @@ async function seed() {
 
     // ── Store: M3M ─────────────────────────────────────────────────────────
     const { rows: storeRows } = await c.query(
-      `INSERT INTO stores (code, name, address) VALUES ($1,$2,$3) RETURNING id`,
+      `INSERT INTO stores (code, name, address, is_demo) VALUES ($1,$2,$3,TRUE) RETURNING id`,
       ['M3M', 'M3M', 'M3M, Gurugram']
     );
     const storeId = storeRows[0].id;
@@ -32,7 +46,10 @@ async function seed() {
     for (const u of creds) {
       const hash = await hashPassword(u.password);
       const { rows } = await c.query(
-        'INSERT INTO users (username, name, password_hash, role) VALUES ($1,$2,$3,$4) RETURNING id',
+        // must_change_password: a console-printed password must not remain
+        // usable — the user is forced to set a new one at first login.
+        `INSERT INTO users (username, name, password_hash, role, is_demo, must_change_password)
+         VALUES ($1,$2,$3,$4,TRUE,TRUE) RETURNING id`,
         [u.username, u.name, hash, u.role]
       );
       userIds[u.username] = rows[0].id;
@@ -49,8 +66,8 @@ async function seed() {
       const catId = categoryIds[`${it.super_category}/${it.category}`] ?? null;
       const superId = superIds[it.super_category] ?? null;
       const { rows } = await c.query(
-        `INSERT INTO items (name, super_category_id, category_id, unit, is_liquor, bottle_size_ml, rate)
-         VALUES ($1,$2,$3,$4,$5,$6,$7)
+        `INSERT INTO items (name, super_category_id, category_id, unit, is_liquor, bottle_size_ml, rate, is_demo)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,TRUE)
          ON CONFLICT (lower(name)) DO NOTHING
          RETURNING id`,
         [it.item_name, superId, catId, it.unit, it.is_liquor, it.bottle_size_ml, it.rate]
@@ -63,8 +80,8 @@ async function seed() {
 
     // ── One open audit with sample entries ─────────────────────────────────
     const { rows: auditRows } = await c.query(
-      `INSERT INTO audits (store_id, audit_date, cutoff_time, status, created_by)
-       VALUES ($1, CURRENT_DATE, '6:00 PM', 'open', $2) RETURNING id`,
+      `INSERT INTO audits (store_id, audit_date, cutoff_time, status, created_by, is_demo)
+       VALUES ($1, CURRENT_DATE, '6:00 PM', 'open', $2, TRUE) RETURNING id`,
       [storeId, userIds['admin']]
     );
     const auditId = auditRows[0].id;
@@ -77,8 +94,8 @@ async function seed() {
       if (!id) return null;
       return c.query(
         `INSERT INTO count_entries (audit_id, item_id, qty, bottles, open_ml, location_text,
-           remarks, counted_by, status, void_reason, voided_by, voided_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+           remarks, counted_by, status, void_reason, voided_by, voided_at, is_demo)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,TRUE)`,
         [auditId, id, f.qty ?? null, f.bottles ?? null, f.open_ml ?? null, f.location ?? null,
          f.remarks ?? null, f.by ?? rakesh, f.status ?? 'active', f.void_reason ?? null,
          f.voided_by ?? null, f.voided_at ?? null]
@@ -165,6 +182,10 @@ async function seed() {
     console.log(`      ${REAL_CSV}`);
     console.log('    and re-run `npm run seed`.');
   }
+  console.log('════════════════════════════════════════════');
+  console.log(' ⚠  DEMO DATA — every row created here is flagged is_demo.');
+  console.log('    Remove it with "Delete demo data" before go-live.');
+  console.log('    These accounts must set a new password at first login.');
   console.log('════════════════════════════════════════════');
   console.log(' ADMIN    username: admin    password: admin123');
   console.log(' AUDITOR  username: rakesh   password: rakesh123  (M3M)');

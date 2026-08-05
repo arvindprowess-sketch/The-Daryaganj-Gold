@@ -140,14 +140,52 @@ router.get('/variance/:auditId', async (req, res) => {
   const categoryId = req.query.category_id || null;
   const superCategoryId = req.query.super_category_id || null;
   const grouped = req.query.group_by === 'category' || req.query.group_by === 'hierarchy';
-  const { rows, groups, provisional, progress } = await varianceReport(
-    req.params.auditId, { countedOnly, categoryId, superCategoryId }
-  );
+  // [All] [With system data] [No system data]
+  const systemData = ['with', 'without'].includes(req.query.system_data)
+    ? req.query.system_data : 'all';
+  const { rows, groups, provisional, progress, totals, hasSystemStock, provenance } =
+    await varianceReport(req.params.auditId, { countedOnly, categoryId, superCategoryId, systemData });
   const format = req.query.format;
+
+  // No system stock at all → do NOT render a table of 100% shortages. An empty
+  // import must never be mistaken for a total shortage.
+  if (!hasSystemStock) {
+    const message = 'No system stock has been imported for this audit.';
+    if (format === 'xlsx') {
+      return sendXlsx(res, `R4_variance_${slug(audit.store_name)}`, [{
+        name: 'Variance', aoa: [['NO SYSTEM STOCK'], [message],
+          ['Import system stock for this audit before running a variance report.']],
+      }]);
+    }
+    if (format === 'pdf') {
+      return sendPdf(res, `R4_variance_${slug(audit.store_name)}`, {
+        title: 'R4 — Variance Report', subtitle: `${audit.store_name} — ${audit.audit_date}`,
+        banner: message,
+        blocks: [{ title: 'No system stock', columns: ['Status'],
+          rows: [['Import system stock for this audit before running a variance report.']] }],
+      });
+    }
+    return res.json({
+      audit, rows: [], groups: [], provisional, progress,
+      hasSystemStock: false, provenance, totals,
+      message,
+    });
+  }
+
   const fname = `${provisional ? 'PROVISIONAL_' : ''}R4_variance_${slug(audit.store_name)}`;
   const stamp = provisional
     ? `PROVISIONAL — count in progress. ${progress.uncounted} of ${progress.total} items not yet counted.`
     : null;
+  // Provenance — every export states where the system figures came from.
+  const src = provenance.source;
+  const provenanceLines = [
+    `System stock source: ${src?.filename || 'entered manually'}`,
+    src ? `Imported: ${new Date(src.imported_at).toLocaleString()}${src.imported_by_name ? ' by ' + src.imported_by_name : ''}` : null,
+    `Coverage: ${provenance.with_system} of ${provenance.master_total} master items`,
+    totals.no_system_data > 0
+      ? `${totals.no_system_data} item(s) shown as NO SYSTEM DATA and excluded from variance totals`
+      : null,
+  ].filter(Boolean);
   // Standard column order: Super Category | Category | Item Name | Unit | …
   const cols = ['Super Category', 'Category', 'Item Name', 'Unit', 'Physical', 'System',
                 'Variance', 'Variance %', 'Counted', 'Status'];
@@ -158,6 +196,9 @@ router.get('/variance/:auditId', async (req, res) => {
   if (format === 'xlsx') {
     const aoa = [];
     if (stamp) aoa.push(['PROVISIONAL'], [stamp], []);
+    // Provenance always precedes the figures.
+    provenanceLines.forEach((l) => aoa.push([l]));
+    aoa.push([]);
     aoa.push(cols);
     if (grouped) {
       // Subtotals at category and super category level.
@@ -174,16 +215,34 @@ router.get('/variance/:auditId', async (req, res) => {
     } else {
       aoa.push(...rows.map(toRow));
     }
+    // Overall totals — computed only over rows that have a system figure.
+    aoa.push([]);
+    aoa.push(['TOTAL (rows with system data only)', '', '', '',
+              totals.physical_qty, totals.system_qty, totals.variance,
+              n(totals.variance_pct), '', `${totals.with_system} items`]);
+    if (totals.no_system_data > 0) {
+      aoa.push([`${totals.no_system_data} item(s) with NO SYSTEM DATA — excluded from the totals above`]);
+    }
     return sendXlsx(res, fname, [{ name: 'Variance', aoa }]);
   }
   if (format === 'pdf') {
     const widths = [80, 80, 120, 60, 50, 50, 50, 50, 40, 55];
+    // Overall totals, excluding rows with no system figure.
+    const totalsBlock = {
+      title: 'Totals (rows with system data only)',
+      columns: ['Items', 'Physical', 'System', 'Variance', 'Variance %'],
+      rows: [[totals.with_system, totals.physical_qty, totals.system_qty,
+              totals.variance, n(totals.variance_pct)]],
+      note: totals.no_system_data > 0
+        ? `${totals.no_system_data} item(s) with NO SYSTEM DATA are excluded from these totals.`
+        : null,
+    };
     return sendPdf(res, fname, {
       title: `R4 — Variance Report${provisional ? ' (PROVISIONAL)' : ''}`,
-      subtitle: `${audit.store_name} — ${audit.audit_date}`,
+      subtitle: `${audit.store_name} — ${audit.audit_date}\n${provenanceLines.join('\n')}`,
       banner: stamp,
       blocks: grouped
-        ? groups.flatMap((g) => [
+        ? [...groups.flatMap((g) => [
             ...g.categories.map((c) => ({
               title: `${g.super_category} › ${c.category}`,
               columns: cols, widths,
@@ -193,11 +252,12 @@ router.get('/variance/:auditId', async (req, res) => {
             { title: `${g.super_category} — SUPER CATEGORY SUBTOTAL`,
               columns: ['Items', 'Physical', 'System', 'Variance'],
               rows: [[g.items, g.physical_qty, g.system_qty, g.variance]] },
-          ])
-        : [{ title: 'Variance (Physical − System)', columns: cols, widths, rows: rows.map(toRow) }],
+          ]), totalsBlock]
+        : [{ title: 'Variance (Physical − System)', columns: cols, widths, rows: rows.map(toRow) },
+           totalsBlock],
     });
   }
-  res.json({ audit, rows, groups, provisional, progress });
+  res.json({ audit, rows, groups, provisional, progress, totals, hasSystemStock, provenance });
 });
 
 // ── R5 Consolidated (all stores) ─────────────────────────────────────────────
@@ -264,6 +324,10 @@ router.get('/exceptions/:auditId', async (req, res) => {
         ...data.zeroQty.map((v) => [v.super_category, v.category, v.name, v.zero_entries])] },
       { name: 'No Photo', aoa: [[...SC, 'Item Name', 'Entries'],
         ...data.noPhoto.map((v) => [v.super_category, v.category, v.name, v.entries])] },
+      // A missing system figure is a DATA GAP, not a variance.
+      { name: 'No System Data', aoa: [[...SC, 'Item Name', 'Unit', 'Physical Qty', 'Counted'],
+        ...data.noSystemData.map((v) => [v.super_category, v.category, v.name, v.unit,
+                                         v.physical_qty, v.counted ? 'Yes' : 'No'])] },
     ]);
   }
   if (format === 'pdf') {
@@ -278,6 +342,9 @@ router.get('/exceptions/:auditId', async (req, res) => {
           rows: data.multiEntry.map((v) => [v.super_category, v.category, v.name, v.entries, v.physical_qty]) },
         { title: 'Zero Quantity', columns: [...SC, 'Item Name', 'Zero Entries'],
           rows: data.zeroQty.map((v) => [v.super_category, v.category, v.name, v.zero_entries]) },
+        { title: `No System Data (${data.noSystemData.length}) — data gap, not a variance`,
+          columns: [...SC, 'Item Name', 'Physical Qty'],
+          rows: data.noSystemData.map((v) => [v.super_category, v.category, v.name, v.physical_qty]) },
         { title: 'Counted Without Photo', columns: [...SC, 'Item Name', 'Entries'],
           rows: data.noPhoto.map((v) => [v.super_category, v.category, v.name, v.entries]) },
       ],

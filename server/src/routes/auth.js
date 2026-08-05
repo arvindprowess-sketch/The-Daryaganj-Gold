@@ -1,7 +1,8 @@
 import { Router } from 'express';
 import { query } from '../db.js';
-import { verifyPassword, signTokens, signAccessToken, verifyRefreshToken } from '../lib/auth.js';
+import { verifyPassword, hashPassword, signTokens, signAccessToken, verifyRefreshToken } from '../lib/auth.js';
 import { requireAuth } from '../middleware/auth.js';
+import { logActivity } from '../lib/activityLog.js';
 
 const router = Router();
 
@@ -25,8 +26,43 @@ router.post('/login', async (req, res) => {
   res.json({
     token,
     refreshToken,
-    user: { id: user.id, username: user.username, name: user.name, role: user.role },
+    user: {
+      id: user.id, username: user.username, name: user.name, role: user.role,
+      // Seeded accounts have a console-printed password and must replace it
+      // before they can do anything else.
+      must_change_password: !!user.must_change_password,
+    },
   });
+});
+
+// Set a new password. Required immediately after logging in with a seeded
+// default; usable at any time to change your own password.
+router.post('/change-password', requireAuth, async (req, res) => {
+  const { current_password: current, new_password: next } = req.body || {};
+  if (!next || String(next).length < 8) {
+    return res.status(400).json({ error: 'New password must be at least 8 characters' });
+  }
+  const { rows } = await query('SELECT * FROM users WHERE id = $1', [req.user.id]);
+  const user = rows[0];
+  if (!user) return res.status(404).json({ error: 'User not found' });
+
+  const ok = await verifyPassword(String(current || ''), user.password_hash);
+  if (!ok) return res.status(401).json({ error: 'Current password is incorrect' });
+  if (await verifyPassword(String(next), user.password_hash)) {
+    return res.status(400).json({ error: 'New password must be different from the current one' });
+  }
+
+  await query(
+    `UPDATE users SET password_hash=$2, must_change_password=FALSE, password_changed_at=now()
+      WHERE id=$1`,
+    [user.id, await hashPassword(String(next))]
+  );
+  await logActivity({
+    entityType: 'user', entityId: user.id, action: 'change_password',
+    recordCount: 1, detail: { username: user.username, was_seeded: !!user.must_change_password },
+    userId: user.id,
+  });
+  res.json({ ok: true });
 });
 
 // Exchange a valid refresh token for a fresh access token. The client calls
@@ -54,7 +90,7 @@ router.post('/refresh', async (req, res) => {
 
 router.get('/me', requireAuth, async (req, res) => {
   const { rows } = await query(
-    'SELECT id, username, name, role FROM users WHERE id = $1',
+    'SELECT id, username, name, role, must_change_password FROM users WHERE id = $1',
     [req.user.id]
   );
   res.json({ user: rows[0] || null });

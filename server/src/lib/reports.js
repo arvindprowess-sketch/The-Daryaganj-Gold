@@ -225,28 +225,59 @@ function groupVariance(rows) {
 // ── R4 Variance ─────────────────────────────────────────────────────────────
 // Physical − System. While the audit is open this is PROVISIONAL: uncounted
 // items would otherwise read as 100% shortages.
+export const NO_SYSTEM_DATA = 'NO SYSTEM DATA';
+
+// Where the system figures came from, so a variance report can always state it.
+export async function systemStockSource(auditId) {
+  const { rows } = await query(
+    `SELECT si.id, si.filename, si.imported_at, si.row_count, si.matched_count,
+            si.unmatched_count, si.override_reason, u.name AS imported_by_name
+       FROM system_stock_imports si
+       LEFT JOIN users u ON u.id = si.imported_by
+      WHERE si.audit_id = $1 AND si.status = 'active'
+      LIMIT 1`,
+    [auditId]
+  );
+  const { rows: cov } = await query(
+    `SELECT (SELECT count(*)::int FROM system_stock WHERE audit_id = $1) AS with_system,
+            (SELECT count(*)::int FROM items WHERE is_active = TRUE) AS master_total`,
+    [auditId]
+  );
+  return { source: rows[0] || null, ...cov[0] };
+}
+
 export async function varianceReport(
   auditId,
-  { countedOnly = false, categoryId = null, superCategoryId = null } = {}
+  { countedOnly = false, categoryId = null, superCategoryId = null, systemData = 'all' } = {}
 ) {
   const items = await auditItemAggregates(auditId);
   const tol = await getTolerances();
   const audit = await getAudit(auditId);
   const provisional = !audit || audit.status === 'open';
+  const provenance = await systemStockSource(auditId);
 
   let source = countedOnly ? items.filter((i) => i.counted) : items;
   if (superCategoryId) source = source.filter((i) => String(i.super_category_id) === String(superCategoryId));
   if (categoryId) source = source.filter((i) => String(i.category_id) === String(categoryId));
+  // [All] [With system data] [No system data]
+  if (systemData === 'with') source = source.filter((i) => i.has_system);
+  else if (systemData === 'without') source = source.filter((i) => !i.has_system);
 
   const rows = source.map((i) => {
+    // A MISSING system row is NULL, never zero.
+    //   system says 0, physical found 5  → genuine excess, a real variance
+    //   no system row at all             → a data gap, not a variance
     // Liquor compares sealed bottles; open ml is reported separately and never
     // folded into the bottle figure.
-    const system = i.has_system
+    const hasSystem = i.has_system;
+    const system = hasSystem
       ? (i.is_liquor ? Number(i.system_bottles ?? 0) : Number(i.system_qty ?? 0))
       : null;
     const physical = i.physical_qty;
-    const variance = system != null ? physical - system : null;
-    const pct = system && system !== 0 ? (variance / system) * 100 : (variance ? 100 : 0);
+    const variance = hasSystem ? physical - system : null;
+    const pct = hasSystem
+      ? (system !== 0 ? (variance / system) * 100 : (variance ? 100 : 0))
+      : null;
     return {
       name: i.name, unit: i.unit, is_liquor: i.is_liquor,
       super_category: i.super_category_name || '—', category: i.category_name || '—',
@@ -254,21 +285,45 @@ export async function varianceReport(
       physical_qty: physical,
       physical_open_ml: i.is_liquor ? Number(i.total_open_ml) : null,
       system_qty: system,
-      system_open_ml: i.is_liquor && i.has_system ? Number(i.system_open_ml ?? 0) : null,
-      variance, variance_pct: system != null ? Number(pct.toFixed(2)) : null,
+      system_open_ml: i.is_liquor && hasSystem ? Number(i.system_open_ml ?? 0) : null,
+      variance,
+      variance_pct: pct == null ? null : Number(pct.toFixed(2)),
       value: i.value,
       counted: i.counted,
-      status: system != null ? bandFor(pct, i.is_liquor, tol) : 'No system stock',
+      has_system: hasSystem,
+      // Items with no figure are reported as a data gap, not as a shortage.
+      status: hasSystem ? bandFor(pct, i.is_liquor, tol) : NO_SYSTEM_DATA,
     };
   });
+
+  // Totals and the overall variance % EXCLUDE rows with no system data.
+  const withSystem = rows.filter((r) => r.has_system);
+  const noSystem = rows.filter((r) => !r.has_system);
+  const totalPhysical = withSystem.reduce((s, r) => s + Number(r.physical_qty || 0), 0);
+  const totalSystem = withSystem.reduce((s, r) => s + Number(r.system_qty || 0), 0);
+  const totalVariance = withSystem.reduce((s, r) => s + Number(r.variance || 0), 0);
 
   const total = items.length;
   const counted = items.filter((i) => i.counted || i.not_applicable).length;
   return {
     rows,
-    groups: groupVariance(rows),
+    groups: groupVariance(withSystem),
     provisional,
     progress: { total, counted, uncounted: total - counted },
+    // True only when nothing at all has been imported or entered.
+    hasSystemStock: provenance.with_system > 0,
+    provenance,
+    totals: {
+      with_system: withSystem.length,
+      no_system_data: noSystem.length,
+      physical_qty: totalPhysical,
+      system_qty: totalSystem,
+      variance: totalVariance,
+      // Overall %, computed only over rows that actually have a system figure.
+      variance_pct: totalSystem !== 0
+        ? Number(((totalVariance / totalSystem) * 100).toFixed(2))
+        : null,
+    },
   };
 }
 
@@ -281,15 +336,19 @@ export async function consolidated(auditIds) {
   for (const id of auditIds) {
     const audit = await getAudit(id);
     if (!audit) continue;
-    const { rows, groups, provisional, progress } = await varianceReport(id);
+    const { rows, groups, provisional, progress, totals, hasSystemStock, provenance } =
+      await varianceReport(id);
     const physicalValue = rows.reduce((s, r) => s + (r.value || 0), 0);
-    const totalVariance = rows.reduce((s, r) => s + (r.variance || 0), 0);
     const critical = rows.filter((r) => r.status === 'Critical').length;
     stores.push({
       audit_id: id, store_name: audit.store_name,
       audit_date: audit.audit_date, status: audit.status,
       items: rows.length, physical_value: physicalValue,
-      total_variance_qty: totalVariance, critical_items: critical,
+      // Variance totals exclude rows with no system figure.
+      total_variance_qty: totals.variance, critical_items: critical,
+      no_system_data: totals.no_system_data,
+      has_system_stock: hasSystemStock,
+      system_source: provenance.source?.filename ?? null,
       provisional, uncounted: progress.uncounted,
     });
     for (const g of groups) {
@@ -346,5 +405,18 @@ export async function exceptionReport(auditId) {
     if (it.entry_count > 0 && it.active_zero > 0) zeroQty.push({ name: it.name, ...where, zero_entries: it.active_zero });
     if (it.entry_count > 0 && it.with_photo === 0) noPhoto.push({ name: it.name, ...where, entries: it.entry_count });
   }
-  return { voided, notApplicable, multiEntry, zeroQty, noPhoto };
+  // Items with NO system figure at all — a data gap, reported separately from
+  // any variance so it is never mistaken for a shortage.
+  const noSystemData = agg
+    .filter((it) => !it.has_system)
+    .map((it) => ({
+      name: it.name,
+      super_category: it.super_category_name || '—',
+      category: it.category_name || '—',
+      unit: it.unit,
+      physical_qty: it.physical_qty,
+      counted: it.entry_count > 0,
+    }));
+
+  return { voided, notApplicable, multiEntry, zeroQty, noPhoto, noSystemData };
 }
