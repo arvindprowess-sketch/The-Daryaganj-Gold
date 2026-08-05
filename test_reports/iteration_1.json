@@ -1,0 +1,37 @@
+{
+  "summary": "Full regression pass on the 4 pre-deploy changes for Audix (Neon Postgres migration, R2 photo storage, new SPA-serving/static block in server/index.js, root Railway build/start scripts). Verified via direct backend curls, R2 public-URL fetch, and Playwright UI navigation with hard reloads. All 8 requested checks PASS. Database left clean (only user is arvind; 0 stores/items/audits).",
+  "backend_issues": { "critical": [], "minor": [] },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "/login", "issues": ["Stale footer hint still reads 'Auditor demo: rakesh / rakesh123 · Admin: admin / admin123'. Those accounts do not exist in this Neon DB; misleading for a production build. Non-blocking, but should be removed before go-live."]}
+    ]
+  },
+  "test_report_links": [],
+  "action_items": [
+    "Optional: remove the stale 'Auditor demo: rakesh / rakesh123 · Admin: admin / admin123' hint on the login page before production release — it references credentials that no longer exist."
+  ],
+  "critical_code_review_comments": [
+    "server/src/index.js SPA fallback regex `/^(?!\\/api\\/|\\/uploads\\/).*/` correctly excludes /api and /uploads. Verified locally on :8001: GET /admin/reports returns index.html (200 text/html) while GET /api/does-not-exist returns JSON 401 from auth middleware (never HTML). Good.",
+    "GET /api/does-not-exist currently returns 401 'Missing token' because the global auth guard fires before a 404 handler. Behaviourally fine (it's still JSON, not HTML, so SPA fallback is not swallowing it), but a dedicated 404 JSON handler for unmatched /api/* would be cleaner and give a truer 'unknown route' signal.",
+    "VITE_API_URL in /app/client/.env is hardcoded to https://audit.audix.co.in. That means the SPA served from the preview URL will call the production audit.audix.co.in API for its own XHR requests, not the same-origin backend. Works today because CORS allows it, but for a preview/staging build this is worth calling out — a same-origin (empty) or per-env VITE_API_URL would be safer."
+  ],
+  "updated_files": [],
+  "success_rate": { "backend": "100%", "frontend": "100%" },
+  "test_credentials": "arvind / Daryaganj@Gold2026 (only user, from /app/memory/test_credentials.md)",
+  "seed_data_creation": "None left behind. During testing I created and then deleted: store {code:TSTREG,name:TEST_Store_Regression}, user {username:test_regression_aud}. Final DB state: 1 user (arvind), 0 stores, 0 items, 0 audits. One test JPEG remains in R2 at https://pub-3547de2743ef47b39495bfe214816240.r2.dev/2026-08-05/test-regression-e86360d0.jpg — the upload endpoint has no delete companion and cleaning it would need direct R2 access; harmless artifact.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Login inputs have NO name/id/label-for association. Use placeholder 'e.g. rakesh' for username and input[type=\"password\"] for password (get_by_label does NOT work). App is Node/Express+Vite (not FastAPI/React-CRA). Backend at :8001 serves both /api/* and, in prod builds, the SPA from client/dist with an SPA fallback that excludes /api and /uploads. In the preview URL the frontend is still Vite dev on :3000 (has /@vite/client), so to actually exercise the new SPA-fallback code you must curl the backend directly (localhost:8001). Do NOT run any seed script — this DB is the real production Neon DB.",
+  "detailed_results": {
+    "1_admin_login": "PASS — POST /api/auth/login with arvind/Daryaganj@Gold2026 returned a JWT; UI redirected to /admin.",
+    "2_spa_deep_route_reload": "PASS — via UI: /admin/reports, /admin/readiness, /admin/data, /admin/items each rendered app shell + sidebar after hard reload (no 404/blank/raw JSON). Additionally verified against backend directly at http://localhost:8001/admin/reports → 200 text/html (index.html served by new SPA fallback).",
+    "3_api_not_swallowed": "PASS — GET /api/health → 200 application/json {ok:true}. GET /api/does-not-exist → 401 application/json {error:'Missing token',code:'no_token'} (JSON, not HTML). Confirmed both against preview URL and localhost:8001.",
+    "4_readiness": "PASS — /api/data/readiness: jwt_secret✓, database_url✓ (Neon), client_origin✓ (audit.audix.co.in + preview URL), demo_data✓, default_passwords✓, item_master✗ (0 items, EXPECTED), photos✓, rates✓, bottle_sizes✓, storage✓ (s3 driver: test write and delete succeeded), open_audits✓. UI renders the list with the single expected red X on 'Item master loaded'.",
+    "5_r2_upload": "PASS — POST /api/upload (multipart photo=<jpg>, item_name=TEST_regression) → 201 {url:'https://pub-3547de2743ef47b39495bfe214816240.r2.dev/2026-08-05/test-regression-e86360d0.jpg'}. GET on that URL → 200 image/jpeg.",
+    "6_crud_stores_and_users": "PASS — POST /api/stores {TEST_Store_Regression,TSTREG} → id 1; GET list shows it; DELETE /api/stores/1 → {ok:true,softDeleted:false,audits:0,entries:0,user_links:0}; GET list → 0. POST /api/users {test_regression_aud, auditor} → id 2; DELETE /api/users/2 → {ok:true,softDeleted:false,...}; final GET → 1 user (arvind only).",
+    "7_item_master_ui": "PASS — /admin/items renders 'Item master · 0 items · 0 with photos', 'CSV import' and 'Bulk photos' buttons present and reachable (not clicked/imported).",
+    "8_reports_empty_state": "PASS — /admin/reports renders report tabs (R1 Physical Summary, R2 Item Detail, R3 Liquor, R4 Variance, R6 Exceptions) + 'Select a report' + 'R5 Consolidated (all stores) → Build consolidated' button. No crash, no blank white screen with zero audits."
+  }
+}
