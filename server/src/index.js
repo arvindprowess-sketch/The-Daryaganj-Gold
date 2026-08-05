@@ -91,22 +91,30 @@ app.use('/api/data', dataManagementRoutes);
 app.use('/api/upload', uploadRoutes);
 app.use('/api/photo-reviews', photoReviewRoutes);
 
-// ── Serve the built client from the same origin as the API ──────────────────
-// The client calls /api with RELATIVE urls (see client/src/lib/api.js), so it
-// can only be served from the same origin as the API — there is no API base URL
-// to point a separately-hosted frontend at.
-//
-// Anything that is not /api or /uploads falls through to index.html so that
-// client-side routes survive a hard refresh or a pasted deep link.
-//
-// Guarded by existsSync: in development the client is served by Vite on :5173
-// and client/dist does not exist, so this whole block stays inert.
-const clientDist = path.join(rootDir, '..', 'client', 'dist');
-if (fs.existsSync(clientDist)) {
-  app.use(express.static(clientDist));
-  app.get(/^(?!\/api|\/uploads).*/, (_req, res) =>
-    res.sendFile(path.join(clientDist, 'index.html')));
+// ── Built client (single-service deployment) ────────────────────────────────
+// When a production build exists, this process also serves the SPA, so the
+// whole app runs on one origin and one port. When it does not, the API keeps
+// running exactly as before as a standalone service and the client is deployed
+// separately — hence the CORS configuration above, which stays either way.
+const clientDist = process.env.CLIENT_DIST
+  ? path.resolve(process.env.CLIENT_DIST)
+  : path.join(rootDir, '..', 'client', 'dist');
+
+if (fs.existsSync(path.join(clientDist, 'index.html'))) {
+  // Hashed asset filenames are immutable; index.html must never be cached or a
+  // redeploy leaves browsers loading a bundle that no longer exists.
+  app.use(express.static(clientDist, { index: false, maxAge: '1y' }));
+
+  // SPA fallback: a hard refresh on /admin/reports must return index.html.
+  // Scoped to GET/HEAD and excluding the API and upload prefixes, so an unknown
+  // /api/* path still returns its JSON 404 instead of a page of HTML.
+  app.get(/^(?!\/api\/|\/uploads\/).*/, (req, res, next) => {
+    if (req.method !== 'GET' && req.method !== 'HEAD') return next();
+    res.sendFile(path.join(clientDist, 'index.html'));
+  });
+  console.log(`Serving built client from ${clientDist}`);
 }
+
 
 // Central error handler
 app.use((err, _req, res, _next) => {

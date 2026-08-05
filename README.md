@@ -190,26 +190,33 @@ The client calls the API with relative URLs (`fetch('/api' + path)` in
 `client/src/lib/api.js`), so there is no API base URL to point a separately
 hosted frontend at — same-origin is the only supported shape.
 
+The root `package.json` carries both scripts a host needs, so a platform that
+auto-detects Node conventions needs no manual build or start command:
+
 ```bash
-npm --prefix server ci
-npm --prefix client ci --include=dev      # see the note below
-npm --prefix client run build             # produces client/dist
-npm --prefix server start
+npm run build     # installs both workspaces and builds client/dist
+npm start         # boots the API, which also serves that build
 ```
 
 - `server/src/index.js` serves `client/dist` and falls back to `index.html` for
-  any path that is not `/api` or `/uploads`, so client-side routes survive a
-  hard refresh and a pasted deep link.
-- The block is guarded by `fs.existsSync`, so in development — where Vite serves
-  the client on :5173 and `client/dist` does not exist — it stays inert.
+  any path outside `/api/` and `/uploads/`, so client-side routes survive a hard
+  refresh and a pasted deep link. Hashed assets are cached for a year;
+  `index.html` never is, or a redeploy leaves browsers loading a bundle that no
+  longer exists.
+- The block is guarded by an `index.html` existence check, so in development —
+  where Vite serves the client and no build exists — it stays inert and the API
+  runs exactly as before. `CLIENT_DIST` overrides the location if the build
+  lands somewhere else.
 - `PORT` is read from the environment (`process.env.PORT || 4000`), which is
-  what platforms like Railway, Render and Fly inject.
-- **`--include=dev` matters.** Vite and Tailwind are `devDependencies`, and with
-  `NODE_ENV=production` set, `npm ci` omits them and the build fails with
-  `vite: not found`. Either pass the flag or set `NPM_CONFIG_INCLUDE=dev`.
+  what Railway, Render and Fly inject. Do not set it yourself.
+- **`--include=dev` in the build script matters.** Vite and Tailwind are
+  `devDependencies`, and with `NODE_ENV=production` set `npm install` omits them
+  and the build fails with `vite: not found`.
 - **`STORAGE_DRIVER=s3` is required** on any platform with an ephemeral
   filesystem: the local driver writes into the container and every photo is lost
   on redeploy.
+- `CLIENT_ORIGIN` still has to be a real origin even though the app is
+  same-origin — the production guard refuses `*` and the server will not start.
 
 Set the variables in [Production configuration](#production-configuration)
 before the first boot — the server exits rather than start without them.
