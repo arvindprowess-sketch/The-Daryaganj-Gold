@@ -300,10 +300,74 @@ scrolls.
 
 ---
 
-## System stock import
+## System stock — import, correct, remove, trace
 
-Admin only; never exposed to the auditor role. The importer accepts **the
-client's own system export directly**:
+Admin only; never exposed to the auditor role (every endpoint is 403 for an
+auditor, including the import history and activity log).
+
+A wrong file imported against the wrong audit used to produce a complete but
+entirely wrong variance report, with nothing to show where the figures came
+from and no way to undo it. That is now closed off on four fronts.
+
+### Correcting figures
+
+- **Edit one figure inline** — the commonest correction; no re-import needed.
+  The change is logged with its old and new values, and the row is marked
+  *hand-corrected* (it is no longer attributed to the import file).
+- **Delete a single row** — for one wrong figure rather than the whole file.
+- **Clear all system stock** — requires typing `CLEAR SYSTEM STOCK`, and states
+  exactly what will go ("system stock for 594 items, imported … by …").
+  **Physical count entries are never touched.**
+
+The variance report recalculates immediately after any of these.
+
+### Wrong-file guards
+
+Before anything is written, the preview states the audit, the file, the row
+count, and **what will be replaced**, then challenges suspicious imports:
+
+| Guard | Behaviour |
+|---|---|
+| **Store mismatch** — every row carries a `LOC` that isn't this audit's store | **Blocked.** Override needs `IMPORT ANYWAY` typed *plus* a reason, both recorded. Re-checked server-side, so the UI cannot wave it through. |
+| **Low match rate** — under 80% of rows match the master | Warning + explicit acknowledgement |
+| **Coverage gap** — over 20% of master items absent from the file | Warning + explicit acknowledgement |
+| **Duplicate import** — same filename already imported for this audit | Warning + explicit acknowledgement |
+
+The **not matched** and **in master, not in file** lists are always shown in
+full and are downloadable as CSV. Neither is ever hidden.
+
+A replace runs as **clear-then-insert inside one transaction**, so a failed
+import can never leave the audit with half the old data and half the new.
+
+### Provenance and history
+
+Every import records filename, row/matched/unmatched counts, who and when. A
+superseded import is marked `replaced` (never deleted) so a re-import is always
+visible; a cleared one is marked `cleared`. Clears, replacements and
+single-figure corrections are written to `activity_log` with before/after
+values. Both are shown on the system stock screen, and the source file, import
+time, importer and coverage appear in the **variance report header and in every
+variance export**.
+
+### No system figure ≠ zero
+
+- *system says 0, physical found 5* → a genuine excess, a real variance
+- *no system row for this item* → a **data gap**, not a variance
+
+A missing row is `NULL`, never zero. Such items show the status
+**`NO SYSTEM DATA`**, carry no percentage, are **excluded from variance totals
+and from the overall variance %**, are counted separately in the exception
+report, and can be isolated with the
+**[All] [With system data] [No system data]** filter.
+
+If **no** system stock exists at all, the variance report does not render a
+table of 100% shortages — it shows "No system stock has been imported for this
+audit" with a link to import, so an empty import is never mistaken for a total
+shortage.
+
+### Accepted file format
+
+The importer accepts **the client's own system export directly**:
 
 ```
 LOC, Super Category Name, Category Name, Item Name, Unit, Closing Qty

@@ -2,6 +2,12 @@ import express from 'express';
 import cors from 'cors';
 import path from 'node:path';
 import { config, rootDir } from './config.js';
+import { enableAsyncRouteSafety } from './lib/asyncRoutes.js';
+
+// Must run BEFORE the route modules are imported, so their handlers are
+// registered through the patched Router. Without this an async handler that
+// rejects (e.g. a bad :itemId reaching Postgres) would crash the process.
+enableAsyncRouteSafety();
 
 import authRoutes from './routes/auth.js';
 import storeRoutes from './routes/stores.js';
