@@ -50,9 +50,14 @@ app.use('/api/photo-reviews', photoReviewRoutes);
 
 // Central error handler
 app.use((err, _req, res, _next) => {
-  console.error(err);
+  // A rejected CSV is a normal outcome the admin has to act on, not a fault —
+  // it carries its own explanation and does not belong in the error log.
+  if (err.name !== 'CsvFormatError') console.error(err);
   if (res.headersSent) return;
-  res.status(err.status || 500).json({ error: err.message || 'Server error' });
+  res.status(err.status || 500).json({
+    error: err.message || 'Server error',
+    ...(err.code ? { code: err.code } : {}),
+  });
 });
 
 // Demo data must never survive into a live environment. Warn loudly at

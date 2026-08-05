@@ -44,8 +44,9 @@ router.get('/item-master/impact', async (_req, res) => {
   const { rows } = await query(
     `SELECT (SELECT count(*)::int FROM items) AS total_items,
             (SELECT count(*)::int FROM items WHERE is_active) AS active_items,
-            (SELECT count(*)::int FROM count_entries) AS entries,
-            (SELECT count(DISTINCT audit_id)::int FROM count_entries) AS audits_with_entries,
+            (SELECT count(*)::int FROM count_entries WHERE NOT is_demo) AS entries,
+            (SELECT count(DISTINCT audit_id)::int FROM count_entries WHERE NOT is_demo) AS audits_with_entries,
+            (SELECT count(*)::int FROM count_entries WHERE is_demo) AS demo_entries,
             (SELECT count(*)::int FROM items WHERE photo_url IS NOT NULL) AS with_photos`
   );
   const r = rows[0];
@@ -63,8 +64,8 @@ router.get('/item-master/impact', async (_req, res) => {
 // ── (2) Delete the entire item master ──────────────────────────────────────
 router.post('/item-master/delete-all', async (req, res) => {
   const { rows: chk } = await query(
-    `SELECT (SELECT count(*)::int FROM count_entries) AS entries,
-            (SELECT count(DISTINCT audit_id)::int FROM count_entries) AS audits,
+    `SELECT (SELECT count(*)::int FROM count_entries WHERE NOT is_demo) AS entries,
+            (SELECT count(DISTINCT audit_id)::int FROM count_entries WHERE NOT is_demo) AS audits,
             (SELECT count(*)::int FROM items) AS items`
   );
   const { entries, audits, items } = chk[0];
@@ -84,6 +85,9 @@ router.post('/item-master/delete-all', async (req, res) => {
     'SELECT photo_url FROM items WHERE photo_url IS NOT NULL');
 
   const deleted = await withTransaction(async (c) => {
+    // Demo entries are sample data, not history — cleared with the master.
+    await c.query('DELETE FROM count_entries WHERE is_demo');
+    await c.query('DELETE FROM audit_na');
     await c.query('DELETE FROM system_stock');
     await c.query('DELETE FROM photo_reviews');
     const { rowCount } = await c.query('DELETE FROM items');
@@ -317,7 +321,8 @@ router.get('/activity', async (req, res) => {
             COALESCE(al.target_type, al.entity_type) AS target_type,
             COALESCE(al.target_id, al.entity_id) AS target_id,
             al.record_count, al.detail AS details, al.created_at, al.audit_id,
-            u.name AS user_name, u.username
+            -- The snapshot keeps the trail readable after an account is deleted.
+            COALESCE(u.name, al.user_label) AS user_name, u.username
        FROM activity_log al
        LEFT JOIN users u ON u.id = al.user_id
       ORDER BY al.created_at DESC, al.id DESC
