@@ -321,7 +321,8 @@ router.get('/activity', async (req, res) => {
             COALESCE(al.target_type, al.entity_type) AS target_type,
             COALESCE(al.target_id, al.entity_id) AS target_id,
             al.record_count, al.detail AS details, al.created_at, al.audit_id,
-            u.name AS user_name, u.username
+            -- The snapshot keeps the trail readable after an account is deleted.
+            COALESCE(u.name, al.user_label) AS user_name, u.username
        FROM activity_log al
        LEFT JOIN users u ON u.id = al.user_id
       ORDER BY al.created_at DESC, al.id DESC

@@ -4,6 +4,7 @@ import { Spinner, PhotoThumb } from '../../components/ui.jsx';
 import PhotoInput from '../../components/PhotoInput.jsx';
 import { useToast } from '../../components/Toast.jsx';
 import ConfirmDialog from '../../components/ConfirmDialog.jsx';
+import ImportResult, { ImportProgress } from '../../components/ImportResult.jsx';
 
 const blank = { name: '', super_category_id: '', category_id: '', unit: '', is_liquor: false, bottle_size_ml: '', rate: '' };
 
@@ -181,7 +182,9 @@ export default function ItemMaster() {
         onCancel={() => setConfirmDel(null)}
         onConfirm={() => removeItem(confirmDel)}
       />
-      {panel === 'csv' && <CsvImport onClose={() => setPanel(null)} onDone={() => { setPanel(null); load(); }} />}
+      {/* The panel stays open after an import so its result banner survives
+          until dismissed; `onImported` refreshes the list behind it. */}
+      {panel === 'csv' && <CsvImport onClose={() => setPanel(null)} onImported={load} />}
       {panel === 'photos' && <BulkPhotos onClose={() => setPanel(null)} onDone={() => { setPanel(null); load(); }} />}
     </div>
   );
@@ -287,19 +290,21 @@ function ItemEditor({ item, supers, categories, onClose, onSaved }) {
 
 // CSV import. Rows are matched to existing items by NAME. A name that does not
 // match is never silently created or skipped — the admin decides per row.
-function CsvImport({ onClose, onDone }) {
+function CsvImport({ onClose, onImported }) {
   const [file, setFile] = useState(null);
   const [preview, setPreview] = useState(null);
   const [decisions, setDecisions] = useState({}); // row -> 'create' | 'skip'
   const [mode, setMode] = useState('add');        // add | upsert | replace
   const [typed, setTyped] = useState('');         // replace confirmation
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState('');
-  const toast = useToast();
+  const [busy, setBusy] = useState(null);         // null | 'reading' | 'importing'
+  // Persistent outcome banner. Set on success AND on failure; cleared only by
+  // starting another import or by the admin dismissing it. Never on a timer.
+  const [result, setResult] = useState(null);
+  const [showSkipped, setShowSkipped] = useState(false);
 
   async function doPreview(f = file) {
     if (!f) return;
-    setErr(''); setBusy(true);
+    setResult(null); setBusy('reading');
     try {
       const fd = new FormData(); fd.append('file', f);
       const p = await api.upload('/items/import/preview', fd);
@@ -308,11 +313,23 @@ function CsvImport({ onClose, onDone }) {
       const d = {};
       p.rows.filter((r) => !r.matched && !r.errors.length).forEach((r) => { d[r.row] = 'skip'; });
       setDecisions(d);
-    } catch (e) { setErr(e.message); } finally { setBusy(false); }
+    } catch (e) {
+      // The server states the actual reason (wrong file type, missing column,
+      // no data rows); show it verbatim rather than "import failed".
+      setPreview(null);
+      setResult({ tone: 'error', title: e.message, lines: [`File: ${f.name}`] });
+    } finally { setBusy(null); }
   }
 
   async function commit() {
-    setErr(''); setBusy(true);
+    setResult(null); setBusy('importing'); setShowSkipped(false);
+    // Snapshot what will be left out, so the result can list it afterwards even
+    // though the preview is stale once the import has run.
+    const skippedNames = preview.rows
+      .filter((r) => !r.errors.length && (mode === 'add'
+        ? (r.matched || decisions[r.row] !== 'create')
+        : false))
+      .map((r) => r.data.name);
     try {
       const fd = new FormData();
       fd.append('file', file);
@@ -320,9 +337,27 @@ function CsvImport({ onClose, onDone }) {
       fd.append('decisions', JSON.stringify(decisions));
       if (mode === 'replace') fd.append('confirm', typed);
       const r = await api.upload('/items/import/commit', fd);
-      toast(`Import done — ${r.created} created, ${r.updated} updated, ${r.deleted} deleted, ${r.skipped} skipped`);
-      onDone();
-    } catch (e) { setErr(e.message); } finally { setBusy(false); }
+      const applied = r.created + r.updated;
+      const partial = r.skipped > 0;
+      setResult({
+        tone: partial ? 'warning' : 'success',
+        title: partial
+          ? `Import completed with issues — ${applied} imported, ${r.skipped} not imported.`
+          : `Import successful — ${applied} items imported, 0 skipped.`,
+        lines: [
+          `${r.created} created · ${r.updated} updated${r.deleted ? ` · ${r.deleted} deleted` : ''} · from ${r.filename} (${r.rowsInFile} rows).`,
+          r.createdSuperCategories?.length
+            ? `New super categories created: ${r.createdSuperCategories.join(', ')}.` : null,
+          r.createdCategories?.length
+            ? `New categories created: ${r.createdCategories.join(', ')}.` : null,
+        ],
+        skippedNames: partial ? skippedNames : [],
+      });
+      // The list behind this panel refreshes immediately; no manual reload.
+      onImported();
+    } catch (e) {
+      setResult({ tone: 'error', title: e.message, lines: [`File: ${file?.name || '—'}`] });
+    } finally { setBusy(null); }
   }
 
   const unmatchedRows = preview ? preview.rows.filter((r) => !r.matched && !r.errors.length) : [];
@@ -347,20 +382,50 @@ function CsvImport({ onClose, onDone }) {
         </button>
         {/* Choosing a file runs the preview immediately. Previously the commit
             button stayed disabled until a separate "Preview" click, so clicking
-            it appeared to do nothing at all. */}
-        <input type="file" accept=".csv,text/csv"
+            it appeared to do nothing at all. Disabled while an import runs so
+            the file cannot be swapped mid-flight. */}
+        <input type="file" accept=".csv,text/csv" disabled={!!busy}
                onChange={(e) => {
                  const f = e.target.files?.[0];
                  setFile(f);
                  setPreview(null);
                  setTyped('');
+                 setResult(null);
                  doPreview(f);
                }} />
-        {busy && <span className="text-sm text-slate-500">Reading file…</span>}
         {file && !busy && (
           <button className="btn-ghost text-sm py-1.5" onClick={() => doPreview()}>Re-check file</button>
         )}
       </div>
+
+      {/* Progress and outcome. Both name the file; the outcome stays until it
+          is dismissed. */}
+      {busy && (
+        <div className="mb-3">
+          <ImportProgress filename={file?.name || 'file'}
+                          verb={busy === 'reading' ? 'Reading' : 'Importing'} />
+        </div>
+      )}
+      {result && !busy && (
+        <div className="mb-3">
+          <ImportResult
+            tone={result.tone} title={result.title} lines={result.lines}
+            onDismiss={() => { setResult(null); setShowSkipped(false); }}
+            actions={result.skippedNames?.length > 0 && (
+              <button className="underline font-medium"
+                      onClick={() => setShowSkipped((v) => !v)}>
+                {showSkipped ? 'Hide' : 'View'} the {result.skippedNames.length} row(s) not imported
+              </button>
+            )} />
+          {showSkipped && (
+            <div className="mt-2 border rounded-xl max-h-48 overflow-y-auto divide-y text-sm">
+              {result.skippedNames.map((n, i) => (
+                <div key={i} className="px-3 py-1.5">{n}</div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
       {/* Import mode. Nothing is ever deleted as a side effect — only the
           explicit "Replace entire master" removes anything. */}
       <div className="rounded-xl border border-slate-200 p-3 mb-3 space-y-2">
@@ -407,13 +472,15 @@ function CsvImport({ onClose, onDone }) {
       <div className="flex gap-2 mb-4">
         <button
           className={mode === 'replace' ? 'btn-danger' : 'btn-primary'}
+          // Disabled while an import runs, so it cannot be submitted twice.
           disabled={
-            !preview || preview.invalid > 0 || busy ||
+            !preview || preview.invalid > 0 || !!busy ||
             (mode === 'replace' && (preview.modes?.replace?.blocked ||
                                     typed.trim().toUpperCase() !== 'REPLACE ITEM MASTER'))
           }
           onClick={commit}>
-          {mode === 'replace' ? 'Replace item master'
+          {busy === 'importing' ? 'Importing…'
+            : mode === 'replace' ? 'Replace item master'
             : mode === 'upsert' ? `Add and update${preview ? ` (${preview.modes.upsert.updated} updated, ${preview.modes.upsert.created} created, 0 deleted)` : ''}`
             : `Add new only${preview ? ` (${createCount} create)` : ''}`}
         </button>
@@ -422,7 +489,8 @@ function CsvImport({ onClose, onDone }) {
           if (busy) return null;
           let why = '';
           if (!file) why = 'Choose a CSV file first.';
-          else if (!preview) why = 'Reading the file…';
+          // The banner above already states why the file was rejected.
+          else if (!preview) why = result?.tone === 'error' ? '' : 'Reading the file…';
           else if (preview.invalid > 0) why = `${preview.invalid} invalid row(s) — fix them first.`;
           else if (mode === 'replace' && preview.modes?.replace?.blocked) why = preview.modes.replace.blockedReason;
           else if (mode === 'replace' && typed.trim().toUpperCase() !== 'REPLACE ITEM MASTER')
@@ -430,7 +498,6 @@ function CsvImport({ onClose, onDone }) {
           return why ? <span className="self-center text-sm text-amber-700">{why}</span> : null;
         })()}
       </div>
-      {err && <p className="text-red-600 text-sm mb-2">{err}</p>}
 
       {preview && (
         <>

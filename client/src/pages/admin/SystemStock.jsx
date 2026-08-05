@@ -4,6 +4,7 @@ import { api, downloadReport } from '../../lib/api.js';
 import { Spinner } from '../../components/ui.jsx';
 import ConfirmDialog from '../../components/ConfirmDialog.jsx';
 import { useToast } from '../../components/Toast.jsx';
+import ImportResult, { ImportProgress } from '../../components/ImportResult.jsx';
 import useDebounced, { normalizeName } from '../../lib/useDebounced.js';
 
 const fmtWhen = (t) => (t ? new Date(t).toLocaleString() : '—');
@@ -47,8 +48,10 @@ export default function SystemStock() {
         ))}
       </div>
 
+      {/* The CSV tab stays put after an import so its result banner survives
+          until dismissed; `onImported` refreshes the figures behind it. */}
       {tab === 'csv' && <CsvImport auditId={auditId} audit={audit}
-                                   onDone={() => { load(); setTab('manual'); }} />}
+                                   onImported={load} onViewFigures={() => setTab('manual')} />}
       {tab === 'history' && <History auditId={auditId} />}
       {tab === 'manual' && <FiguresTable auditId={auditId} rows={rows} onChanged={load} />}
     </div>
@@ -346,27 +349,36 @@ function History({ auditId }) {
 }
 
 // ── CSV import: full disclosure + wrong-file guards ────────────────────────
-function CsvImport({ auditId, audit, onDone }) {
+function CsvImport({ auditId, audit, onImported, onViewFigures }) {
   const [file, setFile] = useState(null);
   const [preview, setPreview] = useState(null);
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(null);         // null | 'reading' | 'importing'
+  // Persistent outcome banner — cleared only by dismissing it or starting over.
+  const [result, setResult] = useState(null);
   const [showList, setShowList] = useState(null); // 'unmatched' | 'missing'
   const [ack, setAck] = useState(false);          // extra confirmation for warnings
   const [override, setOverride] = useState({ typed: '', reason: '' });
-  const toast = useToast();
 
-  async function doPreview() {
-    setErr(''); setBusy(true); setAck(false); setShowList(null);
-    setOverride({ typed: '', reason: '' });
+  // Choosing a file previews it straight away — there is nothing useful the
+  // admin could do with the file before seeing what it contains.
+  async function pickFile(f) {
+    setFile(f); setPreview(null); setResult(null);
+    setAck(false); setShowList(null); setOverride({ typed: '', reason: '' });
+    if (!f) return;
+    setBusy('reading');
     try {
-      const fd = new FormData(); fd.append('file', file);
+      const fd = new FormData(); fd.append('file', f);
       setPreview(await api.upload(`/system-stock/${auditId}/preview`, fd));
-    } catch (e) { setErr(e.message); } finally { setBusy(false); }
+    } catch (e) {
+      // The server names the actual reason; show it as given.
+      setResult({ tone: 'error', title: e.message, lines: [`File: ${f.name}`] });
+    } finally { setBusy(null); }
   }
 
   async function commit() {
-    setErr(''); setBusy(true);
+    setResult(null); setBusy('importing');
+    const notMatched = preview?.unmatched?.length || 0;
+    const noFigure = preview?.missingCount || 0;
     try {
       const fd = new FormData();
       fd.append('file', file);
@@ -375,9 +387,26 @@ function CsvImport({ auditId, audit, onDone }) {
         fd.append('override_reason', override.reason);
       }
       const r = await api.upload(`/system-stock/${auditId}/commit`, fd);
-      toast(`Imported ${r.imported} rows${r.replacedPrevious ? ' (previous system stock replaced)' : ''}`);
-      onDone();
-    } catch (e) { setErr(e.message); } finally { setBusy(false); }
+      const partial = r.unmatched > 0 || noFigure > 0;
+      setResult({
+        tone: partial ? 'warning' : 'success',
+        title: partial
+          ? `Import completed with issues — ${r.imported} rows imported, ${r.unmatched} not matched.`
+          : `System stock imported — ${r.imported} rows.`,
+        lines: [
+          `From ${r.filename} (${r.rowsInFile} rows in file).`,
+          r.replacedPrevious
+            ? `The previous system stock for this audit was replaced (${r.removed} figures removed).` : null,
+          noFigure > 0
+            ? `${noFigure} master item(s) had no row in the file and will show as NO SYSTEM DATA on the variance report.` : null,
+        ],
+        showUnmatched: notMatched > 0,
+      });
+      // Figures and provenance behind this tab refresh immediately.
+      onImported();
+    } catch (e) {
+      setResult({ tone: 'error', title: e.message, lines: [`File: ${file?.name || '—'}`] });
+    } finally { setBusy(null); }
   }
 
   async function downloadList(which) {
@@ -409,11 +438,47 @@ function CsvImport({ auditId, audit, onDone }) {
                 onClick={() => downloadReport('/system-stock/template', 'system_stock_template.csv')}>
           ⬇ Download Template
         </button>
-        <input type="file" accept=".csv,text/csv"
-               onChange={(e) => { setFile(e.target.files?.[0]); setPreview(null); }} />
-        <button className="btn-ghost" disabled={!file || busy} onClick={doPreview}>Preview</button>
+        {/* Disabled while an import runs so the file cannot be swapped or the
+            import fired twice. */}
+        <input type="file" accept=".csv,text/csv" disabled={!!busy}
+               onChange={(e) => pickFile(e.target.files?.[0])} />
+        {file && !busy && (
+          <button className="btn-ghost text-sm py-1.5" onClick={() => pickFile(file)}>Re-check file</button>
+        )}
       </div>
-      {err && <p className="text-red-600 text-sm mb-3">{err}</p>}
+
+      {busy && (
+        <div className="mb-4">
+          <ImportProgress filename={file?.name || 'file'}
+                          verb={busy === 'reading' ? 'Reading' : 'Importing'} />
+        </div>
+      )}
+      {result && !busy && (
+        <div className="mb-4">
+          <ImportResult
+            tone={result.tone} title={result.title} lines={result.lines}
+            onDismiss={() => setResult(null)}
+            actions={
+              <>
+                {result.showUnmatched && (
+                  <>
+                    <button className="underline font-medium"
+                            onClick={() => setShowList(showList === 'unmatched' ? null : 'unmatched')}>
+                      {showList === 'unmatched' ? 'Hide' : 'View'} the rows that were not matched
+                    </button>
+                    <button className="underline font-medium"
+                            onClick={() => downloadList('unmatched')}>Download them as CSV</button>
+                  </>
+                )}
+                {result.tone !== 'error' && (
+                  <button className="underline font-medium" onClick={onViewFigures}>
+                    View the imported figures
+                  </button>
+                )}
+              </>
+            } />
+        </div>
+      )}
 
       {preview && (
         <div className="space-y-4">
@@ -530,7 +595,8 @@ function CsvImport({ auditId, audit, onDone }) {
           <div className="flex gap-2 justify-end">
             <button className="btn-ghost" onClick={() => setPreview(null)}>Cancel</button>
             <button className="btn-primary" disabled={!canCommit} onClick={commit}>
-              {busy ? 'Importing…' : preview.willReplace ? 'Replace system stock' : 'Import system stock'}
+              {busy === 'importing' ? 'Importing…'
+                : preview.willReplace ? 'Replace system stock' : 'Import system stock'}
             </button>
           </div>
         </div>

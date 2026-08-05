@@ -3,7 +3,7 @@ import multer from 'multer';
 import sharp from 'sharp';
 import { query, withTransaction } from '../db.js';
 import { requireAuth, requireRole } from '../middleware/auth.js';
-import { parseCsvObjects } from '../lib/csv.js';
+import { readCsvUpload } from '../lib/csv.js';
 import { normalizeName, nameKey } from '../lib/itemName.js';
 import { storage, removePhotos } from '../lib/storage.js';
 import { toCsv } from '../lib/csvTemplate.js';
@@ -218,15 +218,15 @@ async function analyseCsv(records) {
   return { rows, newSupers: [...newSupers], newCats: [...newCats] };
 }
 
+// A file that cannot be read throws CsvFormatError, which carries the actual
+// reason (wrong file type, missing column, no data rows) to the screen.
+const REQUIRED_COLUMNS = [['item_name', 'name']];
+
 router.post('/import/preview', requireRole('admin'), upload.single('file'), async (req, res) => {
-  const text = req.file ? req.file.buffer.toString('utf8') : req.body?.csv;
-  if (!text) return res.status(400).json({ error: 'No CSV provided' });
-  const { headers, records } = parseCsvObjects(text);
-  if (!headers.includes('item_name') && !headers.includes('name')) {
-    return res.status(400).json({ error: 'Missing required column: item_name' });
-  }
+  const { filename, records } = readCsvUpload(req, { requireColumns: REQUIRED_COLUMNS });
   const { rows, newSupers, newCats } = await analyseCsv(records);
   res.json({
+    filename,
     total: rows.length,
     matched: rows.filter((r) => r.matched && !r.errors.length).length,
     unmatched: rows.filter((r) => !r.matched && !r.errors.length).length,
@@ -282,8 +282,9 @@ async function importModeImpact(rows) {
 // In `add` mode `decisions` maps row number -> 'create' | 'skip' for unmatched
 // rows; unmatched rows with no decision are skipped, never silently created.
 router.post('/import/commit', requireRole('admin'), upload.single('file'), async (req, res) => {
-  const text = req.file ? req.file.buffer.toString('utf8') : req.body?.csv;
-  if (!text) return res.status(400).json({ error: 'No CSV provided' });
+  // The same checks as the preview: the commit must never accept a file the
+  // preview would have rejected.
+  const { filename, records } = readCsvUpload(req, { requireColumns: REQUIRED_COLUMNS });
   const mode = IMPORT_MODES.includes(req.body?.mode) ? req.body.mode : 'add';
   let decisions = {};
   try {
@@ -291,10 +292,19 @@ router.post('/import/commit', requireRole('admin'), upload.single('file'), async
       ? JSON.parse(req.body.decisions) : (req.body?.decisions || {});
   } catch { decisions = {}; }
 
-  const { records } = parseCsvObjects(text);
   const { rows } = await analyseCsv(records);
   const bad = rows.filter((r) => r.errors.length > 0);
-  if (bad.length) return res.status(400).json({ error: 'Fix errors before committing', rows: bad });
+  if (bad.length) {
+    // Name the first few faults rather than "fix errors" — the admin is looking
+    // at a 618-row file and needs to know which rows and why.
+    const shown = bad.slice(0, 3)
+      .map((b) => `row ${b.row} (${b.data.name || 'no name'}): ${b.errors.join('; ')}`);
+    return res.status(400).json({
+      error: `Import failed — ${bad.length} row(s) have errors. ${shown.join(' · ')}` +
+             (bad.length > shown.length ? ` · and ${bad.length - shown.length} more.` : ''),
+      code: 'invalid_rows', rows: bad,
+    });
+  }
 
   // ── `replace` carries the same guards as "delete all items" ──────────────
   let photoUrls = [];
@@ -399,8 +409,7 @@ router.post('/import/commit', requireRole('admin'), upload.single('file'), async
     await logActivity({
       entityType: 'item_master', action: `import_${mode}`,
       recordCount: created + updated,
-      detail: { mode, created, updated, deleted, skipped,
-                filename: req.file?.originalname || 'pasted-data.csv' },
+      detail: { mode, created, updated, deleted, skipped, filename },
       userId: req.user.id,
     }, c);
     return {
@@ -412,7 +421,9 @@ router.post('/import/commit', requireRole('admin'), upload.single('file'), async
 
   // Orphaned photos are removed only after the transaction has committed.
   const photosRemoved = photoUrls.length ? await removePhotos(photoUrls) : 0;
-  res.json({ ok: true, mode, photosRemoved, ...result });
+  // `rowsInFile` and `skipped` let the screen state a partial outcome honestly:
+  // "571 imported, 23 skipped" rather than a bare success.
+  res.json({ ok: true, mode, filename, rowsInFile: records.length, photosRemoved, ...result });
 });
 
 // ── Bulk photo upload: match filename to item NAME ──────────────────────────

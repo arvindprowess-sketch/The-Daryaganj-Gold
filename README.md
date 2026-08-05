@@ -425,6 +425,37 @@ before committing ("412 items will be updated, 206 created, 0 deleted"):
 **An item is never deleted silently as a side effect of an import.** Only the
 explicit replace mode removes anything.
 
+### Import feedback
+
+Both imports — item master and system stock — report their outcome in a banner
+that **stays until it is dismissed**. A bulk change to master data is not
+something to announce in a toast that fades before the admin looks back at the
+screen.
+
+- **Success** — "Import successful — 618 items imported, 0 skipped.", plus the
+  filename, the row count in the file, and any super categories or categories
+  the import created.
+- **Partial** — "Import completed with issues — 571 imported, 23 not matched.",
+  with a button to list the rows that were left out (and, for system stock, to
+  download them as CSV).
+- **Failure** — the actual reason, never a generic message:
+  - `Import failed — file could not be read. "stock.xlsx" is an Excel workbook
+    (.xlsx) or a zip archive. Open it in Excel and choose File → Save As → CSV.`
+  - `Import failed — required column 'item_name' is missing. Columns found: …`
+  - `Import failed — no rows found in file. "master.csv" has a header row but no
+    data rows.`
+  - `Import failed — 2 row(s) have errors. row 7 (Old Monk Rum):
+    bottle_size_ml is required when is_liquor is TRUE · …`
+
+While an import runs, a progress indicator names the file, and both the file
+input and the commit button are disabled so it cannot be submitted twice. On
+success the list behind the panel refreshes immediately — no manual reload.
+
+The commit endpoints run the same checks as the preview, so a file the preview
+would reject can never be committed by calling the API directly. Excel's
+"CSV UTF-8" byte-order mark is stripped before parsing (left in place it becomes
+part of the first header name and `item_name` silently stops matching).
+
 ### Soft delete
 
 An item that has **ever been counted** is never hard deleted — that would orphan
@@ -432,6 +463,41 @@ historical audit records. Deleting it sets `is_active = false`: it disappears
 from counting screens and new audits, stays visible in historical reports, and
 can be reactivated. The item master has an **[Active] [Inactive] [All]** filter.
 Only items with zero count entries anywhere are removed permanently.
+
+### Deleting users and stores
+
+The same rule, applied to accounts and outlets. Admin → Stores & Users has a
+Delete action on both tabs, an **[Active] [Inactive] [All]** filter, and
+Reactivate for anything deactivated. Everything is admin-only and enforced
+server-side; the screen asks the server what a delete would do first
+(`GET /users/:id/impact`, `GET /stores/:id/impact`) so the confirmation dialog
+states the real outcome instead of a guess.
+
+**Users**
+
+| Situation | What happens |
+| --- | --- |
+| Has count entries (or N/A marks, or photo submissions) | `is_active = false`. Entries keep their `counted_by` reference, so historical reports still show the name. The account can no longer sign in — `/auth/login` and `/auth/refresh` both reject an inactive user, so a live session ends within one access-token lifetime. |
+| No history anywhere | Hard deleted, together with its store assignments. Nullable "who touched this last" references (audit creator, voider, importer) are cleared first. |
+| Your own account | Refused, whatever the history. Another admin has to do it. |
+
+**Stores**
+
+| Situation | What happens |
+| --- | --- |
+| Has any audit against it | `is_active = false`. Those audits, their entries and their reports stay intact. |
+| No audits | Hard deleted. |
+| Either way | The user-to-store mappings are removed — the store is no longer to be counted, so no auditor stays assigned to it. Reactivating therefore needs the auditors reassigned, and the response says so. |
+
+`GET /stores` returns **active stores only** by default, for every caller. That
+default is what keeps a deleted store out of the audit-creation dropdown and off
+the auditor's screens; the management screen asks for `?active=inactive` or
+`?active=all` explicitly. Reports join `stores` and `users` directly, so an
+inactive store or user still reads correctly in historical output.
+
+The activity log keeps its attribution across a hard delete: `logActivity`
+snapshots the acting user's name into `activity_log.user_label` at write time,
+and the log reads `COALESCE(users.name, user_label)`.
 
 ### Demo data
 

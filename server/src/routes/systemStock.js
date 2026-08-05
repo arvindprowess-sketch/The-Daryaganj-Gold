@@ -2,7 +2,7 @@ import { Router } from 'express';
 import multer from 'multer';
 import { query, withTransaction } from '../db.js';
 import { requireAuth, requireRole } from '../middleware/auth.js';
-import { parseCsvObjects } from '../lib/csv.js';
+import { parseCsvObjects, readCsvUpload } from '../lib/csv.js';
 import { normalizeName, nameKey } from '../lib/itemName.js';
 import { toCsv } from '../lib/csvTemplate.js';
 import { logActivity, activityFor } from '../lib/activityLog.js';
@@ -17,6 +17,10 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 *
 // Guard thresholds (see /:auditId/preview).
 const MIN_MATCH_RATE = 0.80;   // below this, warn: probably the wrong file
 const MAX_COVERAGE_GAP = 0.20; // above this, warn: too many items have no figure
+
+// The client's own export says `Item Name`; our template also accepts
+// `item_name`. The first entry is the one quoted back when it is missing.
+const REQUIRED_COLUMNS = [['Item Name', 'item_name', 'name']];
 
 // ── Combined CSV template ───────────────────────────────────────────────────
 router.get('/template', (_req, res) => {
@@ -261,14 +265,8 @@ async function analyse(records) {
 
 // ── (2)+(3) Preview: disclose the replacement and challenge suspicious files ─
 router.post('/:auditId/preview', requireIntParams('auditId'), upload.single('file'), async (req, res) => {
-  const text = req.file ? req.file.buffer.toString('utf8') : req.body?.csv;
-  if (!text) return res.status(400).json({ error: 'No CSV provided' });
-  const filename = req.file?.originalname || req.body?.filename || 'pasted-data.csv';
-
-  const { headers, records } = parseCsvObjects(text);
-  if (!headers.includes('item_name') && !headers.includes('item name') && !headers.includes('name')) {
-    return res.status(400).json({ error: 'Missing required column: Item Name (or item_name)' });
-  }
+  // Throws CsvFormatError naming the actual reason when the file is unusable.
+  const { filename, records } = readCsvUpload(req, { requireColumns: REQUIRED_COLUMNS });
 
   const auditId = Number(req.params.auditId);
   const { rows: auditRows } = await query(
@@ -381,9 +379,9 @@ router.post('/:auditId/preview/download', upload.single('file'), async (req, res
 // A failed import can never leave the audit with half the old data and half the
 // new. A blocking guard requires an explicit typed override plus a reason.
 router.post('/:auditId/commit', requireIntParams('auditId'), upload.single('file'), async (req, res) => {
-  const text = req.file ? req.file.buffer.toString('utf8') : req.body?.csv;
-  if (!text) return res.status(400).json({ error: 'No CSV provided' });
-  const filename = req.file?.originalname || req.body?.filename || 'pasted-data.csv';
+  // The same checks as the preview: the commit must never accept a file the
+  // preview would have rejected.
+  const { filename, records } = readCsvUpload(req, { requireColumns: REQUIRED_COLUMNS });
   const auditId = Number(req.params.auditId);
 
   const { rows: auditRows } = await query(
@@ -393,10 +391,14 @@ router.post('/:auditId/commit', requireIntParams('auditId'), upload.single('file
   if (!auditRows[0]) return res.status(404).json({ error: 'Audit not found' });
   const storeCode = auditRows[0].store_code;
 
-  const { records } = parseCsvObjects(text);
   const { matched, unmatched, invalid, locs } = await analyse(records);
   if (invalid.length) {
-    return res.status(400).json({ error: 'Fix invalid rows before committing', invalid });
+    const shown = invalid.slice(0, 3).map((v) => `row ${v.row} (${v.name || 'no name'}): ${v.error}`);
+    return res.status(400).json({
+      error: `Import failed — ${invalid.length} row(s) have errors. ${shown.join(' · ')}` +
+             (invalid.length > shown.length ? ` · and ${invalid.length - shown.length} more.` : ''),
+      code: 'invalid_rows', invalid,
+    });
   }
 
   // Re-check the blocking guard server-side; the UI cannot wave it through.
@@ -459,7 +461,9 @@ router.post('/:auditId/commit', requireIntParams('auditId'), upload.single('file
 
   res.json({
     ok: true, imported: matched.length, unmatched: unmatched.length,
-    filename, ...result,
+    // The screen states the outcome against what was in the file, so
+    // "594 of 618 rows imported, 24 not matched" is visible rather than implied.
+    rowsInFile: records.length, filename, ...result,
   });
 });
 
