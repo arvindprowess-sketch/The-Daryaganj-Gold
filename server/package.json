@@ -12,7 +12,8 @@
     "migrate:photos": "node scripts/migrate-photos-to-storage.js",
     "seed:reference": "node seed/reference.js",
     "seed:demo": "node seed/demo.js",
-    "create:admin": "node scripts/create-admin.js"
+    "create:admin": "node scripts/create-admin.js",
+    "trace": "node scripts/trace-quantities.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.658.0",

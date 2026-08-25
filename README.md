@@ -462,6 +462,44 @@ row per category under its super category — the super category printed once �
 a single `Grand Total`, and the numbered **Notes / Methodology** block. It is
 shown on screen too, so what is downloaded is what was reviewed.
 
+#### Tracing a quantity you cannot account for
+
+When a report shows stock for an item nobody remembers counting, there are only
+three possible explanations — physical quantity reaches R4 through exactly one
+path, `count_entries` filtered to `item_id`, `audit_id` and `status='active'`,
+so it cannot bleed between items or arrive from a file:
+
+1. somebody **did** count it — another auditor, or a second location
+2. it is left-over **test or demo** data from before go-live
+3. it belongs to a **different audit** than the one on screen
+
+`npm run trace` prints which one applies, listing every entry behind a figure
+with who saved it, when, from which location, and whether it is demo data:
+
+```bash
+npm run trace -- --audit 1 --category PROVISION
+npm run trace -- --audit 1 --all        # also lists what was never counted
+npm run trace                           # lists the audits to choose from
+```
+
+It is **read only** and safe against production.
+
+It also separates the two figures that are easy to confuse. **Physical** is what
+the auditor counted. **Final Total Qty** is that count multiplied by the item's
+Bottle/Unit Size — so 10 tins of a 2500 ml item read as 25,000, which is correct
+but looks like a quantity nobody entered:
+
+```
+PROVISION :: Basmati Rice
+  unit TIN (2.5 KG) · Bottle/Unit Size 2500
+  #115            4     Dry Store   2026-08-05 08:36  by rakesh
+  #116            6     Kitchen     2026-08-05 08:36  by rakesh
+  → physical counted 10   ·   Final Total Qty 25000   (10 × 2500)
+```
+
+If a multiplier looks wrong, the fix is on the item master — `bottle_unit_size`
+is admin-entered and is never derived from the item name.
+
 #### Which items appear, and why
 
 The item master is shared across every store while a single outlet stocks only
