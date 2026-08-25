@@ -21,21 +21,32 @@
 // stays PKT. Checked in this order:
 //
 //   KG · GM · ML (litres included) · Meter · PIECE · POR · PKT · Nos
+//
+// Every rule opens with `(?<![A-Za-z])` rather than `\b`. A word boundary is
+// the wrong test here: the client writes "BTL (1LTR)" and "BOT-680G", where the
+// measure sits hard against a digit and there IS no boundary, so `\bLTR\b`
+// never fires. "Not preceded by a letter" accepts those and still rejects the
+// measure appearing inside a longer word — "PKG" is not KG.
 const BASIS_RULES = [
-  [/\bKGS?\b|\bKILO/i, 'KG'],
+  [/(?<![A-Za-z])(KGS?|KILOS?|KILOGRAMS?)\b/i, 'KG'],
   // "GM", "GMS", and the trailing form the client writes as "BOT-680G".
-  [/\bGMS?\b|\bGRAMS?\b|\d\s*G\b/i, 'GM'],
+  [/(?<![A-Za-z])(GMS?|GRAMS?)\b|\d\s*G\b/i, 'GM'],
   // Litres are reported in millilitres, since the size is given in ml.
-  [/\bMLS?\b|\bLTRS?\b|\bLITRES?\b|\bLITERS?\b|\bL\b/i, 'ML'],
-  [/\bMTRS?\b|\bMETERS?\b|\bMETRES?\b/i, 'Meter'],
-  [/\bPCS?\b|\bPIECES?\b/i, 'PIECE'],
-  [/\bPOR\b|\bPORTIONS?\b/i, 'POR'],
-  [/\bPKTS?\b|\bPACKETS?\b|\bPACKS?\b/i, 'PKT'],
+  [/(?<![A-Za-z])(MLS?|LTRS?|LITRES?|LITERS?|L)\b/i, 'ML'],
+  [/(?<![A-Za-z])(MTRS?|METERS?|METRES?)\b/i, 'Meter'],
+  [/(?<![A-Za-z])(PCS?|PIECES?)\b/i, 'PIECE'],
+  [/(?<![A-Za-z])(POR|PORTIONS?)\b/i, 'POR'],
+  [/(?<![A-Za-z])(PKTS?|PACKETS?|PACKS?)\b/i, 'PKT'],
 ];
 
 export function measurementBasis(unit) {
   const u = String(unit || '').trim();
   if (!u) return 'Nos';
+  // A Unit that is nothing but a number is a bottle size in millilitres. That
+  // is how this client's master records liquor — "750", "700", "1000" sit in
+  // the Unit column instead of a unit word — and reading it as a count would
+  // report a spirits shelf in "Nos".
+  if (/^\d+(\.\d+)?$/.test(u)) return 'ML';
   for (const [re, basis] of BASIS_RULES) if (re.test(u)) return basis;
   return 'Nos';
 }

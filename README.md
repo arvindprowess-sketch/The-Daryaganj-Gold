@@ -401,7 +401,20 @@ is already in the base measure.
 
 **Remarks** states what Final Total Qty is expressed in, derived from the unit:
 ML, GM, KG, Nos, POR, PKT, PIECE, Meter. A measured unit inside the label beats
-the container word — `PKT (500 GM)` totals in GM, a bare `PKT` stays PKT.
+the container word — `PKT (500 GM)` totals in GM, a bare `PKT` stays PKT. The
+measure is matched on "not preceded by a letter" rather than a word boundary,
+because the client writes `BTL (1LTR)` and `BOT-680G` with the measure hard
+against a digit; `PKG` is still not KG. A Unit that is nothing but a number
+(`750`, `700`) is read as a millilitre size — that is how the master records
+liquor — so a spirits shelf is never reported in `Nos`.
+
+> Checked against the client's own `M3M_Physical_Audit_Report_Jul26` workbook:
+> **Final Total Qty matches on all 422 rows.** Remarks matches on 360; the
+> remaining 62 are places where the source workbook was hand-edited and is not
+> internally consistent — `NO.` is left verbatim while `NOS` is normalised to
+> `Nos`, and the identical unit `NOS` carries `Nos`, `Meter` and `ML` on
+> different rows. No rule can reproduce all three, so R4 normalises to the
+> eight bases as specified.
 
 **When system stock exists**, five columns are appended and nothing else about
 the layout changes: `System Qty · Rate · Value · Variance · Variance Value`.
@@ -414,11 +427,29 @@ a configurable default and are listed there for assignment, so an existing
 audit's entries can be mapped correctly and no quantity is ever dropped from
 both columns.
 
-**The export carries a second "Summary report" sheet**: a header block (location,
-audit date, total items, item counts by measurement type) then one row per
-category under its super category with the five quantity columns, subtotals and
-a grand total. It is shown on screen too, so what is downloaded is what was
-reviewed.
+**Only items with physical stock** are listed — the standard "closing stock"
+basis. The exclusion is narrow: a row is dropped only when it has **no system
+figure at all**, so nothing with system stock (a `NOT COUNTED` shortage
+included) can be hidden by it. The excluded count is stated in the header, and
+*Include nil stock* / `include_nil=1` puts them back.
+
+**The Excel export is two sheets, `Summary report` first, then `Audit Detail`.**
+
+`Audit Detail` is built to a fixed geometry — venue title, basis and
+provenance, blank, **LIVE TOTAL**, headers, then data from row 6. The LIVE
+TOTAL row uses `SUBTOTAL(9, …)`, so it follows the sheet's filters, and every
+subtotal below it is also a `SUBTOTAL` — which Excel skips when nesting, so no
+figure is ever counted twice. Quantities are written as live formulas
+(`=H6+I6`, `=IF(G6="",H6+I6,(H6+I6)*G6+K6)`) **with the computed result
+cached**: an auditor who corrects a count in Excel sees the totals follow, and
+a viewer that does not evaluate formulas still shows the right numbers. Empty
+quantities are left blank rather than written as `0`.
+
+`Summary report` carries the firm and venue block, a horizontal count block
+(`Total Items · Liquid (ML) · Weight (GM) · Weight (KG) · Count-based`), one
+row per category under its super category — the super category printed once —
+a single `Grand Total`, and the numbered **Notes / Methodology** block. It is
+shown on screen too, so what is downloaded is what was reviewed.
 
 #### Which items appear, and why
 

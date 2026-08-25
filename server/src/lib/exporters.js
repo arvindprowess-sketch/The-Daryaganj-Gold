@@ -20,8 +20,12 @@ export async function buildWorkbook(sheets) {
   wb.created = new Date();
   sheets.forEach(({ name, aoa }, i) => {
     const ws = wb.addWorksheet(sheetName(name, i));
-    // A null or undefined cell must stay blank, not become the text "null".
-    ws.addRows((aoa || []).map((row) => row.map((cell) => (cell == null ? '' : cell))));
+    // A null or undefined cell must stay genuinely EMPTY, not become an empty
+    // string. Excel counts '' as a filled cell, so COUNTA and COUNTBLANK over
+    // a column would both come out wrong. exceljs writes null as no cell at
+    // all, which is what a blank quantity means here.
+    // A { formula, result } cell passes straight through to exceljs.
+    ws.addRows((aoa || []).map((row) => row.map((cell) => (cell === undefined ? null : cell))));
   });
   // Node returns a Buffer here; res.send() takes it directly.
   return Buffer.from(await wb.xlsx.writeBuffer());

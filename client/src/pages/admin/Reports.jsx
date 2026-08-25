@@ -35,6 +35,9 @@ export default function Reports() {
   const [vSystem, setVSystem] = useState('all');    // all | with | without
   const [vRate, setVRate] = useState('all');        // all | with | without
   const [vCount, setVCount] = useState('all');      // all | counted | not_counted
+  // The standard report carries items with physical stock only. Off by
+  // default, matching the deliverable; on, it puts the nil-stock rows back.
+  const [vNil, setVNil] = useState(false);          // include nil-stock rows
   const [categories, setCategories] = useState([]);
   const [supers, setSupers] = useState([]);
   const [consolidateIds, setConsolidateIds] = useState([]);
@@ -56,6 +59,7 @@ export default function Reports() {
         vGroup ? 'group_by=category' : '',
         vSystem !== 'all' ? `system_data=${vSystem}` : '',
         vRate !== 'all' ? `rate=${vRate}` : '',
+        vNil ? 'include_nil=1' : '',
       ].filter(Boolean)
     : [];
 
@@ -69,7 +73,7 @@ export default function Reports() {
       .catch((e) => { setData({ error: e.message }); setLoadedReport(forReport); })
       .finally(() => setLoading(false));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [report, auditId, vCount, vSuper, vCategory, vGroup, vSystem, vRate]);
+  }, [report, auditId, vCount, vSuper, vCategory, vGroup, vSystem, vRate, vNil]);
 
   const store = audits.find((a) => String(a.id) === String(auditId));
   const filterQs = varianceParams.length ? `&${varianceParams.join('&')}` : '';
@@ -160,6 +164,16 @@ export default function Reports() {
         </p>
       )}
 
+      {/* Nil-stock rows: counted at zero with no system figure to compare
+          against. Excluded on the standard "physical stock only" basis, but
+          stated here and recoverable with the toggle below. */}
+      {report === 'variance' && loadedReport === 'variance' && data?.nilStock?.count > 0 && (
+        <p className="mb-4 text-sm text-slate-500">
+          {data.nilStock.count} items counted at nil with no system figure — excluded on the
+          &ldquo;physical stock only&rdquo; basis. Tick <em>Include nil stock</em> to list them.
+        </p>
+      )}
+
       {report === 'variance' && (
         <div className="flex flex-wrap items-center gap-2 mb-4">
           {/* [All] [Counted] [Not counted with system stock] */}
@@ -197,6 +211,11 @@ export default function Reports() {
             <input type="checkbox" className="h-5 w-5 accent-teal-700"
                    checked={vGroup} onChange={(e) => setVGroup(e.target.checked)} />
             Group &amp; subtotal by hierarchy
+          </label>
+          <label className="flex items-center gap-2 text-sm text-slate-600 select-none">
+            <input type="checkbox" className="h-5 w-5 accent-teal-700"
+                   checked={vNil} onChange={(e) => setVNil(e.target.checked)} />
+            Include nil stock
           </label>
         </div>
       )}

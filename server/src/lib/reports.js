@@ -355,7 +355,7 @@ export function varianceCase(item) {
 export async function varianceReport(
   auditId,
   { countedOnly = false, countFilter = null, categoryId = null, superCategoryId = null,
-    systemData = 'all', rateFilter = 'all' } = {}
+    systemData = 'all', rateFilter = 'all', includeNilStock = false } = {}
 ) {
   const items = await auditItemAggregates(auditId);
   const tol = await getTolerances();
@@ -368,6 +368,23 @@ export async function varianceReport(
   // so the header can still account for every item in the master.
   const notStocked = items.filter((i) => varianceCase(i) === 'not_stocked');
   let source = items.filter((i) => varianceCase(i) !== 'not_stocked');
+
+  // ── Nil-stock rows ───────────────────────────────────────────────────────
+  // The standard report carries "items with physical stock only". An item
+  // counted at zero with nothing in the system to compare it against says
+  // nothing a reader can act on, and hundreds of them bury the real findings.
+  //
+  // The exclusion is deliberately narrow: a row is only dropped when it has NO
+  // system figure. Anything with system stock stays — including a NOT COUNTED
+  // row, whose whole point is that the books say stock is there and the shelf
+  // was never counted. So no variance and no shortage can be hidden by this.
+  // `include_nil=1` puts them back.
+  const isNilStock = (i) => !i.has_system
+    && Number(i.store_room_qty || 0) === 0
+    && Number(i.outlet_qty || 0) === 0
+    && Number(i.total_open_ml || 0) === 0;
+  const nilStock = includeNilStock ? [] : source.filter(isNilStock);
+  if (!includeNilStock) source = source.filter((i) => !isNilStock(i));
 
   // [All] [Counted] [Not counted with system stock]
   const countMode = countFilter || (countedOnly ? 'counted' : 'all');
@@ -502,6 +519,10 @@ export async function varianceReport(
     // stocked at this outlet, so they are off the table — but still accounted
     // for here, so nothing in the master goes unexplained.
     notStocked: { count: notStocked.length },
+    // Counted at zero, with no system figure to compare against. Reported as a
+    // header count so the reader can see what the "physical stock only" basis
+    // left out, and recoverable with include_nil=1.
+    nilStock: { count: nilStock.length },
     totals: {
       with_system: withSystem.length,
       no_system_data: noSystem.length,
@@ -584,6 +605,17 @@ function buildSummary(rows, groups, audit) {
       audit_date: audit?.audit_date || null,
       total_items: rows.length,
       by_basis: byBasis,
+      // The four buckets the standard summary block prints. Everything that is
+      // not a volume or a weight collapses into one count-based figure —
+      // Nos, Pkt, Por, Piece and Meter are all "how many of them are there",
+      // and splitting them across five columns says nothing extra.
+      buckets: {
+        total: rows.length,
+        ml: byBasis.ML || 0,
+        gm: byBasis.GM || 0,
+        kg: byBasis.KG || 0,
+        count_based: rows.length - (byBasis.ML || 0) - (byBasis.GM || 0) - (byBasis.KG || 0),
+      },
     },
     superCategories,
     categories,
