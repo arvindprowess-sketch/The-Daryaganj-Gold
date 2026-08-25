@@ -80,6 +80,16 @@ These are enforced in code, not just the UI:
 5. **Full master shown** — every active item is listed so nothing is skipped.
 6. **Audit trail** — every entry records who, when, and the location text.
 
+> **Submitting does not require a complete count.** The master is shared across
+> stores and one outlet stocks only a subset of it, so an uncounted item is the
+> normal case, not an error. The auditor confirms three figures — items in the
+> master, counted, not counted — and only counted items are submitted. **No
+> zero-quantity entries and no `audit_na` rows are created**, because "not
+> counted" and "counted and found zero" must stay distinguishable (rule 4).
+> Nothing is deleted on submit either; data is only ever removed by an admin
+> through Data management. What stops an uncounted item disappearing is the
+> variance report — see [Which items appear, and why](#which-items-appear-and-why).
+
 ---
 
 ## Prerequisites
@@ -315,12 +325,37 @@ Super Category | Category | Item Name | Unit | ... figures ...
 - **R5** Consolidated — all stores, comparative aggregate variance, plus a
   **super-category-level comparison across stores**
 - **R6** Exception Report — voided entries, Not-Applicable items, items with
-  multiple entries, zero-quantity entries, and items counted without a photo
+  multiple entries, zero-quantity entries, items counted without a photo, items
+  with no system figure, and **items with system stock that were never counted**
 
 ### Variance and value
 
 R4 is physical − system, with % and status bands read from the **settings**
 table (liquor 2%/4%, others 1%/3% defaults — not hardcoded).
+
+#### Which items appear, and why
+
+The item master is shared across every store while a single outlet stocks only
+a subset of it, so "not counted" cannot mean the same thing everywhere. Four
+cases, and only one of them is silent:
+
+| | Counted | Not counted |
+| --- | --- | --- |
+| **System row exists** | (a) ordinary variance | (c) **full shortage, flagged `NOT COUNTED`** |
+| **No system row** | (b) `NO SYSTEM DATA` — a data gap, excluded from variance totals | (d) not stocked here — **off the table**, header count only |
+
+**(c) is the one that matters.** The system says stock is there and nobody
+counted it. Physical is treated as 0, so it carries its **full rupee value into
+the variance totals and the grand total** — it must never quietly disappear.
+The `NOT COUNTED` flag in the **Counted** column is what separates it from an
+item an auditor stood in front of and entered as zero: both read as shortages,
+for completely different reasons. The report header states the count and the
+total rupee exposure, and R6 gives them their own section to chase up.
+
+**(d)** is excluded from the table entirely — listing several hundred items the
+outlet never stocked would bury every real finding. They are still accounted
+for, as a header line: *"182 master items neither counted nor present in system
+stock — not stocked at this outlet."*
 
 **The rupee impact is the point of the report**, so every row carries three
 separate money figures rather than one:
@@ -335,7 +370,7 @@ Columns, on screen and in both exports:
 
 ```
 Super Category | Category | Item Name | Unit | Rate | Physical |
-System | Variance | % | Physical Value | Variance Value | Status
+System | Variance | % | Physical Value | Variance Value | Counted | Status
 ```
 
 All numeric columns are right-aligned.
@@ -362,7 +397,8 @@ The **group-and-subtotal** toggle now defaults to **ON**: the subtotals are the
 report, and off by default they were hidden behind a checkbox with no reason to
 find it.
 
-Filters: super category, category, [All items | Counted only],
+Filters: super category, category,
+**[All | Counted | Not counted with system stock]**,
 [All | With system data | No system data], [All | With rate | No rate]. Every
 one applies to the on-screen view and to the Excel and PDF exports alike.
 

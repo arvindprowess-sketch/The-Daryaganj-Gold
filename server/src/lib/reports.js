@@ -261,6 +261,9 @@ function groupVariance(rows) {
 // Physical − System. While the audit is open this is PROVISIONAL: uncounted
 // items would otherwise read as 100% shortages.
 export const NO_SYSTEM_DATA = 'NO SYSTEM DATA';
+// Flag for a shortage that arises from a missing count rather than a counted
+// zero. Both are shortages; only this one means nobody looked.
+export const NOT_COUNTED = 'NOT COUNTED';
 
 // Where the system figures came from, so a variance report can always state it.
 export async function systemStockSource(auditId) {
@@ -281,10 +284,30 @@ export async function systemStockSource(auditId) {
   return { source: rows[0] || null, ...cov[0] };
 }
 
+// ── Which rows belong on the variance table ─────────────────────────────────
+// The item master is shared across every store, but one outlet stocks only a
+// subset of it, so "not counted" is the normal state for most items and cannot
+// mean the same thing everywhere. Four cases, and only one of them is silent:
+//
+//   (a) counted + system row      → ordinary variance
+//   (b) counted + no system row   → NO SYSTEM DATA (a data gap, not a shortage)
+//   (c) NOT counted + system row  → FULL SHORTAGE, flagged NOT COUNTED.
+//       The system says stock is there and nobody counted it. That has to be
+//       investigated, so it carries its full rupee value into the totals. The
+//       flag is what separates it from an item somebody counted and entered as
+//       zero — both are shortages, but for completely different reasons.
+//   (d) NOT counted + no system row → not stocked at this outlet. Excluded from
+//       the table entirely and reported only as a header count, because listing
+//       hundreds of items no one ever expected to find buries the real findings.
+export function varianceCase(item) {
+  if (item.counted) return item.has_system ? 'counted_variance' : 'no_system_data';
+  return item.has_system ? 'not_counted' : 'not_stocked';
+}
+
 export async function varianceReport(
   auditId,
-  { countedOnly = false, categoryId = null, superCategoryId = null, systemData = 'all',
-    rateFilter = 'all' } = {}
+  { countedOnly = false, countFilter = null, categoryId = null, superCategoryId = null,
+    systemData = 'all', rateFilter = 'all' } = {}
 ) {
   const items = await auditItemAggregates(auditId);
   const tol = await getTolerances();
@@ -292,7 +315,17 @@ export async function varianceReport(
   const provisional = !audit || audit.status === 'open';
   const provenance = await systemStockSource(auditId);
 
-  let source = countedOnly ? items.filter((i) => i.counted) : items;
+  // Case (d) leaves the table before any user filter is applied — it is a
+  // structural exclusion, not something the admin toggles. Counted separately
+  // so the header can still account for every item in the master.
+  const notStocked = items.filter((i) => varianceCase(i) === 'not_stocked');
+  let source = items.filter((i) => varianceCase(i) !== 'not_stocked');
+
+  // [All] [Counted] [Not counted with system stock]
+  const countMode = countFilter || (countedOnly ? 'counted' : 'all');
+  if (countMode === 'counted') source = source.filter((i) => i.counted);
+  else if (countMode === 'not_counted') source = source.filter((i) => varianceCase(i) === 'not_counted');
+
   if (superCategoryId) source = source.filter((i) => String(i.super_category_id) === String(superCategoryId));
   if (categoryId) source = source.filter((i) => String(i.category_id) === String(categoryId));
   // [All] [With system data] [No system data]
@@ -313,6 +346,12 @@ export async function varianceReport(
     const system = hasSystem
       ? (i.is_liquor ? Number(i.system_bottles ?? 0) : Number(i.system_qty ?? 0))
       : null;
+    // Case (c): nobody counted it and the system says stock is there. Physical
+    // is 0 — which it already is, since there are no entries to sum — so the
+    // arithmetic below produces the full shortage with no special casing. What
+    // it needs is the FLAG, so a reader can tell this shortage from one where
+    // an auditor stood in front of the shelf and entered zero.
+    const notCounted = varianceCase(i) === 'not_counted';
     const physical = i.physical_qty;
     const variance = hasSystem ? physical - system : null;
     const pct = hasSystem ? pctOf(variance, system) : null;
@@ -347,6 +386,11 @@ export async function varianceReport(
       variance_value: money(variance),
       counted: i.counted,
       has_system: hasSystem,
+      // The flag that explains WHY a row shows a shortage.
+      not_counted: notCounted,
+      count_status: notCounted ? NOT_COUNTED : 'Counted',
+      not_applicable: !!i.not_applicable,
+      variance_case: varianceCase(i),
       // Items with no figure are reported as a data gap, not as a shortage.
       status: hasSystem ? bandFor(pct, i.is_liquor, tol) : NO_SYSTEM_DATA,
     };
@@ -379,9 +423,20 @@ export async function varianceReport(
     // True only when nothing at all has been imported or entered.
     hasSystemStock: provenance.with_system > 0,
     provenance,
+    // Case (d): master items neither counted nor present in system stock. Not
+    // stocked at this outlet, so they are off the table — but still accounted
+    // for here, so nothing in the master goes unexplained.
+    notStocked: { count: notStocked.length },
     totals: {
       with_system: withSystem.length,
       no_system_data: noSystem.length,
+      // Case (c): shortages that exist because nobody counted, not because a
+      // count came back short.
+      not_counted: rows.filter((r) => r.not_counted).length,
+      not_counted_value: round2(
+        rows.filter((r) => r.not_counted)
+            .reduce((s, r) => s + Number(r.variance_value || 0), 0)),
+      not_stocked: notStocked.length,
       // Counted over EVERY row in the current filter, not just those with a
       // system figure: the header states how many items the value columns
       // cannot speak for.
@@ -485,7 +540,7 @@ export async function exceptionReport(auditId) {
   // Items with NO system figure at all — a data gap, reported separately from
   // any variance so it is never mistaken for a shortage.
   const noSystemData = agg
-    .filter((it) => !it.has_system)
+    .filter((it) => varianceCase(it) === 'no_system_data')
     .map((it) => ({
       name: it.name,
       super_category: it.super_category_name || '—',
@@ -495,5 +550,33 @@ export async function exceptionReport(auditId) {
       counted: it.entry_count > 0,
     }));
 
-  return { voided, notApplicable, multiEntry, zeroQty, noPhoto, noSystemData };
+  // Case (c) — the system says stock is here and nobody counted it. Every one
+  // of these is a full shortage that nobody has looked at, which is exactly
+  // what an exception report exists to surface.
+  const notCounted = agg
+    .filter((it) => varianceCase(it) === 'not_counted')
+    .map((it) => {
+      const system = it.is_liquor ? Number(it.system_bottles ?? 0) : Number(it.system_qty ?? 0);
+      const rate = it.rate == null ? null : Number(it.rate);
+      return {
+        name: it.name,
+        super_category: it.super_category_name || '—',
+        category: it.category_name || '—',
+        unit: it.unit,
+        system_qty: system,
+        // Physical is zero, so the shortage is the whole system figure.
+        shortage_qty: -system,
+        shortage_value: rate == null ? null : round2(-system * rate),
+        // A deliberate Not Applicable is still uncounted, but the auditor said
+        // so on purpose — worth distinguishing when chasing these up.
+        not_applicable: !!it.not_applicable,
+      };
+    });
+
+  // Case (d) — reported as a count only. Listing hundreds of items the outlet
+  // never stocked would bury every real exception above.
+  const notStockedCount = agg.filter((it) => varianceCase(it) === 'not_stocked').length;
+
+  return { voided, notApplicable, multiEntry, zeroQty, noPhoto, noSystemData,
+           notCounted, notStockedCount };
 }

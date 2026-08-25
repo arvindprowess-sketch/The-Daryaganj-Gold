@@ -147,9 +147,14 @@ router.get('/variance/:auditId', async (req, res) => {
   // speak for.
   const rateFilter = ['with', 'without'].includes(req.query.rate)
     ? req.query.rate : 'all';
-  const { rows, groups, grand, provisional, progress, totals, hasSystemStock, provenance } =
+  // [All] [Counted] [Not counted with system stock]. `filter=counted` is the
+  // older spelling and still works.
+  const countFilter = ['counted', 'not_counted'].includes(req.query.count)
+    ? req.query.count : null;
+  const { rows, groups, grand, provisional, progress, totals, hasSystemStock, provenance,
+          notStocked } =
     await varianceReport(req.params.auditId,
-      { countedOnly, categoryId, superCategoryId, systemData, rateFilter });
+      { countedOnly, countFilter, categoryId, superCategoryId, systemData, rateFilter });
   const format = req.query.format;
 
   // No system stock at all → do NOT render a table of 100% shortages. An empty
@@ -195,24 +200,34 @@ router.get('/variance/:auditId', async (req, res) => {
     totals.no_rate > 0
       ? `${totals.no_rate} item(s) have no rate — value figures exclude them`
       : null,
+    // Case (c): shortages nobody looked at.
+    totals.not_counted > 0
+      ? `${totals.not_counted} item(s) marked NOT COUNTED — system stock exists but no count was recorded; shown as a full shortage`
+      : null,
+    // Case (d): off the table entirely, accounted for here.
+    totals.not_stocked > 0
+      ? `${totals.not_stocked} master item(s) neither counted nor present in system stock — not stocked at this outlet, excluded from this report`
+      : null,
   ].filter(Boolean);
 
   // Standard column order: Super Category | Category | Item Name | Unit | …
   // Rate and the two rupee columns are what make this a variance report rather
   // than a count comparison: negative variance value = shortage.
+  // `Counted` carries the NOT COUNTED flag, which is what separates a shortage
+  // nobody looked at from one an auditor counted and entered as zero.
   const cols = ['Super Category', 'Category', 'Item Name', 'Unit', 'Rate', 'Physical',
                 'System', 'Variance', 'Variance %', 'Physical Value', 'Variance Value',
-                'Status'];
+                'Counted', 'Status'];
   const toRow = (d) => [d.super_category, d.category, d.name, d.unit, n(d.rate),
                         d.physical_qty, n(d.system_qty), n(d.variance), n(d.variance_pct),
-                        n(d.physical_value), n(d.variance_value), d.status];
+                        n(d.physical_value), n(d.variance_value), d.count_status, d.status];
 
   // A subtotal / total line carries every figure a row carries, in the same
   // columns, so it can be read straight down the page.
   const summaryRow = (label, b, labelCol = 1) => {
     const r = ['', '', '', '', '', b.physical_qty, b.system_qty, b.variance,
                n(b.variance_pct), n(b.physical_value), n(b.variance_value),
-               `${b.items} items`];
+               '', `${b.items} items`];
     r[labelCol] = label;
     return r;
   };
@@ -249,10 +264,16 @@ router.get('/variance/:auditId', async (req, res) => {
     if (totals.no_rate > 0) {
       aoa.push([`${totals.no_rate} item(s) have no rate — value figures exclude them`]);
     }
+    if (totals.not_counted > 0) {
+      aoa.push([`${totals.not_counted} item(s) NOT COUNTED — system stock exists but no count was recorded. Included above as a full shortage.`]);
+    }
+    if (totals.not_stocked > 0) {
+      aoa.push([`${totals.not_stocked} master item(s) neither counted nor present in system stock — not stocked at this outlet, excluded from this report.`]);
+    }
     return sendXlsx(res, fname, [{ name: 'Variance', aoa }]);
   }
   if (format === 'pdf') {
-    const widths = [70, 70, 105, 50, 40, 45, 45, 45, 40, 60, 60, 50];
+    const widths = [64, 64, 96, 46, 38, 42, 42, 42, 38, 56, 56, 48, 46];
     // Overall totals, excluding rows with no system figure.
     const totalsBlock = {
       title: 'Totals (rows with system data only)',
@@ -266,6 +287,10 @@ router.get('/variance/:auditId', async (req, res) => {
           ? `${totals.no_system_data} item(s) with NO SYSTEM DATA are excluded from these totals.` : null,
         totals.no_rate > 0
           ? `${totals.no_rate} item(s) have no rate — value figures exclude them.` : null,
+        totals.not_counted > 0
+          ? `${totals.not_counted} item(s) NOT COUNTED — system stock exists but no count was recorded; included above as a full shortage.` : null,
+        totals.not_stocked > 0
+          ? `${totals.not_stocked} master item(s) neither counted nor present in system stock — not stocked at this outlet.` : null,
       ].filter(Boolean).join(' ') || null,
     };
     return sendPdf(res, fname, {
@@ -295,7 +320,8 @@ router.get('/variance/:auditId', async (req, res) => {
            totalsBlock],
     });
   }
-  res.json({ audit, rows, groups, grand, provisional, progress, totals, hasSystemStock, provenance });
+  res.json({ audit, rows, groups, grand, provisional, progress, totals, hasSystemStock,
+             provenance, notStocked });
 });
 
 // ── R5 Consolidated (all stores) ─────────────────────────────────────────────
@@ -369,6 +395,16 @@ router.get('/exceptions/:auditId', async (req, res) => {
       { name: 'No System Data', aoa: [[...SC, 'Item Name', 'Unit', 'Physical Qty', 'Counted'],
         ...data.noSystemData.map((v) => [v.super_category, v.category, v.name, v.unit,
                                          v.physical_qty, v.counted ? 'Yes' : 'No'])] },
+      // System stock exists and nobody counted it — a full shortage that has
+      // not been looked at. Its own section because it needs chasing up.
+      { name: 'Not Counted', aoa: [
+        [`${data.notCounted.length} item(s) have system stock but no count was recorded. Each is a full shortage on the variance report.`],
+        [`${data.notStockedCount} further master item(s) were neither counted nor present in system stock — not stocked at this outlet.`],
+        [],
+        [...SC, 'Item Name', 'Unit', 'System Qty', 'Shortage Qty', 'Shortage Value', 'Marked N/A'],
+        ...data.notCounted.map((v) => [v.super_category, v.category, v.name, v.unit,
+                                       v.system_qty, v.shortage_qty, n(v.shortage_value),
+                                       v.not_applicable ? 'Yes' : ''])] },
     ]);
   }
   if (format === 'pdf') {
@@ -386,6 +422,11 @@ router.get('/exceptions/:auditId', async (req, res) => {
         { title: `No System Data (${data.noSystemData.length}) — data gap, not a variance`,
           columns: [...SC, 'Item Name', 'Physical Qty'],
           rows: data.noSystemData.map((v) => [v.super_category, v.category, v.name, v.physical_qty]) },
+        { title: `Not Counted (${data.notCounted.length}) — system stock exists, no count recorded`,
+          columns: [...SC, 'Item Name', 'System Qty', 'Shortage Qty', 'Shortage Value'],
+          rows: data.notCounted.map((v) => [v.super_category, v.category, v.name,
+                                            v.system_qty, v.shortage_qty, n(v.shortage_value)]),
+          note: `Each of these is a full shortage on the variance report. A further ${data.notStockedCount} master item(s) were neither counted nor present in system stock — not stocked at this outlet.` },
         { title: 'Counted Without Photo', columns: [...SC, 'Item Name', 'Entries'],
           rows: data.noPhoto.map((v) => [v.super_category, v.category, v.name, v.entries]) },
       ],

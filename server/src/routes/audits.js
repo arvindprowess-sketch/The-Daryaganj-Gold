@@ -41,29 +41,56 @@ router.post('/', requireRole('admin'), async (req, res) => {
   res.status(201).json(rows[0]);
 });
 
+// ── Submit summary ──────────────────────────────────────────────────────────
+// The three figures the confirmation dialog states before an auditor commits.
+// `counted` means the item has at least one active count entry — nothing else
+// counts as counted.
+async function submitSummary(auditId) {
+  const { rows } = await query(
+    `SELECT (SELECT count(*)::int FROM items WHERE is_active) AS total,
+            (SELECT count(DISTINCT ce.item_id)::int
+               FROM count_entries ce JOIN items i ON i.id = ce.item_id
+              WHERE ce.audit_id = $1 AND ce.status = 'active' AND i.is_active) AS counted,
+            (SELECT count(*)::int FROM audit_na WHERE audit_id = $1) AS not_applicable`,
+    [auditId]
+  );
+  const r = rows[0];
+  return { ...r, uncounted: r.total - r.counted };
+}
+
+router.get('/:id/submit-summary', async (req, res) => {
+  const { audit, allowed } = await loadAuditForUser(req.user, req.params.id);
+  if (!audit) return res.status(404).json({ error: 'Not found' });
+  if (!allowed) return res.status(403).json({ error: 'Forbidden' });
+  res.json(await submitSummary(req.params.id));
+});
+
 // Auditor submits the count. Variance stops being provisional at this point.
+//
+// An uncounted item does NOT block submission. The item master is shared across
+// every store while a single outlet stocks only a subset of it, so most
+// uncounted items are simply not stocked here — making the auditor mark each
+// one Not Applicable would be unworkable. The client states the numbers in a
+// confirmation dialog instead.
+//
+// Submitting CREATES NOTHING and DELETES NOTHING: no zero-quantity entries for
+// uncounted items, no automatic audit_na rows, and every existing entry, photo
+// and audit record stays exactly as it is. Data is only ever removed by an
+// admin through Data management.
 router.post('/:id/submit', async (req, res) => {
   const { audit, allowed } = await loadAuditForUser(req.user, req.params.id);
   if (!audit) return res.status(404).json({ error: 'Not found' });
   if (!allowed) return res.status(403).json({ error: 'Forbidden' });
   if (audit.status !== 'open') return res.status(409).json({ error: `Audit is already ${audit.status}` });
 
-  // Guard: every active item must be counted or explicitly marked N/A.
-  const { rows: left } = await query(
-    `SELECT count(*)::int AS n FROM items i
-      WHERE i.is_active = TRUE
-        AND NOT EXISTS (SELECT 1 FROM count_entries ce WHERE ce.item_id=i.id AND ce.audit_id=$1 AND ce.status='active')
-        AND NOT EXISTS (SELECT 1 FROM audit_na na WHERE na.item_id=i.id AND na.audit_id=$1)`,
-    [req.params.id]
-  );
-  if (left[0].n > 0) {
-    return res.status(409).json({ error: `${left[0].n} item(s) still uncounted`, uncounted: left[0].n });
-  }
+  const summary = await submitSummary(req.params.id);
   const { rows } = await query(
     `UPDATE audits SET status='submitted', submitted_at=now() WHERE id=$1 RETURNING *`,
     [req.params.id]
   );
-  res.json(rows[0]);
+  // The numbers as they stood at submission, so the auditor's confirmation
+  // screen reports what was actually sent.
+  res.json({ ...rows[0], summary });
 });
 
 // Admin working view: every individual entry per item, voided ones included.

@@ -26,7 +26,6 @@ export default function Reports() {
   const [data, setData] = useState(null);
   const [loadedReport, setLoadedReport] = useState(null);
   const [loading, setLoading] = useState(false);
-  const [vFilter, setVFilter] = useState('all'); // variance: all | counted
   const [vSuper, setVSuper] = useState('');         // variance: super category filter
   const [vCategory, setVCategory] = useState('');   // variance: category filter
   // ON by default: the subtotals ARE the variance report. Off, they were hidden
@@ -34,6 +33,7 @@ export default function Reports() {
   const [vGroup, setVGroup] = useState(true);       // variance: group by category
   const [vSystem, setVSystem] = useState('all');    // all | with | without
   const [vRate, setVRate] = useState('all');        // all | with | without
+  const [vCount, setVCount] = useState('all');      // all | counted | not_counted
   const [categories, setCategories] = useState([]);
   const [supers, setSupers] = useState([]);
   const [consolidateIds, setConsolidateIds] = useState([]);
@@ -49,7 +49,7 @@ export default function Reports() {
   // on-screen view and the Excel + PDF exports so they always agree.
   const varianceParams = report === 'variance'
     ? [
-        vFilter === 'counted' ? 'filter=counted' : '',
+        vCount !== 'all' ? `count=${vCount}` : '',
         vSuper ? `super_category_id=${vSuper}` : '',
         vCategory ? `category_id=${vCategory}` : '',
         vGroup ? 'group_by=category' : '',
@@ -68,7 +68,7 @@ export default function Reports() {
       .catch((e) => { setData({ error: e.message }); setLoadedReport(forReport); })
       .finally(() => setLoading(false));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [report, auditId, vFilter, vSuper, vCategory, vGroup, vSystem, vRate]);
+  }, [report, auditId, vCount, vSuper, vCategory, vGroup, vSystem, vRate]);
 
   const store = audits.find((a) => String(a.id) === String(auditId));
   const filterQs = varianceParams.length ? `&${varianceParams.join('&')}` : '';
@@ -123,10 +123,39 @@ export default function Reports() {
         </div>
       )}
 
+      {/* Case (c): the system says stock is there and nobody counted it. Each
+          one is a full shortage that has not been looked at. */}
+      {report === 'variance' && loadedReport === 'variance' && data?.totals?.not_counted > 0 && (
+        <div className="mb-4 rounded-xl border-2 border-red-300 bg-red-50 px-4 py-3 text-red-900">
+          <span className="font-bold">{data.totals.not_counted} items have system stock but were never counted</span>
+          {' '}— each is shown as a full shortage
+          {data.totals.not_counted_value ? <> worth ₹{money(Math.abs(data.totals.not_counted_value))}</> : null}
+          {' '}and flagged <span className="font-mono font-bold">NOT COUNTED</span>.{' '}
+          <button className="underline font-medium" onClick={() => setVCount('not_counted')}>
+            Show only those items
+          </button>
+        </div>
+      )}
+
+      {/* Case (d): master items this outlet does not stock. Off the table, but
+          accounted for, so nothing in the master goes unexplained. */}
+      {report === 'variance' && loadedReport === 'variance' && data?.notStocked?.count > 0 && (
+        <p className="mb-4 text-sm text-slate-500">
+          {data.notStocked.count} master items neither counted nor present in system stock —
+          not stocked at this outlet, excluded from this report.
+        </p>
+      )}
+
       {report === 'variance' && (
         <div className="flex flex-wrap items-center gap-2 mb-4">
-          <button className={vFilter === 'all' ? 'chip-on' : 'chip-off'} onClick={() => setVFilter('all')}>All items</button>
-          <button className={vFilter === 'counted' ? 'chip-on' : 'chip-off'} onClick={() => setVFilter('counted')}>Counted only</button>
+          {/* [All] [Counted] [Not counted with system stock] */}
+          <span className="flex gap-1">
+            {[['all', 'All'], ['counted', 'Counted'],
+              ['not_counted', 'Not counted with system stock']].map(([k, l]) => (
+              <button key={k} className={vCount === k ? 'chip-on' : 'chip-off'}
+                      onClick={() => setVCount(k)}>{l}</button>
+            ))}
+          </span>
           <select className="field py-2 max-w-[220px]" value={vSuper}
                   onChange={(e) => { setVSuper(e.target.value); setVCategory(''); }}>
             <option value="">All super categories</option>
@@ -346,24 +375,34 @@ function ReportView({ report, data, grouped }) {
     // Rate and the two rupee columns are the point of a variance report: a
     // negative Variance Value is a shortage, positive is an excess.
     const cols = ['Super Category', 'Category', 'Item Name', 'Unit', 'Rate', 'Physical',
-                  'System', 'Variance', '%', 'Physical Value', 'Variance Value', 'Status'];
+                  'System', 'Variance', '%', 'Physical Value', 'Variance Value',
+                  'Counted', 'Status'];
     // Every numeric column right-aligned so figures line up down the page.
     const align = ['', '', '', '', 'right', 'right', 'right', 'right', 'right',
-                   'right', 'right', ''];
+                   'right', 'right', '', ''];
     // A null rate or a missing system figure shows as '—', never as 0 — the two
     // mean completely different things on an audit report.
+    //
+    // The Counted cell is the flag that explains a shortage: NOT COUNTED means
+    // the system says stock is there and nobody looked, as opposed to an
+    // auditor standing at the shelf and entering zero. Both read as shortages;
+    // only this tells you which.
     const toRow = (r) => [r.super_category, r.category, r.name, r.unit,
                           money(r.rate), r.physical_qty,
                           num(r.system_qty), num(r.variance),
                           r.variance_pct == null ? '—' : `${r.variance_pct}%`,
-                          money(r.physical_value), money(r.variance_value), r.status];
+                          money(r.physical_value), money(r.variance_value),
+                          r.not_counted
+                            ? <span className="chip bg-red-100 text-red-700 border-red-200 font-semibold">NOT COUNTED</span>
+                            : <span className="text-slate-400">Yes</span>,
+                          r.status];
 
     // Subtotal / total lines carry the same figures in the same columns, so a
     // reader can run straight down any column from item to grand total.
     const summaryRow = (label, b, labelCol = 1) => {
       const r = ['', '', '', '', '', b.physical_qty, b.system_qty, b.variance,
                  b.variance_pct == null ? '—' : `${b.variance_pct}%`,
-                 money(b.physical_value), money(b.variance_value), `${b.items} items`];
+                 money(b.physical_value), money(b.variance_value), '', `${b.items} items`];
       r[labelCol] = label;
       return r;
     };
@@ -472,6 +511,26 @@ function ReportView({ report, data, grouped }) {
         <Section title={`No system data (${data.noSystemData?.length || 0}) — data gap, not a variance`}
                  cols={['Super Category', 'Category', 'Item Name', 'Unit', 'Physical qty']}
                  rows={(data.noSystemData || []).map((v) => [v.super_category, v.category, v.name, v.unit, v.physical_qty])} />
+        {/* System stock exists and nobody counted it — a full shortage that has
+            not been looked at, so it gets its own section to chase up. */}
+        <div>
+          <h3 className="font-bold mb-1">
+            Not counted ({data.notCounted?.length || 0}) — system stock exists, no count recorded
+          </h3>
+          <p className="text-xs text-slate-500 mb-1">
+            Each of these appears on the variance report as a full shortage.
+            {data.notStockedCount > 0 && (
+              <> A further {data.notStockedCount} master item(s) were neither counted nor present in
+              system stock — not stocked at this outlet.</>
+            )}
+          </p>
+          <Table cols={['Super Category', 'Category', 'Item Name', 'Unit', 'System qty',
+                        'Shortage qty', 'Shortage value', 'Marked N/A']}
+                 align={['', '', '', '', 'right', 'right', 'right', '']}
+                 rows={(data.notCounted || []).map((v) => [
+                   v.super_category, v.category, v.name, v.unit, v.system_qty,
+                   v.shortage_qty, money(v.shortage_value), v.not_applicable ? 'Yes' : ''])} />
+        </div>
         <Section title="Counted without photo" cols={['Super Category', 'Category', 'Item Name', 'Entries']}
                  rows={data.noPhoto.map((v) => [v.super_category, v.category, v.name, v.entries])} />
       </div>
