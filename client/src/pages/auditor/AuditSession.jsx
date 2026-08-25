@@ -3,6 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { api } from '../../lib/api.js';
 import MobileHeader from '../../components/MobileHeader.jsx';
 import { Spinner, Empty } from '../../components/ui.jsx';
+import { fmtDate } from '../../lib/datetime.js';
 
 // M3 — Audit session: shows the open audit(s) for the chosen store.
 export default function AuditSession() {
@@ -28,7 +29,7 @@ export default function AuditSession() {
             <div className="flex items-center justify-between">
               <div>
                 <div className="text-xs uppercase tracking-wide text-slate-400">Audit date</div>
-                <div className="font-bold text-lg">{new Date(a.audit_date).toLocaleDateString()}</div>
+                <div className="font-bold text-lg">{fmtDate(a.audit_date)}</div>
               </div>
               <div className="text-right">
                 <div className="text-xs uppercase tracking-wide text-slate-400">Cut-off</div>

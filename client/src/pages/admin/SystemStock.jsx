@@ -6,8 +6,9 @@ import ConfirmDialog from '../../components/ConfirmDialog.jsx';
 import { useToast } from '../../components/Toast.jsx';
 import ImportResult, { ImportProgress } from '../../components/ImportResult.jsx';
 import useDebounced, { normalizeName } from '../../lib/useDebounced.js';
+import { fmtDate, fmtDateTime } from '../../lib/datetime.js';
 
-const fmtWhen = (t) => (t ? new Date(t).toLocaleString() : '—');
+const fmtWhen = (t) => fmtDateTime(t);
 
 // D6 — System stock. ADMIN ONLY; never exposed to the auditor role.
 // System figures can be imported, corrected, removed and traced: a wrong file
@@ -485,7 +486,7 @@ function CsvImport({ auditId, audit, onImported, onViewFigures }) {
           {/* What is being imported, against what */}
           <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm space-y-1">
             <div><span className="text-slate-500">Audit:</span>{' '}
-              <strong>{preview.audit.store_name}</strong> — {new Date(preview.audit.audit_date).toLocaleDateString()}
+              <strong>{preview.audit.store_name}</strong> — {fmtDate(preview.audit.audit_date)}
               {preview.audit.cutoff_time ? `, cut-off ${preview.audit.cutoff_time}` : ''}
             </div>
             <div><span className="text-slate-500">File:</span> <span className="font-mono">{preview.filename}</span></div>

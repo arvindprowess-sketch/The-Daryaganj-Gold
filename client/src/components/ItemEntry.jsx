@@ -5,6 +5,7 @@ import { PhotoThumb, Spinner } from './ui.jsx';
 import { api, bustCache } from '../lib/api.js';
 import { useToast } from './Toast.jsx';
 import { saveDraft, loadDraft, clearDraft, queueEntry } from '../lib/queue.js';
+import { fmtTime } from '../lib/datetime.js';
 
 // M6 — Item entry bottom sheet. Non-liquor and liquor layouts.
 // M7 — Duplicate prompt when adding a second entry (warn, never block).
@@ -149,7 +150,9 @@ export default function ItemEntry({ auditId, item, onClose, onSaved, uploadOnly 
                     {e.location_text ? ` · ${e.location_text}` : ''}
                   </div>
                   <div className="text-xs text-slate-500">
-                    {e.counted_by_name} · {new Date(e.counted_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                    {/* A missing or malformed timestamp shows nothing rather
+                        than the literal string "Invalid Date". */}
+                    {e.counted_by_name}{fmtTime(e.counted_at) && ` · ${fmtTime(e.counted_at)}`}
                     {e.status === 'void' && e.void_reason ? ` · voided: ${e.void_reason}` : ''}
                   </div>
                 </div>

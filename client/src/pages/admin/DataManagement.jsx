@@ -3,8 +3,9 @@ import { api } from '../../lib/api.js';
 import { Spinner } from '../../components/ui.jsx';
 import DangerConfirm from '../../components/DangerConfirm.jsx';
 import { useToast } from '../../components/Toast.jsx';
+import { fmtDate, fmtDateTime } from '../../lib/datetime.js';
 
-const fmtWhen = (t) => (t ? new Date(t).toLocaleString() : '—');
+const fmtWhen = (t) => fmtDateTime(t);
 
 // Admin → Data management. Every action here is destructive, admin-only,
 // typed-confirmation gated, and written to the activity log.
@@ -93,7 +94,7 @@ function Actions() {
           {audits.map((a) => (
             <div key={a.id} className="flex flex-wrap items-center justify-between gap-2 py-2">
               <span className="text-sm">
-                <strong>{a.store_name}</strong> — {new Date(a.audit_date).toLocaleDateString()}
+                <strong>{a.store_name}</strong> — {fmtDate(a.audit_date)}
                 <span className="text-slate-400"> ({a.status})</span>
                 {a.is_demo && <span className="ml-2 chip bg-amber-100 text-amber-700 border-amber-200">demo</span>}
               </span>

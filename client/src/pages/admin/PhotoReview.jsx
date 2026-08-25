@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback } from 'react';
 import { api, bustCache } from '../../lib/api.js';
 import { Spinner, Empty } from '../../components/ui.jsx';
 import { useToast } from '../../components/Toast.jsx';
+import { fmtDateTime } from '../../lib/datetime.js';
 
 // Pending Photo Review — an auditor photographed an item that already had a
 // master photo. The master is untouched until approved here, so a good photo
@@ -55,7 +56,7 @@ export default function PhotoReview() {
                 <div>
                   <div className="font-bold text-lg">{r.item_name}</div>
                   <div className="text-sm text-slate-500">
-                    {r.submitted_by_name} · {new Date(r.submitted_at).toLocaleString()}
+                    {r.submitted_by_name} · {fmtDateTime(r.submitted_at, '')}
                     {r.store_name ? ` · ${r.store_name}` : ''}
                   </div>
                 </div>
@@ -89,7 +90,7 @@ export default function PhotoReview() {
               )}
               {status !== 'pending' && r.reviewed_at && (
                 <p className="text-xs text-slate-400 mt-3">
-                  {status} by {r.reviewed_by_name} · {new Date(r.reviewed_at).toLocaleString()}
+                  {status} by {r.reviewed_by_name} · {fmtDateTime(r.reviewed_at, '')}
                 </p>
               )}
             </div>

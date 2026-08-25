@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { useParams } from 'react-router-dom';
 import { api, bustCache } from '../../lib/api.js';
 import MobileHeader from '../../components/MobileHeader.jsx';
+import { liquorBadge } from '../../lib/liquor.js';
 import { Spinner, PhotoThumb } from '../../components/ui.jsx';
 import ItemEntry from '../../components/ItemEntry.jsx';
 import VirtualList from '../../components/VirtualList.jsx';
@@ -84,7 +85,7 @@ export default function ItemList() {
             <span className="text-green-600 text-lg">✓</span>
             <span className="font-semibold">
               {i.is_liquor
-                ? `${i.total_bottles ?? 0} btl`
+                ? liquorBadge(i.total_bottles, i.total_open_ml)
                 : `${Number(i.total_qty ?? 0).toFixed(i.total_qty % 1 ? 3 : 0)}`}
             </span>
           </div>

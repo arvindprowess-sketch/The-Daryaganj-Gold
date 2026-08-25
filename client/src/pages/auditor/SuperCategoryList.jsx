@@ -3,6 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { api } from '../../lib/api.js';
 import MobileHeader from '../../components/MobileHeader.jsx';
 import { Spinner, ProgressBar } from '../../components/ui.jsx';
+import { fmtDate } from '../../lib/datetime.js';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // M4 — Super category cards with progress.
@@ -36,7 +37,7 @@ export default function SuperCategoryList() {
     <div className="min-h-full pb-24">
       <MobileHeader
         title={audit?.store_name || 'Audit'}
-        subtitle={audit ? `${new Date(audit.audit_date).toLocaleDateString()} · cut-off ${audit.cutoff_time || '—'}` : ''}
+        subtitle={audit ? `${fmtDate(audit.audit_date)} · cut-off ${audit.cutoff_time || '—'}` : ''}
         back={audit ? `/a/store/${audit.store_id}` : '/a'}
       />
       <div className="p-4 space-y-3">

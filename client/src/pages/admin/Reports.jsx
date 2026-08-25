@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api, downloadReport } from '../../lib/api.js';
 import { Spinner } from '../../components/ui.jsx';
+import { fmtDate, fmtDateTime } from '../../lib/datetime.js';
 
 const REPORTS = [
   ['physical-summary', 'R1 Physical Summary'],
@@ -84,7 +85,7 @@ export default function Reports() {
         <select className="field max-w-md" value={auditId} onChange={(e) => setAuditId(e.target.value)}>
           {audits.map((a) => (
             <option key={a.id} value={a.id}>
-              {a.store_name} — {new Date(a.audit_date).toLocaleDateString()} ({a.status})
+              {a.store_name} — {fmtDate(a.audit_date)} ({a.status})
             </option>
           ))}
         </select>
@@ -207,7 +208,7 @@ export default function Reports() {
           </div>
           {data.provenance.source && (
             <div className="text-slate-500">
-              Imported: {new Date(data.provenance.source.imported_at).toLocaleString()}
+              Imported: {fmtDateTime(data.provenance.source.imported_at)}
               {data.provenance.source.imported_by_name ? ` by ${data.provenance.source.imported_by_name}` : ''}
             </div>
           )}
@@ -236,7 +237,7 @@ export default function Reports() {
           {audits.map((a) => (
             <button key={a.id} className={consolidateIds.includes(a.id) ? 'chip-on' : 'chip-off'}
                     onClick={() => setConsolidateIds((p) => p.includes(a.id) ? p.filter((x) => x !== a.id) : [...p, a.id])}>
-              {a.store_name} {new Date(a.audit_date).toLocaleDateString()}
+              {a.store_name} {fmtDate(a.audit_date)}
             </button>
           ))}
         </div>
@@ -263,7 +264,7 @@ export default function Reports() {
             <Table cols={['Store', 'Date', 'Status', 'Items', 'Uncounted', 'Physical value',
                           'Total variance', 'Variance value', 'Critical']}
                    align={['', '', '', 'right', 'right', 'right', 'right', 'right', 'right']}
-                   rows={consolidated.rows.map((r) => [r.store_name, new Date(r.audit_date).toLocaleDateString(),
+                   rows={consolidated.rows.map((r) => [r.store_name, fmtDate(r.audit_date),
                      r.status, r.items, r.uncounted, money(r.physical_value),
                      r.total_variance_qty, money(r.total_variance_value), r.critical_items])} />
             {/* Super-category-level comparison across stores. */}

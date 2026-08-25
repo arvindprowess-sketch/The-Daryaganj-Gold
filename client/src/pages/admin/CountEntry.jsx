@@ -5,6 +5,8 @@ import { Spinner, PhotoThumb } from '../../components/ui.jsx';
 import ItemEntry from '../../components/ItemEntry.jsx';
 import { useToast } from '../../components/Toast.jsx';
 import useDebounced, { normalizeName } from '../../lib/useDebounced.js';
+import { liquorBadge } from '../../lib/liquor.js';
+import { fmtDateTime, fmtDate } from '../../lib/datetime.js';
 
 // D5 — Count entry on desktop: wide table for fast keyboard entry.
 //
@@ -157,7 +159,7 @@ export default function CountEntry() {
                     <td className="px-3 py-2">
                       {i.counted
                         ? <span className="text-green-600 font-semibold">
-                            {i.is_liquor ? `${i.total_bottles ?? 0} btl / ${i.total_open_ml ?? 0} ml` : Number(i.total_qty ?? 0)}
+                            {i.is_liquor ? liquorBadge(i.total_bottles, i.total_open_ml) : Number(i.total_qty ?? 0)}
                           </span>
                         : <span className="text-slate-300">—</span>}
                       {detail && detail.entries.length > 0 && (
@@ -216,7 +218,7 @@ export default function CountEntry() {
                                 </td>
                                 <td className={`py-1 ${e.status === 'void' ? 'line-through' : ''}`}>{e.location_text || '—'}</td>
                                 <td className="py-1">{e.counted_by_name}</td>
-                                <td className="py-1">{new Date(e.counted_at).toLocaleString()}</td>
+                                <td className="py-1">{fmtDateTime(e.counted_at, '')}</td>
                                 <td className="py-1">
                                   {e.status === 'void'
                                     ? <span className="text-red-500">void: {e.void_reason}</span>
@@ -232,7 +234,7 @@ export default function CountEntry() {
                             <tr className="border-t">
                               <td className="py-1.5 font-bold">
                                 Total: {i.is_liquor
-                                  ? `${detail.total_bottles} btl · ${detail.total_open_ml} ml`
+                                  ? liquorBadge(detail.total_bottles, detail.total_open_ml)
                                   : `${detail.total_qty} ${i.unit}`}
                               </td>
                               <td colSpan={5} className="py-1.5 text-slate-400">voided entries excluded</td>
@@ -287,7 +289,7 @@ export default function CountEntry() {
         <div>
           <h1 className="text-2xl font-bold">Count entry — {audit?.store_name}</h1>
           <p className="text-slate-500 text-sm">
-            {audit && new Date(audit.audit_date).toLocaleDateString()} · {audit?.status}
+            {audit && fmtDate(audit.audit_date)} · {audit?.status}
           </p>
         </div>
         <Link className="btn-ghost" to="/admin/audits">← Audits</Link>

@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../../lib/api.js';
 import { Spinner } from '../../components/ui.jsx';
+import { fmtDate, fmtDateTime } from '../../lib/datetime.js';
 
 // D4 — Audit sessions: create (store + date + cut-off), monitor, close.
 export default function AuditSessions() {
@@ -50,7 +51,7 @@ export default function AuditSessions() {
             {audits.map((a) => (
               <tr key={a.id}>
                 <td className="px-4 py-2 font-medium">{a.store_name}</td>
-                <td className="px-4 py-2">{new Date(a.audit_date).toLocaleDateString()}</td>
+                <td className="px-4 py-2">{fmtDate(a.audit_date)}</td>
                 <td className="px-4 py-2">{a.cutoff_time || '—'}</td>
                 <td className="px-4 py-2">
                   <span className={`chip ${

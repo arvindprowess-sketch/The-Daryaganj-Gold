@@ -62,6 +62,23 @@ unrecognised unit **never** rejects a CSV row.
 The auditor never chooses or edits a unit — it is read-only on every counting
 screen. An admin can edit it as free text on the item master.
 
+## Liquor: bottles and open ml are both shown
+
+Sealed bottles and loose millilitres are counted separately and never combined.
+Every list badge shows **both**, via `client/src/lib/liquor.js`, so loose stock
+is visible without opening the item:
+
+| Counted | Badge |
+| --- | --- |
+| 3 bottles, 630 ml | `3 btl · 630 ml` |
+| 3 bottles, 0 ml | `3 btl` |
+| 0 bottles, 630 ml | `630 ml` |
+| nothing | `0 btl` |
+
+The zero half is dropped rather than printed, so the badge stays on one line
+next to the item name on a 380px phone. Mobile item list and desktop count
+entry use the same helper.
+
 ## Non-negotiable design rules (audit defensibility)
 
 These are enforced in code, not just the UI:
@@ -70,6 +87,12 @@ These are enforced in code, not just the UI:
    or prior-period figures. Enforced **server-side** in
    `server/src/lib/blindCount.js`, which strips those fields from every response
    sent to an auditor. Reports and system-stock endpoints are admin-only.
+   > The scrubber rebuilds **plain objects only**. `node-postgres` returns every
+   > `TIMESTAMPTZ` as a `Date`, and a `Date` has no own enumerable properties —
+   > rebuilding one from `Object.entries()` yields `{}`, which is how every
+   > auditor timestamp once serialised as `{}` and rendered "Invalid Date". Any
+   > new class instance (a `Buffer`, say) would have gone the same way. Keep the
+   > `isPlainObject` guard when editing that file.
 2. **Append-only entries** — `count_entries` is append-only. Counting an item at
    a second location creates a **new row**; totals are always
    `SUM(...) WHERE status='active'`.
