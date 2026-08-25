@@ -138,6 +138,19 @@ export default function Reports() {
         </div>
       )}
 
+      {/* A physical-only audit is a complete deliverable — say so plainly
+          instead of demanding a system stock upload. */}
+      {report === 'variance' && loadedReport === 'variance' && data?.withSystem === false && (
+        <div className="mb-4 rounded-xl border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-900">
+          <span className="font-semibold">Physical count only.</span>{' '}
+          No system stock has been imported for this audit, so the report shows the physical
+          columns. Variance and value appear automatically once system figures exist.{' '}
+          <Link className="underline font-medium" to={`/admin/audits/${auditId}/system-stock`}>
+            Import system stock
+          </Link>
+        </div>
+      )}
+
       {/* Case (d): master items this outlet does not stock. Off the table, but
           accounted for, so nothing in the master goes unexplained. */}
       {report === 'variance' && loadedReport === 'variance' && data?.notStocked?.count > 0 && (
@@ -356,59 +369,78 @@ function ReportView({ report, data, grouped }) {
   // R4 — super category AND category included, exactly as in the item master.
   // Optionally grouped with subtotals at category and super category level.
   if (report === 'variance') {
-    // An empty import must never be mistaken for a total shortage.
-    if (data.hasSystemStock === false) {
-      return (
-        <div className="p-8 text-center">
-          <div className="text-4xl mb-3">📥</div>
-          <p className="font-semibold text-slate-700 mb-1">
-            No system stock has been imported for this audit.
-          </p>
-          <p className="text-slate-500 text-sm mb-4">
-            The variance report cannot be produced until system figures exist.
-          </p>
-          <Link className="btn-primary" to={`/admin/audits/${data.audit?.id}/system-stock`}>
-            Import system stock
-          </Link>
-        </div>
-      );
-    }
-    // Rate and the two rupee columns are the point of a variance report: a
-    // negative Variance Value is a shortage, positive is an excess.
-    const cols = ['Super Category', 'Category', 'Item Name', 'Unit', 'Rate', 'Physical',
-                  'System', 'Variance', '%', 'Physical Value', 'Variance Value',
-                  'Counted', 'Status'];
-    // Every numeric column right-aligned so figures line up down the page.
-    const align = ['', '', '', '', 'right', 'right', 'right', 'right', 'right',
-                   'right', 'right', '', ''];
-    // A null rate or a missing system figure shows as '—', never as 0 — the two
-    // mean completely different things on an audit report.
-    //
-    // The Counted cell is the flag that explains a shortage: NOT COUNTED means
-    // the system says stock is there and nobody looked, as opposed to an
-    // auditor standing at the shelf and entering zero. Both read as shortages;
-    // only this tells you which.
-    const toRow = (r) => [r.super_category, r.category, r.name, r.unit,
-                          money(r.rate), r.physical_qty,
-                          num(r.system_qty), num(r.variance),
-                          r.variance_pct == null ? '—' : `${r.variance_pct}%`,
-                          money(r.physical_value), money(r.variance_value),
-                          r.not_counted
-                            ? <span className="chip bg-red-100 text-red-700 border-red-200 font-semibold">NOT COUNTED</span>
-                            : <span className="text-slate-400">Yes</span>,
-                          r.status];
+    // The standard audit report format. BASE columns are always present — a
+    // physical-only audit is a complete deliverable and never asks for a
+    // system stock upload. The five system columns appear only when system
+    // figures exist, and nothing else about the layout changes.
+    const withSystem = !!data.withSystem;
+
+    const BASE = [
+      ['s_no', 'S.No.', 'right'],
+      ['loc', 'LOC', ''],
+      ['super_category', 'Super Category', ''],
+      ['category', 'Category', ''],
+      ['name', 'Item Name', ''],
+      ['unit', 'Unit', ''],
+      ['bottle_unit_size', 'Bottle/Unit Size (ml)', 'right'],
+      ['store_room_qty', 'Store Room Qty (Physical)', 'right'],
+      ['outlet_qty', 'Outlet Qty (Physical)', 'right'],
+      ['store_outlet_total', 'Store+Outlet Total', 'right'],
+      ['loose_ml', 'ML / Loose Qty', 'right'],
+      ['final_total_qty', 'Final Total Qty', 'right'],
+      ['remarks', 'Remarks', ''],
+    ];
+    const SYSTEM = [
+      ['system_qty', 'System Qty', 'right'],
+      ['rate', 'Rate', 'right'],
+      ['physical_value', 'Value', 'right'],
+      ['variance', 'Variance', 'right'],
+      ['variance_value', 'Variance Value', 'right'],
+    ];
+    const spec = withSystem ? [...BASE, ...SYSTEM] : BASE;
+    const cols = spec.map(([, label]) => label);
+    const align = spec.map(([, , a]) => a);
+
+    // Quantities print as given; money is formatted; a missing figure is '—',
+    // never 0.
+    const cell = (r, key) => {
+      if (key === 'rate' || key === 'physical_value' || key === 'variance_value') return money(r[key]);
+      if (key === 'system_qty' || key === 'variance') return num(r[key]);
+      if (key === 'remarks') {
+        // NOT COUNTED rides alongside the measurement basis rather than
+        // replacing it, so neither piece of information is lost.
+        return r.not_counted ? (
+          <span className="whitespace-nowrap">
+            {r.remarks}{' '}
+            <span className="chip bg-red-100 text-red-700 border-red-200 font-semibold">NOT COUNTED</span>
+          </span>
+        ) : r.remarks;
+      }
+      return r[key];
+    };
+    const toRow = (r) => spec.map(([key]) => cell(r, key));
 
     // Subtotal / total lines carry the same figures in the same columns, so a
-    // reader can run straight down any column from item to grand total.
-    const summaryRow = (label, b, labelCol = 1) => {
-      const r = ['', '', '', '', '', b.physical_qty, b.system_qty, b.variance,
-                 b.variance_pct == null ? '—' : `${b.variance_pct}%`,
-                 money(b.physical_value), money(b.variance_value), '', `${b.items} items`];
+    // column reads straight down from an item line to the grand total.
+    const summaryRow = (label, b, labelCol = 3) => {
+      const r = spec.map(([key]) => {
+        if (['store_room_qty', 'outlet_qty', 'store_outlet_total', 'loose_ml',
+             'final_total_qty', 'system_qty', 'variance'].includes(key)) return b[key];
+        if (key === 'physical_value' || key === 'variance_value') return money(b[key]);
+        if (key === 'remarks') return `${b.items} items`;
+        return '';
+      });
       r[labelCol] = label;
       return r;
     };
-    const isSummary = (r) => /SUBTOTAL|GRAND TOTAL/.test(`${r[0]} ${r[1]}`);
+    const isSummary = (r) => /SUBTOTAL|GRAND TOTAL|^TOTAL$/.test(`${r[2]} ${r[3]}`);
     const emphasise = (r) => (isSummary(r) ? 'bg-slate-50 font-semibold' : undefined);
+
+    const table = (rows, rowClass) => (
+      <div className="overflow-x-auto">
+        <Table cols={cols} align={align} rowClass={rowClass} rows={rows} />
+      </div>
+    );
 
     if (grouped) {
       const groups = data.groups || [];
@@ -426,65 +458,61 @@ function ReportView({ report, data, grouped }) {
                     <h4 className="font-semibold text-sm text-slate-600 mb-1">
                       {c.category} <span className="font-normal text-slate-400">({c.items})</span>
                     </h4>
-                    <Table cols={cols} align={align} rowClass={emphasise} rows={[
-                      ...c.rows.map(toRow),
-                      summaryRow(`${c.category} SUBTOTAL`, c),
-                    ]} />
+                    {table([...c.rows.map(toRow), summaryRow(`${c.category} SUBTOTAL`, c)], emphasise)}
                   </div>
                 ))}
               </div>
-              {/* Super category subtotal — same columns as the rows above it. */}
               <div className="mt-2">
-                <Table cols={cols} align={align} rowClass={() => 'bg-slate-100 font-bold'}
-                       rows={[summaryRow(`${g.super_category} SUBTOTAL`, g, 0)]} />
+                {table([summaryRow(`${g.super_category} SUBTOTAL`, g, 2)], () => 'bg-slate-100 font-bold')}
               </div>
             </div>
           ))}
-          {/* GRAND TOTAL, matching R1. */}
           {groups.length > 0 && data.grand && (
             <div>
               <h3 className="font-bold text-lg mb-2">Grand total</h3>
-              <Table cols={cols} align={align} rowClass={() => 'bg-teal-50 font-bold'}
-                     rows={[summaryRow('GRAND TOTAL', data.grand, 0)]} />
+              {table([summaryRow('GRAND TOTAL', data.grand, 2)], () => 'bg-teal-50 font-bold')}
               <p className="mt-2 text-sm text-slate-600">
-                Total variance value:{' '}
-                <span className={`font-bold ${data.grand.variance_value < 0 ? 'text-red-700' : 'text-green-700'}`}>
-                  ₹{money(data.grand.variance_value)}
-                </span>{' '}
-                <span className="text-slate-500">
-                  ({data.grand.variance_value < 0 ? 'net shortage' : 'net excess'})
-                </span>
-                {data.totals?.no_rate > 0 && (
-                  <span className="text-amber-700">
-                    {' '}· excludes {data.totals.no_rate} item(s) with no rate
-                  </span>
+                Final total quantity:{' '}
+                <span className="font-bold tabular-nums">{data.grand.final_total_qty}</span>
+                {withSystem && data.grand.variance_value != null && (
+                  <>
+                    {' · '}total variance value:{' '}
+                    <span className={`font-bold tabular-nums ${data.grand.variance_value < 0 ? 'text-red-700' : 'text-green-700'}`}>
+                      ₹{money(data.grand.variance_value)}
+                    </span>
+                  </>
                 )}
               </p>
             </div>
           )}
           {groups.length === 0 && <p className="text-slate-400">No data.</p>}
+          {data.summary && <SummaryReport summary={data.summary} />}
         </div>
       );
     }
+
     return (
       <>
-        <Table cols={cols} align={align} rows={data.rows.map(toRow)} />
+        {table(data.rows.map(toRow))}
         {data.totals && (
           <div className="mt-3 rounded-lg bg-slate-100 px-3 py-2 text-sm text-slate-700">
             <div className="font-semibold">
-              Totals (rows with system data only) — physical {data.totals.physical_qty} · system{' '}
-              {data.totals.system_qty} · variance {data.totals.variance}
-              {data.totals.variance_pct != null && <> ({data.totals.variance_pct}%)</>}
+              Totals — store room {data.totals.store_room_qty} · outlet {data.totals.outlet_qty}
+              {' '}· store+outlet {data.totals.store_outlet_total} · loose {data.totals.loose_ml} ml
+              {' '}· <span className="tabular-nums">final total {data.totals.final_total_qty}</span>
             </div>
-            <div className="mt-1">
-              Physical value <span className="font-semibold tabular-nums">₹{money(data.totals.physical_value)}</span>
-              {' '}· system value <span className="font-semibold tabular-nums">₹{money(data.totals.system_value)}</span>
-              {' '}· variance value{' '}
-              <span className={`font-bold tabular-nums ${data.totals.variance_value < 0 ? 'text-red-700' : 'text-green-700'}`}>
-                ₹{money(data.totals.variance_value)}
-              </span>
-            </div>
-            {(data.totals.no_system_data > 0 || data.totals.no_rate > 0) && (
+            {withSystem && (
+              <div className="mt-1">
+                System {data.totals.system_qty} · variance {data.totals.variance}
+                {data.totals.variance_pct != null && <> ({data.totals.variance_pct}%)</>}
+                {' '}· value <span className="font-semibold tabular-nums">₹{money(data.totals.physical_value)}</span>
+                {' '}· variance value{' '}
+                <span className={`font-bold tabular-nums ${data.totals.variance_value < 0 ? 'text-red-700' : 'text-green-700'}`}>
+                  ₹{money(data.totals.variance_value)}
+                </span>
+              </div>
+            )}
+            {(data.totals.no_system_data > 0 || data.totals.no_rate > 0) && withSystem && (
               <div className="mt-1 text-amber-700">
                 {data.totals.no_system_data > 0 &&
                   <>{data.totals.no_system_data} item(s) with NO SYSTEM DATA excluded from variance totals. </>}
@@ -494,6 +522,7 @@ function ReportView({ report, data, grouped }) {
             )}
           </div>
         )}
+        {data.summary && <SummaryReport summary={data.summary} />}
       </>
     );
   }
@@ -538,6 +567,52 @@ function ReportView({ report, data, grouped }) {
     );
   }
   return <pre className="text-xs">{JSON.stringify(data, null, 2)}</pre>;
+}
+
+// ── Summary report ─────────────────────────────────────────────────────────
+// The second sheet of the export, shown on screen so what is downloaded is
+// what was reviewed.
+function SummaryReport({ summary }) {
+  const h = summary.header;
+  const bases = Object.entries(h.by_basis || {});
+  return (
+    <div className="mt-8 pt-6 border-t">
+      <h3 className="font-bold text-lg mb-2">Summary report</h3>
+      <div className="card p-4 mb-3 text-sm grid sm:grid-cols-3 gap-3">
+        <div><span className="text-slate-500">Location</span><div className="font-semibold">{h.location || '—'}</div></div>
+        <div><span className="text-slate-500">Audit date</span><div className="font-semibold">{fmtDate(h.audit_date)}</div></div>
+        <div><span className="text-slate-500">Total items</span><div className="font-semibold">{h.total_items}</div></div>
+        <div className="sm:col-span-3">
+          <span className="text-slate-500">Items by measurement type</span>
+          <div className="flex flex-wrap gap-2 mt-1">
+            {bases.map(([b, c]) => (
+              <span key={b} className={`chip ${c > 0 ? 'bg-slate-100 text-slate-700 border-slate-200' : 'bg-white text-slate-300 border-slate-100'}`}>
+                {b} {c}
+              </span>
+            ))}
+          </div>
+        </div>
+      </div>
+      <Table
+        cols={['Super Category', 'Category', 'Items', 'Store Room Qty', 'Outlet Qty',
+               'Store+Outlet Total', 'ML / Loose Qty', 'Final Total Qty']}
+        align={['', '', 'right', 'right', 'right', 'right', 'right', 'right']}
+        rowClass={(r) => (/SUBTOTAL|GRAND TOTAL/.test(String(r[0])) ? 'bg-slate-50 font-semibold' : undefined)}
+        rows={[
+          ...summary.superCategories.flatMap((g) => [
+            ...summary.categories
+              .filter((c) => c.super_category === g.super_category)
+              .map((c) => [c.super_category, c.category, c.items, c.store_room_qty,
+                           c.outlet_qty, c.store_outlet_total, c.loose_ml, c.final_total_qty]),
+            [`${g.super_category} — SUBTOTAL`, '', g.items, g.store_room_qty, g.outlet_qty,
+             g.store_outlet_total, g.loose_ml, g.final_total_qty],
+          ]),
+          ['GRAND TOTAL', '', summary.grand.items, summary.grand.store_room_qty,
+           summary.grand.outlet_qty, summary.grand.store_outlet_total,
+           summary.grand.loose_ml, summary.grand.final_total_qty],
+        ]} />
+    </div>
+  );
 }
 
 function Section({ title, cols, rows }) {

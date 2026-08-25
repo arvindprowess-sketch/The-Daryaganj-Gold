@@ -62,6 +62,30 @@ unrecognised unit **never** rejects a CSV row.
 The auditor never chooses or edits a unit — it is read-only on every counting
 screen. An admin can edit it as free text on the item master.
 
+## Bottle / unit size
+
+`items.bottle_unit_size` is the multiplier the audit report runs **every** item
+through — not a liquor-only bottle size. It is admin-entered; nothing tries to
+derive it from the item name.
+
+| Item | Unit | `bottle_unit_size` |
+| --- | --- | --- |
+| Steel plate | `NOS` | `1` |
+| Portion | `POR` | `1` |
+| Whisky | `BTL (750 ML)` | `750` |
+| Oil | `CAN (5 LTR)` | `5000` |
+| Flour | `PKT (500 GM)` | `500` |
+
+It is `NUMERIC NOT NULL DEFAULT 1` with a `> 0` check — an item nobody has sized
+yet passes through the formula unchanged rather than multiplying its quantity to
+zero. Editable on the item master, carried in the CSV template, the import and
+the list.
+
+> `bottle_size_ml` (liquor-only) is still present and still drives R3 Liquor and
+> the readiness check. Migration 008 backfills `bottle_unit_size` from it, so
+> existing liquor items are correct on day one. Retiring the older column is a
+> follow-up, not something to do silently underneath a live report.
+
 ## Liquor: bottles and open ml are both shown
 
 Sealed bottles and loose millilitres are counted separately and never combined.
@@ -353,8 +377,48 @@ Super Category | Category | Item Name | Unit | ... figures ...
 
 ### Variance and value
 
-R4 is physical − system, with % and status bands read from the **settings**
-table (liquor 2%/4%, others 1%/3% defaults — not hardcoded).
+R4 follows the firm's standard audit report format. The **base columns are
+always present** — a physical-only audit is a complete deliverable and the
+report never demands a system stock upload:
+
+```
+S.No. | LOC | Super Category | Category | Item Name | Unit |
+Bottle/Unit Size (ml) | Store Room Qty (Physical) | Outlet Qty (Physical) |
+Store+Outlet Total (native unit) | ML / Loose Qty (Open Bottle, ml) |
+Final Total Qty (ML / GM / KG / Count) | Remarks
+```
+
+**One formula covers the whole master** (`server/src/lib/measure.js`):
+
+```
+Store+Outlet Total = Store Room Qty + Outlet Qty
+Final Total Qty    = (Store+Outlet Total × Bottle/Unit Size) + Loose ML
+```
+
+Count-based items carry a size of 1, so they pass through unchanged — there is
+no special case for liquor. Loose ml is added *after* the multiplier because it
+is already in the base measure.
+
+**Remarks** states what Final Total Qty is expressed in, derived from the unit:
+ML, GM, KG, Nos, POR, PKT, PIECE, Meter. A measured unit inside the label beats
+the container word — `PKT (500 GM)` totals in GM, a bare `PKT` stays PKT.
+
+**When system stock exists**, five columns are appended and nothing else about
+the layout changes: `System Qty · Rate · Value · Variance · Variance Value`.
+Status bands come from the **settings** table (liquor 2%/4%, others 1%/3%
+defaults — not hardcoded).
+
+**Store Room vs Outlet** comes from the location recorded on each count entry,
+mapped through `location_zones` on Admin → Settings. Unrecognised names fall to
+a configurable default and are listed there for assignment, so an existing
+audit's entries can be mapped correctly and no quantity is ever dropped from
+both columns.
+
+**The export carries a second "Summary report" sheet**: a header block (location,
+audit date, total items, item counts by measurement type) then one row per
+category under its super category with the five quantity columns, subtotals and
+a grand total. It is shown on screen too, so what is downloaded is what was
+reviewed.
 
 #### Which items appear, and why
 

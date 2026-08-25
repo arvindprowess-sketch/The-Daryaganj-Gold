@@ -30,6 +30,14 @@ async function sendPdf(res, filename, doc) {
 }
 const slug = (s) => String(s || 'store').replace(/[^A-Za-z0-9]+/g, '_').replace(/^_|_$/g, '');
 
+// A DATE column comes back from pg as a Date. Reports want the plain calendar
+// day, not "Wed Aug 05 2026 00:00:00 GMT+0000".
+const ymd = (v) => {
+  if (!v) return '';
+  const d = v instanceof Date ? v : new Date(v);
+  return Number.isNaN(d.getTime()) ? String(v) : d.toISOString().slice(0, 10);
+};
+
 // ── R1 Physical Stock Summary ────────────────────────────────────────────────
 router.get('/physical-summary/:auditId', async (req, res) => {
   const audit = await getAudit(req.params.auditId);
@@ -151,177 +159,209 @@ router.get('/variance/:auditId', async (req, res) => {
   // older spelling and still works.
   const countFilter = ['counted', 'not_counted'].includes(req.query.count)
     ? req.query.count : null;
-  const { rows, groups, grand, provisional, progress, totals, hasSystemStock, provenance,
-          notStocked } =
+  const { rows, groups, grand, summary, provisional, progress, totals, hasSystemStock,
+          provenance, notStocked } =
     await varianceReport(req.params.auditId,
       { countedOnly, countFilter, categoryId, superCategoryId, systemData, rateFilter });
   const format = req.query.format;
 
-  // No system stock at all → do NOT render a table of 100% shortages. An empty
-  // import must never be mistaken for a total shortage.
-  if (!hasSystemStock) {
-    const message = 'No system stock has been imported for this audit.';
-    if (format === 'xlsx') {
-      return sendXlsx(res, `R4_variance_${slug(audit.store_name)}`, [{
-        name: 'Variance', aoa: [['NO SYSTEM STOCK'], [message],
-          ['Import system stock for this audit before running a variance report.']],
-      }]);
-    }
-    if (format === 'pdf') {
-      return sendPdf(res, `R4_variance_${slug(audit.store_name)}`, {
-        title: 'R4 — Variance Report', subtitle: `${audit.store_name} — ${audit.audit_date}`,
-        banner: message,
-        blocks: [{ title: 'No system stock', columns: ['Status'],
-          rows: [['Import system stock for this audit before running a variance report.']] }],
-      });
-    }
-    return res.json({
-      audit, rows: [], groups: [], grand, provisional, progress,
-      hasSystemStock: false, provenance, totals,
-      message,
-    });
-  }
+  // A physical-only audit is a complete deliverable. The report renders on the
+  // BASE columns alone; the five system columns appear only when there are
+  // system figures to compare against. Nothing is blocked and nothing demands
+  // an upload.
+  const withSystem = hasSystemStock;
 
-  const fname = `${provisional ? 'PROVISIONAL_' : ''}R4_variance_${slug(audit.store_name)}`;
+  const fname = `${provisional ? 'PROVISIONAL_' : ''}R4_${withSystem ? 'variance' : 'physical_audit'}_${slug(audit.store_name)}`;
   const stamp = provisional
     ? `PROVISIONAL — count in progress. ${progress.uncounted} of ${progress.total} items not yet counted.`
     : null;
-  // Provenance — every export states where the system figures came from.
+
   const src = provenance.source;
-  const provenanceLines = [
-    `System stock source: ${src?.filename || 'entered manually'}`,
-    src ? `Imported: ${new Date(src.imported_at).toLocaleString()}${src.imported_by_name ? ' by ' + src.imported_by_name : ''}` : null,
-    `Coverage: ${provenance.with_system} of ${provenance.master_total} master items`,
-    totals.no_system_data > 0
-      ? `${totals.no_system_data} item(s) shown as NO SYSTEM DATA and excluded from variance totals`
-      : null,
-    // The value columns cannot speak for an item with no rate, so the export
-    // says how many there are rather than letting the reader assume zero.
-    totals.no_rate > 0
-      ? `${totals.no_rate} item(s) have no rate — value figures exclude them`
-      : null,
-    // Case (c): shortages nobody looked at.
-    totals.not_counted > 0
-      ? `${totals.not_counted} item(s) marked NOT COUNTED — system stock exists but no count was recorded; shown as a full shortage`
-      : null,
-    // Case (d): off the table entirely, accounted for here.
+  const headerLines = [
+    `Location: ${audit.store_code || audit.store_name}`,
+    `Audit date: ${ymd(audit.audit_date)}`,
+    `Total items: ${rows.length}`,
+    // Provenance — stated whenever there are system figures to attribute.
+    ...(withSystem ? [
+      `System stock source: ${src?.filename || 'entered manually'}`,
+      src ? `Imported: ${new Date(src.imported_at).toLocaleString()}${src.imported_by_name ? ' by ' + src.imported_by_name : ''}` : null,
+      `Coverage: ${provenance.with_system} of ${provenance.master_total} master items`,
+      totals.no_system_data > 0
+        ? `${totals.no_system_data} item(s) shown as NO SYSTEM DATA and excluded from variance totals` : null,
+      totals.no_rate > 0
+        ? `${totals.no_rate} item(s) have no rate — value figures exclude them` : null,
+      totals.not_counted > 0
+        ? `${totals.not_counted} item(s) marked NOT COUNTED — system stock exists but no count was recorded; shown as a full shortage` : null,
+    ] : ['Physical count only — no system stock imported for this audit.']),
     totals.not_stocked > 0
       ? `${totals.not_stocked} master item(s) neither counted nor present in system stock — not stocked at this outlet, excluded from this report`
       : null,
   ].filter(Boolean);
 
-  // Standard column order: Super Category | Category | Item Name | Unit | …
-  // Rate and the two rupee columns are what make this a variance report rather
-  // than a count comparison: negative variance value = shortage.
-  // `Counted` carries the NOT COUNTED flag, which is what separates a shortage
-  // nobody looked at from one an auditor counted and entered as zero.
-  const cols = ['Super Category', 'Category', 'Item Name', 'Unit', 'Rate', 'Physical',
-                'System', 'Variance', 'Variance %', 'Physical Value', 'Variance Value',
-                'Counted', 'Status'];
-  const toRow = (d) => [d.super_category, d.category, d.name, d.unit, n(d.rate),
-                        d.physical_qty, n(d.system_qty), n(d.variance), n(d.variance_pct),
-                        n(d.physical_value), n(d.variance_value), d.count_status, d.status];
+  // ── Standard audit report column set ─────────────────────────────────────
+  // Base columns are always present. The five system columns are appended only
+  // when system figures exist, and nothing else about the layout changes.
+  const BASE_COLS = ['S.No.', 'LOC', 'Super Category', 'Category', 'Item Name', 'Unit',
+                     'Bottle/Unit Size (ml)', 'Store Room Qty (Physical)',
+                     'Outlet Qty (Physical)', 'Store+Outlet Total (native unit)',
+                     'ML / Loose Qty (Open Bottle, ml)',
+                     'Final Total Qty (ML / GM / KG / Count)', 'Remarks'];
+  const SYSTEM_COLS = ['System Qty', 'Rate', 'Value', 'Variance', 'Variance Value'];
+  const cols = withSystem ? [...BASE_COLS, ...SYSTEM_COLS] : BASE_COLS;
 
-  // A subtotal / total line carries every figure a row carries, in the same
-  // columns, so it can be read straight down the page.
-  const summaryRow = (label, b, labelCol = 1) => {
-    const r = ['', '', '', '', '', b.physical_qty, b.system_qty, b.variance,
-               n(b.variance_pct), n(b.physical_value), n(b.variance_value),
-               '', `${b.items} items`];
+  const baseRow = (d) => [
+    d.s_no, d.loc, d.super_category, d.category, d.name, d.unit,
+    d.bottle_unit_size, d.store_room_qty, d.outlet_qty, d.store_outlet_total,
+    d.loose_ml, d.final_total_qty,
+    // NOT COUNTED rides alongside the measurement basis rather than replacing
+    // it, so neither piece of information is lost.
+    d.not_counted ? `${d.remarks} · NOT COUNTED` : d.remarks,
+  ];
+  const toRow = (d) => (withSystem
+    ? [...baseRow(d), n(d.system_qty), n(d.rate), n(d.physical_value),
+       n(d.variance), n(d.variance_value)]
+    : baseRow(d));
+
+  // A subtotal / total line carries the same figures in the same columns, so a
+  // column reads straight down from an item to the grand total.
+  const summaryRow = (label, b, labelCol = 3) => {
+    const r = ['', '', '', '', '', '', '', b.store_room_qty, b.outlet_qty,
+               b.store_outlet_total, b.loose_ml, b.final_total_qty, `${b.items} items`];
     r[labelCol] = label;
+    if (withSystem) r.push(b.system_qty, '', n(b.physical_value), b.variance, n(b.variance_value));
     return r;
   };
+
+  // ── Summary report (second sheet) ────────────────────────────────────────
+  const SUM_COLS = ['Super Category', 'Category', 'Items', 'Store Room Qty', 'Outlet Qty',
+                    'Store+Outlet Total', 'ML / Loose Qty', 'Final Total Qty'];
+  function summaryAoa() {
+    const h = summary.header;
+    const aoa = [
+      ['SUMMARY REPORT'],
+      ['Location', h.location],
+      ['Audit date', ymd(h.audit_date)],
+      ['Total items', h.total_items],
+      [],
+      ['Items by measurement type'],
+      // Every basis is listed, including the ones this audit has none of, so
+      // the block reads the same from one report to the next.
+      ...Object.entries(h.by_basis).map(([basis, count]) => [basis, count]),
+      [],
+      SUM_COLS,
+    ];
+    for (const g of summary.superCategories) {
+      for (const c of summary.categories.filter((x) => x.super_category === g.super_category)) {
+        aoa.push([c.super_category, c.category, c.items, c.store_room_qty, c.outlet_qty,
+                  c.store_outlet_total, c.loose_ml, c.final_total_qty]);
+      }
+      aoa.push([`${g.super_category} — SUBTOTAL`, '', g.items, g.store_room_qty, g.outlet_qty,
+                g.store_outlet_total, g.loose_ml, g.final_total_qty]);
+      aoa.push([]);
+    }
+    const gt = summary.grand;
+    aoa.push(['GRAND TOTAL', '', gt.items, gt.store_room_qty, gt.outlet_qty,
+              gt.store_outlet_total, gt.loose_ml, gt.final_total_qty]);
+    return aoa;
+  }
 
   if (format === 'xlsx') {
     const aoa = [];
     if (stamp) aoa.push(['PROVISIONAL'], [stamp], []);
-    // Provenance always precedes the figures.
-    provenanceLines.forEach((l) => aoa.push([l]));
+    headerLines.forEach((l) => aoa.push([l]));
     aoa.push([]);
     aoa.push(cols);
     if (grouped) {
-      // Subtotals at category and super category level, then a grand total.
       for (const g of groups) {
         for (const c of g.categories) {
           aoa.push(...c.rows.map(toRow));
           aoa.push(summaryRow(`${c.category} — SUBTOTAL`, c));
         }
-        aoa.push(summaryRow(`${g.super_category} — SUPER CATEGORY SUBTOTAL`, g, 0));
+        aoa.push(summaryRow(`${g.super_category} — SUPER CATEGORY SUBTOTAL`, g, 2));
         aoa.push([]);
       }
-      aoa.push(summaryRow('GRAND TOTAL', grand, 0));
+      aoa.push(summaryRow('GRAND TOTAL', grand, 2));
     } else {
       aoa.push(...rows.map(toRow));
     }
-    // Overall totals — computed only over rows that have a system figure.
     aoa.push([]);
-    // `totals` counts its rows as with_system; the summary row wants `items`.
-    aoa.push(summaryRow('TOTAL (rows with system data only)',
-                        { ...totals, items: totals.with_system }, 0));
-    if (totals.no_system_data > 0) {
-      aoa.push([`${totals.no_system_data} item(s) with NO SYSTEM DATA — excluded from the totals above`]);
+    aoa.push(summaryRow('TOTAL', { ...totals, items: rows.length }, 2));
+    if (withSystem && totals.no_system_data > 0) {
+      aoa.push([`${totals.no_system_data} item(s) with NO SYSTEM DATA — excluded from the variance totals above`]);
     }
-    if (totals.no_rate > 0) {
+    if (withSystem && totals.no_rate > 0) {
       aoa.push([`${totals.no_rate} item(s) have no rate — value figures exclude them`]);
     }
-    if (totals.not_counted > 0) {
-      aoa.push([`${totals.not_counted} item(s) NOT COUNTED — system stock exists but no count was recorded. Included above as a full shortage.`]);
-    }
-    if (totals.not_stocked > 0) {
-      aoa.push([`${totals.not_stocked} master item(s) neither counted nor present in system stock — not stocked at this outlet, excluded from this report.`]);
-    }
-    return sendXlsx(res, fname, [{ name: 'Variance', aoa }]);
+    return sendXlsx(res, fname, [
+      { name: withSystem ? 'Variance' : 'Physical Audit', aoa },
+      { name: 'Summary report', aoa: summaryAoa() },
+    ]);
   }
+
   if (format === 'pdf') {
-    const widths = [64, 64, 96, 46, 38, 42, 42, 42, 38, 56, 56, 48, 46];
-    // Overall totals, excluding rows with no system figure.
-    const totalsBlock = {
-      title: 'Totals (rows with system data only)',
-      columns: ['Items', 'Physical', 'System', 'Variance', 'Variance %',
-                'Physical Value', 'Variance Value'],
-      rows: [[totals.with_system, totals.physical_qty, totals.system_qty,
-              totals.variance, n(totals.variance_pct),
-              n(totals.physical_value), n(totals.variance_value)]],
-      note: [
-        totals.no_system_data > 0
-          ? `${totals.no_system_data} item(s) with NO SYSTEM DATA are excluded from these totals.` : null,
-        totals.no_rate > 0
-          ? `${totals.no_rate} item(s) have no rate — value figures exclude them.` : null,
-        totals.not_counted > 0
-          ? `${totals.not_counted} item(s) NOT COUNTED — system stock exists but no count was recorded; included above as a full shortage.` : null,
-        totals.not_stocked > 0
-          ? `${totals.not_stocked} master item(s) neither counted nor present in system stock — not stocked at this outlet.` : null,
-      ].filter(Boolean).join(' ') || null,
+    // 13 (or 18) columns will not fit A4 portrait legibly, so the PDF carries
+    // the identifying columns plus the quantity columns; the Excel export is
+    // the full-fidelity deliverable.
+    const pdfCols = withSystem
+      ? ['S.No.', 'Item Name', 'Unit', 'Size', 'Store', 'Outlet', 'Total', 'Loose ML',
+         'Final Total', 'Remarks', 'System', 'Variance', 'Var Value']
+      : ['S.No.', 'Item Name', 'Unit', 'Size', 'Store', 'Outlet', 'Total', 'Loose ML',
+         'Final Total', 'Remarks'];
+    const pdfWidths = withSystem
+      ? [26, 96, 52, 34, 34, 34, 38, 38, 48, 42, 38, 38, 46]
+      : [30, 150, 70, 44, 44, 44, 50, 50, 62, 58];
+    const pdfRow = (d) => {
+      const base = [d.s_no, d.name, d.unit, d.bottle_unit_size, d.store_room_qty,
+                    d.outlet_qty, d.store_outlet_total, d.loose_ml, d.final_total_qty,
+                    d.not_counted ? `${d.remarks} · NOT COUNTED` : d.remarks];
+      return withSystem
+        ? [...base, n(d.system_qty), n(d.variance), n(d.variance_value)]
+        : base;
+    };
+    const pdfSubtotal = (label, b) => {
+      const base = ['', label, '', '', b.store_room_qty, b.outlet_qty, b.store_outlet_total,
+                    b.loose_ml, b.final_total_qty, `${b.items} items`];
+      return withSystem ? [...base, b.system_qty, b.variance, n(b.variance_value)] : base;
     };
     return sendPdf(res, fname, {
-      title: `R4 — Variance Report${provisional ? ' (PROVISIONAL)' : ''}`,
-      subtitle: `${audit.store_name} — ${audit.audit_date}\n${provenanceLines.join('\n')}`,
+      title: `R4 — ${withSystem ? 'Variance Report' : 'Physical Audit Report'}${provisional ? ' (PROVISIONAL)' : ''}`,
+      subtitle: `${audit.store_name} — ${ymd(audit.audit_date)}\n${headerLines.join('\n')}`,
       banner: stamp,
-      blocks: grouped
-        ? [...groups.flatMap((g) => [
-            ...g.categories.map((c) => ({
-              title: `${g.super_category} › ${c.category}`,
-              columns: cols, widths,
-              rows: [...c.rows.map(toRow), summaryRow('SUBTOTAL', c)],
-            })),
-            { title: `${g.super_category} — SUPER CATEGORY SUBTOTAL`,
-              columns: ['Items', 'Physical', 'System', 'Variance', 'Variance %',
-                        'Physical Value', 'Variance Value'],
-              rows: [[g.items, g.physical_qty, g.system_qty, g.variance, n(g.variance_pct),
-                      n(g.physical_value), n(g.variance_value)]] },
-          ]),
-          { title: 'GRAND TOTAL',
-            columns: ['Items', 'Physical', 'System', 'Variance', 'Variance %',
-                      'Physical Value', 'Variance Value'],
-            rows: [[grand.items, grand.physical_qty, grand.system_qty, grand.variance,
-                    n(grand.variance_pct), n(grand.physical_value), n(grand.variance_value)]] },
-          totalsBlock]
-        : [{ title: 'Variance (Physical − System)', columns: cols, widths, rows: rows.map(toRow) },
-           totalsBlock],
+      blocks: [
+        ...(grouped
+          ? [...groups.flatMap((g) => [
+              ...g.categories.map((c) => ({
+                title: `${g.super_category} › ${c.category}`,
+                columns: pdfCols, widths: pdfWidths,
+                rows: [...c.rows.map(pdfRow), pdfSubtotal('SUBTOTAL', c)],
+              })),
+              { title: `${g.super_category} — SUPER CATEGORY SUBTOTAL`,
+                columns: pdfCols, widths: pdfWidths, rows: [pdfSubtotal('SUBTOTAL', g)] },
+            ]),
+            { title: 'GRAND TOTAL', columns: pdfCols, widths: pdfWidths,
+              rows: [pdfSubtotal('GRAND TOTAL', grand)] }]
+          : [{ title: withSystem ? 'Variance (Physical − System)' : 'Physical count',
+               columns: pdfCols, widths: pdfWidths, rows: rows.map(pdfRow) },
+             { title: 'TOTAL', columns: pdfCols, widths: pdfWidths,
+               rows: [pdfSubtotal('TOTAL', { ...totals, items: rows.length })] }]),
+        // Summary report, mirroring the Excel second sheet.
+        { title: 'Summary report — by category',
+          columns: SUM_COLS, widths: [70, 70, 34, 56, 52, 62, 52, 62],
+          rows: [
+            ...summary.categories.map((c) => [c.super_category, c.category, c.items,
+              c.store_room_qty, c.outlet_qty, c.store_outlet_total, c.loose_ml, c.final_total_qty]),
+            ['GRAND TOTAL', '', summary.grand.items, summary.grand.store_room_qty,
+             summary.grand.outlet_qty, summary.grand.store_outlet_total,
+             summary.grand.loose_ml, summary.grand.final_total_qty],
+          ],
+          note: Object.entries(summary.header.by_basis)
+            .filter(([, c]) => c > 0).map(([b, c]) => `${b}: ${c}`).join('  ·  ') },
+      ],
     });
   }
-  res.json({ audit, rows, groups, grand, provisional, progress, totals, hasSystemStock,
-             provenance, notStocked });
+
+  res.json({ audit, rows, groups, grand, summary, columns: cols, withSystem,
+             provisional, progress, totals, hasSystemStock, provenance, notStocked });
 });
 
 // ── R5 Consolidated (all stores) ─────────────────────────────────────────────

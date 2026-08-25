@@ -14,17 +14,29 @@ router.use(requireAuth);
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
 
+// Bottle/unit size: the multiplier every item goes through in the audit report.
+// Blank, zero or nonsense becomes 1 — an item nobody has sized yet must pass
+// through the formula unchanged rather than multiply its quantity to zero.
+function unitSize(v) {
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? n : 1;
+}
+
 // ── CSV template download ───────────────────────────────────────────────────
 // Placed before /:id-style routes. A real .csv with headers + sample rows.
 router.get('/import/template', requireRole('admin'), (_req, res) => {
   // Unit is free text — whatever the client's master says, character for
   // character. The samples below show two non-liquor rows and one liquor row.
+  // bottle_unit_size is the multiplier the audit report runs every item
+  // through. 1 for count-based items; the pack size in ml/gm for measured ones.
   const csv = toCsv(
-    ['item_name', 'super_category', 'category', 'unit', 'is_liquor', 'bottle_size_ml', 'rate'],
+    ['item_name', 'super_category', 'category', 'unit', 'bottle_unit_size',
+     'is_liquor', 'bottle_size_ml', 'rate'],
     [
-      ['Refined Oil', 'FOOD', 'PROVISION', 'CAN (5 LTR)', 'FALSE', '', '140'],
-      ['Paneer', 'FOOD', 'DAIRY', 'TIN (850 GM)', 'FALSE', '', '320'],
-      ['Old Monk Rum', 'LIQUOR', 'LIQUOR', 'BTL (750 ML)', 'TRUE', '750', '750'],
+      ['Refined Oil', 'FOOD', 'PROVISION', 'CAN (5 LTR)', '5000', 'FALSE', '', '140'],
+      ['Paneer', 'FOOD', 'DAIRY', 'TIN (850 GM)', '850', 'FALSE', '', '320'],
+      ['Steel Plate', 'CCG', 'CROCKERY', 'NOS', '1', 'FALSE', '', '90'],
+      ['Old Monk Rum', 'LIQUOR', 'LIQUOR', 'BTL (750 ML)', '750', 'TRUE', '750', '750'],
     ]
   );
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
@@ -76,10 +88,12 @@ router.post('/', requireRole('admin'), async (req, res) => {
   if (!name) return res.status(400).json({ error: 'name required' });
   try {
     const { rows } = await query(
-      `INSERT INTO items (name, category_id, super_category_id, unit, is_liquor, bottle_size_ml, rate, photo_url, is_active)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,COALESCE($9, TRUE)) RETURNING *`,
+      `INSERT INTO items (name, category_id, super_category_id, unit, bottle_unit_size,
+                          is_liquor, bottle_size_ml, rate, photo_url, is_active)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,COALESCE($10, TRUE)) RETURNING *`,
       // Unit is stored exactly as given (only outer whitespace trimmed).
       [name, b.category_id || null, b.super_category_id || null, (b.unit ?? '').trim(),
+       unitSize(b.bottle_unit_size),
        !!b.is_liquor, b.bottle_size_ml || null, b.rate ?? null, b.photo_url || null, b.is_active]
     );
     res.status(201).json(rows[0]);
@@ -105,11 +119,13 @@ router.put('/:id', requireRole('admin'), async (req, res) => {
          photo_url = COALESCE($9, photo_url),
          photo_version = CASE WHEN $9 IS NOT NULL AND $9 IS DISTINCT FROM photo_url
                               THEN photo_version + 1 ELSE photo_version END,
-         is_active = COALESCE($10, is_active)
+         is_active = COALESCE($10, is_active),
+         bottle_unit_size = COALESCE($11, bottle_unit_size)
        WHERE id = $1 RETURNING *`,
       [req.params.id, name, b.category_id, b.super_category_id,
        b.unit === undefined ? null : String(b.unit).trim(), b.is_liquor,
-       b.bottle_size_ml ?? null, b.rate, b.photo_url, b.is_active]
+       b.bottle_size_ml ?? null, b.rate, b.photo_url, b.is_active,
+       b.bottle_unit_size === undefined ? null : unitSize(b.bottle_unit_size)]
     );
     if (!rows[0]) return res.status(404).json({ error: 'Not found' });
     res.json(rows[0]);
@@ -191,6 +207,17 @@ async function analyseCsv(records) {
       if (Number.isNaN(rate)) errors.push('rate must be a number');
     }
 
+    // Bottle/unit size — the audit report's multiplier. Blank means 1 (a
+    // count-based item), which is the common case; a zero or negative value is
+    // rejected rather than silently zeroing the item's whole quantity.
+    let unitSizeVal = 1;
+    const usRaw = (r.bottle_unit_size ?? r['bottle/unit size'] ?? r['bottle_unit_size_ml'] ?? '').toString().trim();
+    if (usRaw !== '') {
+      unitSizeVal = parseFloat(usRaw);
+      if (Number.isNaN(unitSizeVal)) errors.push('bottle_unit_size must be a number');
+      else if (unitSizeVal <= 0) errors.push('bottle_unit_size must be greater than 0');
+    }
+
     const existingId = existingByName.get(key) || null;
     return {
       row: idx + 2, // 1-based + header line
@@ -205,6 +232,7 @@ async function analyseCsv(records) {
         category_name: catName,
         is_liquor: isLiquor,
         bottle_size_ml: bottleSize,
+        bottle_unit_size: unitSizeVal,
         rate,
       },
       matched: !!existingId,
@@ -390,17 +418,20 @@ router.post('/import/commit', requireRole('admin'), upload.single('file'), async
       if (r.matched && mode === 'upsert') {
         await c.query(
           `UPDATE items SET name=$2, category_id=$3, super_category_id=$4, unit=$5,
-                            is_liquor=$6, bottle_size_ml=$7, rate=$8
+                            is_liquor=$6, bottle_size_ml=$7, rate=$8, bottle_unit_size=$9
              WHERE id=$1`,
-          [r.existingId, d.name, catId, superId, d.unit, d.is_liquor, d.bottle_size_ml, d.rate]
+          [r.existingId, d.name, catId, superId, d.unit, d.is_liquor, d.bottle_size_ml,
+           d.rate, d.bottle_unit_size]
         );
         updated++;
       } else {
         await c.query(
-          `INSERT INTO items (name, category_id, super_category_id, unit, is_liquor, bottle_size_ml, rate)
-           VALUES ($1,$2,$3,$4,$5,$6,$7)
+          `INSERT INTO items (name, category_id, super_category_id, unit, is_liquor,
+                              bottle_size_ml, rate, bottle_unit_size)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
            ON CONFLICT (lower(name)) DO NOTHING`,
-          [d.name, catId, superId, d.unit, d.is_liquor, d.bottle_size_ml, d.rate]
+          [d.name, catId, superId, d.unit, d.is_liquor, d.bottle_size_ml, d.rate,
+           d.bottle_unit_size]
         );
         created++;
       }

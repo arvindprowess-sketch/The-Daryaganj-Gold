@@ -6,7 +6,7 @@ import { useToast } from '../../components/Toast.jsx';
 import ConfirmDialog from '../../components/ConfirmDialog.jsx';
 import ImportResult, { ImportProgress } from '../../components/ImportResult.jsx';
 
-const blank = { name: '', super_category_id: '', category_id: '', unit: '', is_liquor: false, bottle_size_ml: '', rate: '' };
+const blank = { name: '', super_category_id: '', category_id: '', unit: '', bottle_unit_size: 1, is_liquor: false, bottle_size_ml: '', rate: '' };
 
 // Item NAME is the single identifier — there are no item codes.
 export default function ItemMaster() {
@@ -134,7 +134,9 @@ export default function ItemMaster() {
               <th className="px-3 py-3">Super Category</th>
               <th className="px-3 py-3">Category</th>
               <th className="px-3 py-3">Name</th>
-              <th className="px-3 py-3">Unit</th><th className="px-3 py-3">Liquor</th>
+              <th className="px-3 py-3">Unit</th>
+              <th className="px-3 py-3 text-right">Unit size</th>
+              <th className="px-3 py-3">Liquor</th>
               <th className="px-3 py-3 text-right">Rate</th><th className="px-3 py-3"></th>
             </tr>
           </thead>
@@ -152,6 +154,7 @@ export default function ItemMaster() {
                 </td>
                 {/* Unit is displayed exactly as uploaded. */}
                 <td className="px-3 py-2">{i.unit}</td>
+                <td className="px-3 py-2 text-right tabular-nums">{i.bottle_unit_size ?? 1}</td>
                 <td className="px-3 py-2">{i.is_liquor ? `Yes (${i.bottle_size_ml || '?'}ml)` : ''}</td>
                 <td className="px-3 py-2 text-right">{i.rate != null ? Number(i.rate).toFixed(2) : '—'}</td>
                 <td className="px-3 py-2 text-right whitespace-nowrap">
@@ -208,6 +211,7 @@ function ItemEditor({ item, supers, categories, onClose, onSaved }) {
   const [f, setF] = useState({
     name: item.name || '', super_category_id: item.super_category_id || '',
     category_id: item.category_id || '', unit: item.unit || '', is_liquor: !!item.is_liquor,
+    bottle_unit_size: item.bottle_unit_size ?? 1,
     bottle_size_ml: item.bottle_size_ml || '', rate: item.rate ?? '',
     photo_url: item.photo_url || null, photo_version: item.photo_version,
   });
@@ -222,6 +226,8 @@ function ItemEditor({ item, supers, categories, onClose, onSaved }) {
       super_category_id: f.super_category_id || null, category_id: f.category_id || null,
       // Unit is free text, stored as typed.
       unit: f.unit, is_liquor: f.is_liquor,
+      // The multiplier every item goes through in the audit report.
+      bottle_unit_size: Number(f.bottle_unit_size) > 0 ? Number(f.bottle_unit_size) : 1,
       bottle_size_ml: f.is_liquor ? Number(f.bottle_size_ml) || null : null,
       rate: f.rate === '' ? null : Number(f.rate), photo_url: f.photo_url,
     };
@@ -261,6 +267,16 @@ function ItemEditor({ item, supers, categories, onClose, onSaved }) {
           <label className="block"><span className="text-sm text-slate-600">Rate (₹)</span>
             <input className="field mt-1" value={f.rate} onChange={(e) => set({ rate: e.target.value })} /></label>
         </div>
+        <label className="block">
+          <span className="text-sm text-slate-600">Bottle / Unit size (ml or gm)</span>
+          <input className="field mt-1" inputMode="decimal" value={f.bottle_unit_size}
+                 onChange={(e) => set({ bottle_unit_size: e.target.value.replace(/[^0-9.]/g, '') })} />
+          <span className="block text-xs text-slate-400 mt-1">
+            The multiplier the audit report uses: <strong>1</strong> for count-based items
+            (Nos, Pcs, Por, Pkt), or the pack size — 750 for a 750 ML bottle, 1000 for 1 LTR,
+            500 for a 500 GM pack, 5000 for a 5 LTR can.
+          </span>
+        </label>
         <div className="grid grid-cols-2 gap-3">
           <label className="block"><span className="text-sm text-slate-600">Super Category</span>
             <select className="field mt-1" value={f.super_category_id} onChange={(e) => pickSuper(e.target.value)}>
@@ -366,12 +382,14 @@ function CsvImport({ onClose, onImported }) {
   return (
     <Modal title="CSV import — item master" onClose={onClose} wide>
       <p className="text-sm text-slate-600 mb-2">
-        Columns: <code>item_name, super_category, category, unit, is_liquor, bottle_size_ml, rate</code>.
+        Columns: <code>item_name, super_category, category, unit, bottle_unit_size, is_liquor, bottle_size_ml, rate</code>.
         Items are matched by <strong>item_name</strong> (spaces trimmed, case-insensitive).
         <br />
         <span className="text-slate-500">
           <code>is_liquor</code> accepts TRUE/FALSE, 1/0 or Yes/No. <code>bottle_size_ml</code> is
-          required when it is TRUE. <code>unit</code> is free text and is stored exactly as written.
+          required when it is TRUE. <code>bottle_unit_size</code> is the audit report's multiplier —
+          leave it blank or 1 for count-based items, or give the pack size in ml/gm.
+          <code>unit</code> is free text and is stored exactly as written.
           A super category or category that does not exist yet is created on commit.
         </span>
       </p>
@@ -559,6 +577,7 @@ function CsvImport({ onClose, onImported }) {
                 <th className="px-2 py-2 text-left">Category</th>
                 <th className="px-2 py-2 text-left">Item Name</th>
                 <th className="px-2 py-2 text-left">Unit</th>
+                <th className="px-2 py-2 text-right">Unit size</th>
                 <th className="px-2 py-2 text-left">Status</th>
                 <th className="px-2 py-2 text-left">Errors</th>
               </tr></thead>
@@ -576,6 +595,7 @@ function CsvImport({ onClose, onImported }) {
                     </td>
                     <td className="px-2 py-1.5 font-medium">{r.data.name}</td>
                     <td className="px-2 py-1.5 font-mono">{r.data.unit}</td>
+                    <td className="px-2 py-1.5 text-right tabular-nums">{r.data.bottle_unit_size}</td>
                     <td className="px-2 py-1.5">
                       {r.errors.length ? 'invalid'
                         : r.matched ? <span className="text-green-600">update existing</span>

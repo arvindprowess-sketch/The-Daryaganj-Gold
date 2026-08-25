@@ -99,4 +99,86 @@ router.put('/categories/:id', requireRole('admin'), async (req, res) => {
   res.json(rows[0]);
 });
 
+// ── Store Room / Outlet zones ──────────────────────────────────────────────
+// The audit report splits physical quantity into Store Room and Outlet
+// columns, but auditors type the location as free text. This is where an admin
+// assigns each name they actually use to one side.
+//
+// `unmapped` lists the location names already recorded on count entries that
+// have no assignment yet, so existing data can be mapped correctly rather than
+// silently landing on the default.
+router.get('/location-zones', requireRole('admin'), async (_req, res) => {
+  const { rows: zones } = await query(
+    'SELECT id, name, zone FROM location_zones ORDER BY zone, lower(name)');
+  const { rows: unmapped } = await query(
+    `SELECT btrim(ce.location_text) AS name, count(*)::int AS entries
+       FROM count_entries ce
+       LEFT JOIN location_zones lz
+              ON lower(btrim(lz.name)) = lower(btrim(ce.location_text))
+      WHERE ce.status = 'active'
+        AND COALESCE(btrim(ce.location_text), '') <> ''
+        AND lz.id IS NULL
+      GROUP BY btrim(ce.location_text)
+      ORDER BY count(*) DESC`);
+  const { rows: setting } = await query(
+    `SELECT value FROM settings WHERE key = 'location_default_zone'`);
+  // Entries with no location at all also fall to the default — worth stating.
+  const { rows: blank } = await query(
+    `SELECT count(*)::int AS n FROM count_entries
+      WHERE status='active' AND COALESCE(btrim(location_text), '') = ''`);
+  res.json({
+    zones,
+    unmapped,
+    blank_location_entries: blank[0].n,
+    default_zone: setting[0]?.value === 'store_room' ? 'store_room' : 'outlet',
+  });
+});
+
+router.post('/location-zones', requireRole('admin'), async (req, res) => {
+  const name = String(req.body?.name || '').trim();
+  const zone = req.body?.zone;
+  if (!name) return res.status(400).json({ error: 'name required' });
+  if (!['store_room', 'outlet'].includes(zone)) {
+    return res.status(400).json({ error: "zone must be 'store_room' or 'outlet'" });
+  }
+  try {
+    const { rows } = await query(
+      'INSERT INTO location_zones (name, zone) VALUES ($1,$2) RETURNING *', [name, zone]);
+    res.status(201).json(rows[0]);
+  } catch (err) {
+    if (err.code === '23505') return res.status(409).json({ error: `"${name}" is already assigned` });
+    throw err;
+  }
+});
+
+// Declared BEFORE /:id — otherwise Express matches 'default' as an id.
+// Where an unmapped location is counted.
+router.put('/location-zones/default', requireRole('admin'), async (req, res) => {
+  const zone = req.body?.zone;
+  if (!['store_room', 'outlet'].includes(zone)) {
+    return res.status(400).json({ error: "zone must be 'store_room' or 'outlet'" });
+  }
+  await query(
+    `INSERT INTO settings (key, value) VALUES ('location_default_zone', $1)
+     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`, [zone]);
+  res.json({ ok: true, default_zone: zone });
+});
+
+router.put('/location-zones/:id', requireRole('admin'), async (req, res) => {
+  const zone = req.body?.zone;
+  if (!['store_room', 'outlet'].includes(zone)) {
+    return res.status(400).json({ error: "zone must be 'store_room' or 'outlet'" });
+  }
+  const { rows } = await query(
+    'UPDATE location_zones SET zone=$2 WHERE id=$1 RETURNING *', [req.params.id, zone]);
+  if (!rows[0]) return res.status(404).json({ error: 'Not found' });
+  res.json(rows[0]);
+});
+
+router.delete('/location-zones/:id', requireRole('admin'), async (req, res) => {
+  const { rowCount } = await query('DELETE FROM location_zones WHERE id=$1', [req.params.id]);
+  if (!rowCount) return res.status(404).json({ error: 'Not found' });
+  res.json({ ok: true });
+});
+
 export default router;

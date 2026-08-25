@@ -1,4 +1,5 @@
 import { query } from '../db.js';
+import { measurementBasis, finalTotals, BASES } from './measure.js';
 
 // ── Tolerance bands from settings (NOT hardcoded) ────────────────────────────
 export async function getTolerances() {
@@ -23,12 +24,17 @@ export function bandFor(pct, isLiquor, tol) {
 // Liquor bottles and open ml are kept SEPARATE throughout and never combined.
 export async function auditItemAggregates(auditId) {
   const { rows } = await query(
-    `SELECT i.id, i.name, i.unit, i.is_liquor, i.bottle_size_ml, i.rate,
+    `SELECT i.id, i.name, i.unit, i.is_liquor, i.bottle_size_ml, i.bottle_unit_size, i.rate,
             i.super_category_id, i.category_id,
             sc.name AS super_category_name, c.name AS category_name,
             COALESCE(agg.total_qty, 0)      AS total_qty,
             COALESCE(agg.total_bottles, 0)  AS total_bottles,
             COALESCE(agg.total_open_ml, 0)  AS total_open_ml,
+            -- Physical quantity split by ZONE, from the location recorded on
+            -- each entry. An entry whose location is not in location_zones
+            -- falls to the configured default so no quantity is ever dropped.
+            COALESCE(agg.store_room_qty, 0) AS store_room_qty,
+            COALESCE(agg.outlet_qty, 0)     AS outlet_qty,
             COALESCE(agg.entry_count, 0)::int AS entry_count,
             COALESCE(agg.active_zero, 0)::int AS active_zero,
             COALESCE(agg.with_photo, 0)::int  AS with_photo,
@@ -39,24 +45,52 @@ export async function auditItemAggregates(auditId) {
        LEFT JOIN super_categories sc ON sc.id = i.super_category_id
        LEFT JOIN categories c ON c.id = i.category_id
        LEFT JOIN LATERAL (
-         SELECT SUM(qty) AS total_qty, SUM(bottles) AS total_bottles,
+         SELECT SUM(native) AS total_qty, SUM(bottles) AS total_bottles,
                 SUM(open_ml) AS total_open_ml, COUNT(*) AS entry_count,
+                SUM(native) FILTER (WHERE zone = 'store_room') AS store_room_qty,
+                SUM(native) FILTER (WHERE zone = 'outlet')     AS outlet_qty,
                 COUNT(*) FILTER (WHERE COALESCE(qty,0)=0 AND COALESCE(bottles,0)=0 AND COALESCE(open_ml,0)=0) AS active_zero,
                 COUNT(*) FILTER (WHERE photo_url IS NOT NULL) AS with_photo
-           FROM count_entries ce
-          WHERE ce.item_id = i.id AND ce.audit_id = $1 AND ce.status='active'
+           FROM (
+             SELECT ce.qty, ce.bottles, ce.open_ml, ce.photo_url,
+                    -- Liquor counts in sealed bottles; everything else in its
+                    -- own unit. Open ml is NEVER folded in here.
+                    COALESCE(CASE WHEN i.is_liquor THEN ce.bottles ELSE ce.qty END, 0) AS native,
+                    COALESCE(lz.zone, $2) AS zone
+               FROM count_entries ce
+               LEFT JOIN location_zones lz
+                      ON lower(btrim(lz.name)) = lower(btrim(COALESCE(ce.location_text, '')))
+              WHERE ce.item_id = i.id AND ce.audit_id = $1 AND ce.status='active'
+           ) e
        ) agg ON TRUE
        LEFT JOIN system_stock ss ON ss.item_id = i.id AND ss.audit_id = $1
        LEFT JOIN audit_na na ON na.item_id = i.id AND na.audit_id = $1
       WHERE i.is_active = TRUE
       ORDER BY sc.sort_order NULLS LAST, sc.name, c.name, i.name`,
-    [auditId]
+    [auditId, await defaultZone()]
   );
   return rows.map((r) => {
     const physicalQty = r.is_liquor ? Number(r.total_bottles) : Number(r.total_qty);
     const value = r.rate != null ? physicalQty * Number(r.rate) : null;
-    return { ...r, physical_qty: physicalQty, value, counted: r.entry_count > 0 };
+    // Store Room + Outlet must always reconcile to the item's physical total,
+    // whatever the zone mapping says.
+    return {
+      ...r,
+      physical_qty: physicalQty,
+      store_room_qty: Number(r.store_room_qty),
+      outlet_qty: Number(r.outlet_qty),
+      bottle_unit_size: Number(r.bottle_unit_size ?? 1),
+      value,
+      counted: r.entry_count > 0,
+    };
   });
+}
+
+// Where an entry whose location is not in location_zones is counted. Explicit
+// and admin-editable, so a quantity is never silently dropped from both columns.
+export async function defaultZone() {
+  const { rows } = await query(`SELECT value FROM settings WHERE key='location_default_zone'`);
+  return rows[0]?.value === 'store_room' ? 'store_room' : 'outlet';
 }
 
 export async function getAudit(auditId) {
@@ -200,6 +234,9 @@ function emptyBucket(extra) {
     ...extra, items: 0, no_rate: 0,
     physical_qty: 0, system_qty: 0, variance: 0,
     physical_value: 0, system_value: 0, variance_value: 0,
+    // Standard-report quantity columns, subtotalled alongside the rest.
+    store_room_qty: 0, outlet_qty: 0, store_outlet_total: 0,
+    loose_ml: 0, final_total_qty: 0,
   };
 }
 
@@ -208,6 +245,11 @@ function addToBucket(bucket, r) {
   bucket.physical_qty += Number(r.physical_qty || 0);
   bucket.system_qty += Number(r.system_qty || 0);
   bucket.variance += Number(r.variance || 0);
+  bucket.store_room_qty += Number(r.store_room_qty || 0);
+  bucket.outlet_qty += Number(r.outlet_qty || 0);
+  bucket.store_outlet_total += Number(r.store_outlet_total || 0);
+  bucket.loose_ml += Number(r.loose_ml || 0);
+  bucket.final_total_qty += Number(r.final_total_qty || 0);
   if (r.rate == null) { bucket.no_rate += 1; return; }
   bucket.physical_value += Number(r.physical_value || 0);
   bucket.system_value += Number(r.system_value || 0);
@@ -216,11 +258,17 @@ function addToBucket(bucket, r) {
 
 // Money is rounded once, at the point it is reported.
 function finishBucket(b) {
+  const r3 = (n) => Number(Number(n || 0).toFixed(3));
   return {
     ...b,
     physical_value: round2(b.physical_value),
     system_value: round2(b.system_value),
     variance_value: round2(b.variance_value),
+    store_room_qty: r3(b.store_room_qty),
+    outlet_qty: r3(b.outlet_qty),
+    store_outlet_total: r3(b.store_outlet_total),
+    loose_ml: r3(b.loose_ml),
+    final_total_qty: r3(b.final_total_qty),
     variance_pct: pctOf(b.variance, b.system_qty),
   };
 }
@@ -370,11 +418,26 @@ export async function varianceReport(
     const rate = i.rate == null ? null : Number(i.rate);
     const money = (qty) => (rate == null || qty == null ? null : round2(qty * rate));
 
+    // ── Standard audit report figures ──────────────────────────────────────
+    // Physical quantity split by zone, then carried through the one formula
+    // that covers the whole master:
+    //   Final Total Qty = (Store Room + Outlet) × Bottle/Unit Size + Loose ML
+    const measures = finalTotals({
+      storeRoom: i.store_room_qty,
+      outlet: i.outlet_qty,
+      size: i.bottle_unit_size,
+      looseMl: i.total_open_ml,
+    });
+
     return {
       name: i.name, unit: i.unit, is_liquor: i.is_liquor,
       super_category: i.super_category_name || '—', category: i.category_name || '—',
       super_category_id: i.super_category_id, category_id: i.category_id,
       rate,
+      bottle_unit_size: Number(i.bottle_unit_size ?? 1),
+      ...measures,
+      // What Final Total Qty is expressed in.
+      remarks: measurementBasis(i.unit),
       physical_qty: physical,
       physical_open_ml: i.is_liquor ? Number(i.total_open_ml) : null,
       system_qty: system,
@@ -403,14 +466,24 @@ export async function varianceReport(
   // The same accumulator the category and super-category subtotals use, so the
   // grand total can never be computed on a different basis from the rows above
   // it. Rupee columns skip items with no rate rather than counting them as 0.
+  //
+  // Accumulated over EVERY row on the table, not just those with a system
+  // figure. The physical columns are the report's spine now and must total to
+  // what was actually counted — a physical-only audit has no system rows at
+  // all. Variance and value are unaffected: a row without a system figure
+  // carries null there and contributes nothing.
   const totalBucket = emptyBucket({});
-  for (const r of withSystem) addToBucket(totalBucket, r);
+  for (const r of rows) addToBucket(totalBucket, r);
   const totals = finishBucket(totalBucket);
 
-  const groups = groupVariance(withSystem);
+  const groups = groupVariance(rows);
 
   const total = items.length;
   const counted = items.filter((i) => i.counted || i.not_applicable).length;
+  // S.No. and LOC are part of the standard format. S.No. numbers the rows as
+  // presented, so it follows the current filter and ordering.
+  rows.forEach((r, i) => { r.s_no = i + 1; r.loc = audit?.store_code || ''; });
+
   return {
     rows,
     groups,
@@ -418,6 +491,8 @@ export async function varianceReport(
     // construction — both come from the same bucket arithmetic — but exposed
     // separately so the grouped view does not have to reach for the flat one.
     grand: totals,
+    // Second sheet of the export.
+    summary: buildSummary(rows, groups, audit),
     provisional,
     progress: { total, counted, uncounted: total - counted },
     // True only when nothing at all has been imported or entered.
@@ -443,6 +518,12 @@ export async function varianceReport(
       no_rate: rows.filter((r) => r.rate == null).length,
       no_rate_with_system: totals.no_rate,
       physical_qty: totals.physical_qty,
+      // Standard-report quantity totals, over every row on the table.
+      store_room_qty: totals.store_room_qty,
+      outlet_qty: totals.outlet_qty,
+      store_outlet_total: totals.store_outlet_total,
+      loose_ml: totals.loose_ml,
+      final_total_qty: totals.final_total_qty,
       system_qty: totals.system_qty,
       variance: totals.variance,
       // Overall %, computed only over rows that actually have a system figure.
@@ -451,6 +532,62 @@ export async function varianceReport(
       system_value: totals.system_value,
       variance_value: totals.variance_value,
     },
+  };
+}
+
+// ── Summary report (second sheet of the R4 export) ─────────────────────────
+// A header block stating what the audit covered, then one row per category
+// under its super category, carrying the five quantity columns. Item counts are
+// broken down by measurement basis so a reader can see at a glance how much of
+// the master is measured (ML/GM/KG) versus counted (Nos/POR/PKT/PIECE).
+function buildSummary(rows, groups, audit) {
+  const byBasis = {};
+  for (const b of BASES) byBasis[b] = 0;
+  for (const r of rows) byBasis[r.remarks] = (byBasis[r.remarks] || 0) + 1;
+
+  const categories = groups.flatMap((g) =>
+    g.categories.map((c) => ({
+      super_category: g.super_category,
+      category: c.category,
+      items: c.items,
+      store_room_qty: c.store_room_qty,
+      outlet_qty: c.outlet_qty,
+      store_outlet_total: c.store_outlet_total,
+      loose_ml: c.loose_ml,
+      final_total_qty: c.final_total_qty,
+    }))
+  );
+
+  const superCategories = groups.map((g) => ({
+    super_category: g.super_category,
+    items: g.items,
+    store_room_qty: g.store_room_qty,
+    outlet_qty: g.outlet_qty,
+    store_outlet_total: g.store_outlet_total,
+    loose_ml: g.loose_ml,
+    final_total_qty: g.final_total_qty,
+  }));
+
+  const grand = superCategories.reduce((t, g) => ({
+    items: t.items + g.items,
+    store_room_qty: Number((t.store_room_qty + g.store_room_qty).toFixed(3)),
+    outlet_qty: Number((t.outlet_qty + g.outlet_qty).toFixed(3)),
+    store_outlet_total: Number((t.store_outlet_total + g.store_outlet_total).toFixed(3)),
+    loose_ml: Number((t.loose_ml + g.loose_ml).toFixed(3)),
+    final_total_qty: Number((t.final_total_qty + g.final_total_qty).toFixed(3)),
+  }), { items: 0, store_room_qty: 0, outlet_qty: 0, store_outlet_total: 0, loose_ml: 0, final_total_qty: 0 });
+
+  return {
+    header: {
+      location: audit?.store_code || audit?.store_name || '',
+      store_name: audit?.store_name || '',
+      audit_date: audit?.audit_date || null,
+      total_items: rows.length,
+      by_basis: byBasis,
+    },
+    superCategories,
+    categories,
+    grand,
   };
 }
 
