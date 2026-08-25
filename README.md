@@ -252,8 +252,19 @@ auto-detects Node conventions needs no manual build or start command:
 
 ```bash
 npm run build     # installs both workspaces and builds client/dist
-npm start         # boots the API, which also serves that build
+npm start         # applies pending migrations, then boots the API
 ```
+
+- **`npm start` runs the migrations first.** Without that step a deploy can ship
+  code that queries a table its database has never been given — the symptom is a
+  bare `relation "location_zones" does not exist` from whichever screen needs it
+  first, long after the deploy looked successful. The runner is tracked in
+  `schema_migrations` and skips what is already applied, so it is a no-op on a
+  current database. It takes a **`pg_advisory_lock`** for the whole run: two
+  instances deploying at once serialise instead of colliding on the primary key.
+  If a migration fails the server does **not** start — a schema-mismatched
+  process serving traffic is worse than a failed deploy, and the platform keeps
+  the previous version running.
 
 - `server/src/index.js` serves `client/dist` and falls back to `index.html` for
   any path outside `/api/` and `/uploads/`, so client-side routes survive a hard

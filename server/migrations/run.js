@@ -5,7 +5,26 @@ import { pool } from '../src/db.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+// This runs on every start, so two instances deploying at once would both see
+// a migration as unapplied and both try to run it — one would commit and the
+// other would die on the primary key. A session-level advisory lock serialises
+// them: the second waits, then finds everything applied and skips. The number
+// is arbitrary but must never change.
+const LOCK_ID = 8274301;
+
 async function run() {
+  const lock = await pool.connect();
+  await lock.query('SELECT pg_advisory_lock($1)', [LOCK_ID]);
+  try {
+    await migrate();
+  } finally {
+    await lock.query('SELECT pg_advisory_unlock($1)', [LOCK_ID]);
+    lock.release();
+  }
+  await pool.end();
+}
+
+async function migrate() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS schema_migrations (
       filename   TEXT PRIMARY KEY,
@@ -46,7 +65,6 @@ async function run() {
     }
   }
   console.log('Migrations complete.');
-  await pool.end();
 }
 
 run().catch((err) => {
