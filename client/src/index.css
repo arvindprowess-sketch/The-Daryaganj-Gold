@@ -32,6 +32,12 @@ body {
   .chip-off { @apply chip bg-white text-slate-600 border-slate-200; }
 }
 
+/* Edge draws its own reveal/clear controls inside password fields. We supply
+   our own toggle (components/PasswordField.jsx), so suppress the native pair
+   rather than showing two eyes side by side. */
+input[type="password"]::-ms-reveal,
+input[type="password"]::-ms-clear { display: none; }
+
 /* hide scrollbars on filter chip rows */
 .no-scrollbar::-webkit-scrollbar { display: none; }
 .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }

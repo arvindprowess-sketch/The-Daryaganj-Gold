@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { api } from '../lib/api.js';
 import { useAuth } from '../lib/auth.jsx';
+import PasswordField from '../components/PasswordField.jsx';
 
 // Shown immediately after logging in with a seeded default password. Seed
 // passwords are printed to a console, so such an account must not stay usable
@@ -41,19 +42,19 @@ export default function ChangePassword({ forced = false, onDone }) {
           <div className="text-sm text-slate-500">Signed in as <strong>{user?.username}</strong></div>
           <label className="block">
             <span className="text-sm font-medium text-slate-600">Current password</span>
-            <input className="field mt-1" type="password" value={current} autoFocus
-                   onChange={(e) => setCurrent(e.target.value)} />
+            <PasswordField wrapperClassName="mt-1" value={current} autoFocus
+                           onChange={(e) => setCurrent(e.target.value)} />
           </label>
           <label className="block">
             <span className="text-sm font-medium text-slate-600">New password</span>
-            <input className="field mt-1" type="password" value={next}
-                   onChange={(e) => setNext(e.target.value)} />
+            <PasswordField wrapperClassName="mt-1" value={next}
+                           onChange={(e) => setNext(e.target.value)} />
             <span className="block text-xs text-slate-400 mt-1">At least 8 characters.</span>
           </label>
           <label className="block">
             <span className="text-sm font-medium text-slate-600">Confirm new password</span>
-            <input className="field mt-1" type="password" value={again}
-                   onChange={(e) => setAgain(e.target.value)} />
+            <PasswordField wrapperClassName="mt-1" value={again}
+                           onChange={(e) => setAgain(e.target.value)} />
           </label>
           {err && <p className="text-red-600 text-sm">{err}</p>}
           <button className="btn-primary w-full" disabled={busy}>

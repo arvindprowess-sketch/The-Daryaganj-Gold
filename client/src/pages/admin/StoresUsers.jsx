@@ -4,6 +4,7 @@ import { Spinner } from '../../components/ui.jsx';
 import ConfirmDialog from '../../components/ConfirmDialog.jsx';
 import { useToast } from '../../components/Toast.jsx';
 import { useAuth } from '../../lib/auth.jsx';
+import PasswordField from '../../components/PasswordField.jsx';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // D2 — Stores & users.
@@ -226,7 +227,8 @@ function Users() {
         <div className="space-y-2">
           <input className="field" placeholder="Username" value={f.username} onChange={(e) => setF({ ...f, username: e.target.value })} />
           <input className="field" placeholder="Full name" value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} />
-          <input className="field" type="password" placeholder="Password" value={f.password} onChange={(e) => setF({ ...f, password: e.target.value })} />
+          <PasswordField placeholder="Password" value={f.password}
+                         onChange={(e) => setF({ ...f, password: e.target.value })} />
           <select className="field" value={f.role} onChange={(e) => setF({ ...f, role: e.target.value })}>
             <option value="auditor">Auditor</option><option value="admin">Admin</option>
           </select>

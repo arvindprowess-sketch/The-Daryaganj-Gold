@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../lib/auth.jsx';
+import PasswordField from '../components/PasswordField.jsx';
 
 // M1 — Login: username, password, remember me.
 export default function Login() {
@@ -42,8 +43,8 @@ export default function Login() {
           </div>
           <div>
             <label className="text-sm font-medium text-slate-600">Password</label>
-            <input className="field mt-1" type="password"
-                   value={password} onChange={(e) => setPassword(e.target.value)} />
+            <PasswordField wrapperClassName="mt-1"
+                           value={password} onChange={(e) => setPassword(e.target.value)} />
           </div>
           <label className="flex items-center gap-3 text-slate-600 select-none">
             <input type="checkbox" className="h-5 w-5 accent-teal-700"
