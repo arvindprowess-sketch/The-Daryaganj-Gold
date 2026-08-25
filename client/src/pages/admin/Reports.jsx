@@ -70,10 +70,22 @@ export default function Reports() {
     const qs = varianceParams.length ? `?${varianceParams.join('&')}` : '';
     api.get(`/reports/${report}/${auditId}${qs}`)
       .then((d) => { setData(d); setLoadedReport(forReport); })
-      .catch((e) => { setData({ error: e.message }); setLoadedReport(forReport); })
+      // A cleared submission is not an error the admin needs to debug — it is
+      // a state with an explanation attached. Carry it through so the view can
+      // say what happened instead of printing a red failure.
+      .catch((e) => { setData({ error: e.message, cleared: e.body?.cleared }); setLoadedReport(forReport); })
       .finally(() => setLoading(false));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [report, auditId, vCount, vSuper, vCategory, vGroup, vSystem, vRate, vNil]);
+
+  // A cleared submission answers a download with 409 and an explanation
+  // rather than a file of zeroes; show it instead of failing silently.
+  const [dlErr, setDlErr] = useState('');
+  async function download(path, filename) {
+    setDlErr('');
+    try { await downloadReport(path, filename); }
+    catch (e) { setDlErr(e.body?.cleared?.message || e.message); }
+  }
 
   const store = audits.find((a) => String(a.id) === String(auditId));
   const filterQs = varianceParams.length ? `&${varianceParams.join('&')}` : '';
@@ -222,8 +234,9 @@ export default function Reports() {
 
       {auditId && (
         <div className="flex gap-2 mb-4">
-          <button className="btn-ghost" onClick={() => downloadReport(`/reports/${base}?format=xlsx${filterQs}`, `${fname}.xlsx`)}>⬇ Excel</button>
-          <button className="btn-ghost" onClick={() => downloadReport(`/reports/${base}?format=pdf${filterQs}`, `${fname}.pdf`)}>⬇ PDF</button>
+          <button className="btn-ghost" onClick={() => download(`/reports/${base}?format=xlsx${filterQs}`, `${fname}.xlsx`)}>⬇ Excel</button>
+          <button className="btn-ghost" onClick={() => download(`/reports/${base}?format=pdf${filterQs}`, `${fname}.pdf`)}>⬇ PDF</button>
+          {dlErr && <p className="w-full text-sm text-orange-700">{dlErr}</p>}
           {provisional && <span className="self-center text-xs text-amber-700">Exports are stamped PROVISIONAL.</span>}
         </div>
       )}
@@ -338,6 +351,23 @@ function Table({ cols, rows, align = [], rowClass }) {
 }
 
 function ReportView({ report, data, grouped }) {
+  // Cleared submission: say what happened. NOT an empty table — every item
+  // would read as a 100% shortage, which is a finding that never happened.
+  if (data.cleared) {
+    const c = data.cleared;
+    return (
+      <div className="rounded-xl border-2 border-orange-300 bg-orange-50 px-5 py-4 text-orange-900">
+        <p className="font-bold text-lg">Submitted data was cleared</p>
+        <p className="mt-1">{c.message}</p>
+        <p className="text-sm mt-2 text-orange-800">
+          It held {c.item_count} items ({c.entry_count} entries), submitted {fmtDateTime(c.submitted_at)}.
+        </p>
+        <p className="text-sm mt-2 text-orange-800">
+          Reports resume as soon as the auditor submits again.
+        </p>
+      </div>
+    );
+  }
   if (data.error) return <p className="text-red-600">{data.error}</p>;
 
   // R1 — grouped super category → category, with a subtotal per category, a

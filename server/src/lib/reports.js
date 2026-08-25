@@ -1,5 +1,6 @@
 import { query } from '../db.js';
 import { measurementBasis, finalTotals, BASES } from './measure.js';
+import { auditSource, SNAPSHOT, CLEARED } from './submissions.js';
 
 // ── Tolerance bands from settings (NOT hardcoded) ────────────────────────────
 export async function getTolerances() {
@@ -22,7 +23,30 @@ export function bandFor(pct, isLiquor, tol) {
 
 // ── Core per-item aggregates for one audit ───────────────────────────────────
 // Liquor bottles and open ml are kept SEPARATE throughout and never combined.
-export async function auditItemAggregates(auditId) {
+//
+// THE ONE PLACE physical quantity is read. Every report is built on this, so
+// switching the source here — the auditor's live entries while the count is in
+// progress, the submitted snapshot once it has been sent — moves all six
+// reports at once and none of them can disagree about which numbers they show.
+export async function auditItemAggregates(auditId, source = null) {
+  const src = source || await auditSource(auditId);
+  // Reading from submission_entries and reading from count_entries differ in
+  // exactly one clause. Everything downstream — zone split, native quantity,
+  // photo coverage — is identical, so the two stay impossible to drift apart.
+  const fromSnapshot = src.mode === SNAPSHOT;
+  const entrySource = fromSnapshot
+    ? `SELECT e.qty, e.bottles, e.open_ml, e.photo_url, e.location_text
+         FROM submission_entries e
+        WHERE e.item_id = i.id AND e.submission_id = $3`
+    : `SELECT e.qty, e.bottles, e.open_ml, e.photo_url, e.location_text
+         FROM count_entries e
+        WHERE e.item_id = i.id AND e.audit_id = $1 AND e.status = 'active'`;
+  // A cleared submission has nothing to read. Routes stop before they get
+  // here; this makes the fallback empty rather than wrong.
+  const noRows = src.mode === CLEARED;
+  const params = [auditId, await defaultZone()];
+  if (fromSnapshot) params.push(src.submission.id);
+
   const { rows } = await query(
     `SELECT i.id, i.name, i.unit, i.is_liquor, i.bottle_size_ml, i.bottle_unit_size, i.rate,
             i.super_category_id, i.category_id,
@@ -52,22 +76,22 @@ export async function auditItemAggregates(auditId) {
                 COUNT(*) FILTER (WHERE COALESCE(qty,0)=0 AND COALESCE(bottles,0)=0 AND COALESCE(open_ml,0)=0) AS active_zero,
                 COUNT(*) FILTER (WHERE photo_url IS NOT NULL) AS with_photo
            FROM (
-             SELECT ce.qty, ce.bottles, ce.open_ml, ce.photo_url,
+             SELECT src.qty, src.bottles, src.open_ml, src.photo_url,
                     -- Liquor counts in sealed bottles; everything else in its
                     -- own unit. Open ml is NEVER folded in here.
-                    COALESCE(CASE WHEN i.is_liquor THEN ce.bottles ELSE ce.qty END, 0) AS native,
+                    COALESCE(CASE WHEN i.is_liquor THEN src.bottles ELSE src.qty END, 0) AS native,
                     COALESCE(lz.zone, $2) AS zone
-               FROM count_entries ce
+               FROM ( ${entrySource} ) src
                LEFT JOIN location_zones lz
-                      ON lower(btrim(lz.name)) = lower(btrim(COALESCE(ce.location_text, '')))
-              WHERE ce.item_id = i.id AND ce.audit_id = $1 AND ce.status='active'
+                      ON lower(btrim(lz.name)) = lower(btrim(COALESCE(src.location_text, '')))
+              WHERE ${noRows ? 'FALSE' : 'TRUE'}
            ) e
        ) agg ON TRUE
        LEFT JOIN system_stock ss ON ss.item_id = i.id AND ss.audit_id = $1
        LEFT JOIN audit_na na ON na.item_id = i.id AND na.audit_id = $1
       WHERE i.is_active = TRUE
       ORDER BY sc.sort_order NULLS LAST, sc.name, c.name, i.name`,
-    [auditId, await defaultZone()]
+    params
   );
   return rows.map((r) => {
     const physicalQty = r.is_liquor ? Number(r.total_bottles) : Number(r.total_qty);

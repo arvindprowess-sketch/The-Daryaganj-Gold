@@ -6,10 +6,26 @@ import {
 } from '../lib/reports.js';
 import { buildWorkbook, buildPdf } from '../lib/exporters.js';
 import { buildAuditWorkbook } from '../lib/auditWorkbook.js';
+import { auditSource, clearedNotice, CLEARED } from '../lib/submissions.js';
 
 const router = Router();
 // Reports are ADMIN ONLY (auditors have no reports, no rates).
 router.use(requireAuth, requireRole('admin'));
+
+// ── Cleared submissions stop here ───────────────────────────────────────────
+// One guard for every report, because every report route carries :auditId.
+// If the admin cleared the submitted data there is nothing to report on, and
+// rendering the table anyway would print each item as a 100% shortage — a
+// finding that never happened. Say what was cleared instead.
+//
+// 409 rather than 200, so an Excel or PDF download surfaces the message
+// instead of saving a file full of zeroes.
+router.param('auditId', async (req, res, next, auditId) => {
+  const src = await auditSource(auditId);
+  if (src.mode !== CLEARED) { req.auditSource = src; return next(); }
+  const notice = clearedNotice(src.cleared);
+  res.status(409).json({ error: notice.message, cleared: notice });
+});
 
 const LIQUOR_FOOTNOTE = 'Open bottle quantities are recorded by visual estimation.';
 const n = (v) => (v == null ? '' : v);

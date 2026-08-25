@@ -66,16 +66,25 @@ router.post('/item-master/delete-all', async (req, res) => {
   const { rows: chk } = await query(
     `SELECT (SELECT count(*)::int FROM count_entries WHERE NOT is_demo) AS entries,
             (SELECT count(DISTINCT audit_id)::int FROM count_entries WHERE NOT is_demo) AS audits,
+            -- A submitted snapshot is audit history in its own right: an admin
+            -- can clear the working entries and the snapshot still references
+            -- these items.
+            (SELECT count(*)::int FROM submission_entries se
+               JOIN audit_submissions sub ON sub.id = se.submission_id
+              WHERE NOT sub.is_demo) AS submitted,
             (SELECT count(*)::int FROM items) AS items`
   );
-  const { entries, audits, items } = chk[0];
+  const { entries, audits, submitted, items } = chk[0];
 
-  // Blocked whenever ANY count entry references any item — deleting would
-  // orphan historical audit records.
-  if (entries > 0) {
+  // Blocked whenever ANY count entry or submitted snapshot references any
+  // item — deleting would orphan historical audit records.
+  if (entries > 0 || submitted > 0) {
+    const parts = [];
+    if (entries > 0) parts.push(`${entries.toLocaleString()} count entries across ${audits} audit(s)`);
+    if (submitted > 0) parts.push(`${submitted.toLocaleString()} submitted rows`);
     return res.status(409).json({
-      error: `Cannot delete. ${entries.toLocaleString()} count entries exist across ${audits} audit(s). Delete or archive those audits first.`,
-      entries, audits, blocked: true,
+      error: `Cannot delete. ${parts.join(' and ')} exist. Delete or archive those audits first.`,
+      entries, audits, submitted, blocked: true,
     });
   }
   if (!confirmPhrase(req, res, PHRASES.deleteAllItems)) return;
@@ -87,6 +96,8 @@ router.post('/item-master/delete-all', async (req, res) => {
   const deleted = await withTransaction(async (c) => {
     // Demo entries are sample data, not history — cleared with the master.
     await c.query('DELETE FROM count_entries WHERE is_demo');
+    // Demo snapshots go with the demo entries they were taken from.
+    await c.query(`DELETE FROM audit_submissions WHERE is_demo`);
     await c.query('DELETE FROM audit_na');
     await c.query('DELETE FROM system_stock');
     await c.query('DELETE FROM photo_reviews');
@@ -111,8 +122,12 @@ router.delete('/items/:id', requireIntParams('id'), async (req, res) => {
   const { rows: it } = await query('SELECT id, name, photo_url, is_active FROM items WHERE id=$1', [id]);
   if (!it[0]) return res.status(404).json({ error: 'Item not found' });
 
+  // History is "does anything still point at this item" — a submitted snapshot
+  // counts, because an admin can clear the working entries while the snapshot
+  // stands. Without this the hard delete below fails on a foreign key.
   const { rows: cnt } = await query(
-    'SELECT count(*)::int AS n FROM count_entries WHERE item_id=$1', [id]);
+    `SELECT (SELECT count(*)::int FROM count_entries WHERE item_id=$1)
+          + (SELECT count(*)::int FROM submission_entries WHERE item_id=$1) AS n`, [id]);
 
   if (cnt[0].n > 0) {
     // Soft delete — the item has history and must stay referenceable.
@@ -240,10 +255,11 @@ export async function demoCounts() {
             (SELECT count(*)::int FROM stores WHERE is_demo) AS stores,
             (SELECT count(*)::int FROM items WHERE is_demo) AS items,
             (SELECT count(*)::int FROM audits WHERE is_demo) AS audits,
-            (SELECT count(*)::int FROM count_entries WHERE is_demo) AS entries`
+            (SELECT count(*)::int FROM count_entries WHERE is_demo) AS entries,
+            (SELECT count(*)::int FROM audit_submissions WHERE is_demo) AS submissions`
   );
   const c = rows[0];
-  return { ...c, present: c.users + c.stores + c.items + c.audits + c.entries > 0 };
+  return { ...c, present: c.users + c.stores + c.items + c.audits + c.entries + c.submissions > 0 };
 }
 
 router.get('/demo', async (_req, res) => {
@@ -264,6 +280,8 @@ router.post('/demo/delete', async (req, res) => {
   const removed = await withTransaction(async (c) => {
     // Order matters for foreign keys.
     const entries = (await c.query('DELETE FROM count_entries WHERE is_demo')).rowCount;
+    // submission_entries cascade from the submission row.
+    await c.query('DELETE FROM audit_submissions WHERE is_demo');
     await c.query('DELETE FROM audit_na WHERE audit_id IN (SELECT id FROM audits WHERE is_demo)');
     await c.query('DELETE FROM system_stock WHERE audit_id IN (SELECT id FROM audits WHERE is_demo)');
     await c.query('DELETE FROM system_stock_imports WHERE audit_id IN (SELECT id FROM audits WHERE is_demo)');
@@ -276,7 +294,8 @@ router.post('/demo/delete', async (req, res) => {
     await c.query('DELETE FROM audit_na WHERE item_id IN (SELECT id FROM items WHERE is_demo)');
     const items = (await c.query(
       `DELETE FROM items WHERE is_demo
-         AND NOT EXISTS (SELECT 1 FROM count_entries ce WHERE ce.item_id = items.id)`)).rowCount;
+         AND NOT EXISTS (SELECT 1 FROM count_entries ce WHERE ce.item_id = items.id)
+         AND NOT EXISTS (SELECT 1 FROM submission_entries se WHERE se.item_id = items.id)`)).rowCount;
     // Demo items that still carry real history are deactivated, not removed.
     const deactivated = (await c.query(
       `UPDATE items SET is_active=FALSE, deactivated_at=now(), deactivated_by=$1

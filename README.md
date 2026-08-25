@@ -350,6 +350,78 @@ to drop:
 - Master photo URLs carry a `photo_version` cache-buster so a new image shows
   immediately instead of serving a stale cached file.
 
+## Two records: the count, and the submission
+
+There are two records of a count and they are deliberately not the same thing.
+Reports read the second one, so an admin can clear what was **submitted**
+without destroying what was **counted**.
+
+| | `count_entries` | `submission_entries` |
+| --- | --- | --- |
+| Whose | the auditor's working record | what the reports read |
+| Written by | the auditor, append-only | the act of submitting |
+| Voids | kept, struck through, excluded from totals | never copied — a voided entry was withdrawn |
+| Cleared by the admin | **never** | yes, that is the point |
+
+**Submitting takes a snapshot.** Every active entry is copied into
+`submission_entries` under a new `audit_submissions` row. `count_entries` is
+not moved, not modified and not deleted — the copy is a plain
+`INSERT ... SELECT`. Re-submitting creates a **new** submission and marks the
+previous one `replaced`; a submission row is never deleted, so a re-submit and
+an admin clear both stay visible in the history.
+
+**Which record a report reads** is decided by the submission, not by the audit
+status — because clearing puts the audit back to `open` so the auditor can
+send it again, and a report must not then quietly fall back to the live
+entries as though nothing had happened:
+
+| | Reports read |
+| --- | --- |
+| an active submission stands | the snapshot |
+| the last submission was cleared | nothing — they print the explanation |
+| neither | the live entries, with the existing PROVISIONAL banner |
+
+`auditItemAggregates` is the one place physical quantity is read, so switching
+the source there moves all six reports at once and none of them can disagree
+about which numbers they are showing.
+
+### Clear submitted data
+
+On **Audit sessions**, an audit with a standing submission offers *Clear
+submitted data*. Admin only, enforced server-side, behind a typed
+`CLEAR SUBMITTED DATA` confirmation that states exactly what goes:
+
+> This removes the submitted data for M3M — 412 items, submitted 5 Aug 2026,
+> 23:40. The auditor's count entries are not affected and can be submitted
+> again.
+
+It deletes the snapshot rows, marks the submission `cleared` with who and
+when, reopens the audit, and logs the whole thing to the activity log. It does
+**not** touch `count_entries`, the item master or system stock — and the
+photos stay in R2, because they belong to the count entry, not the snapshot.
+
+A cleared audit's reports answer **409 with the explanation**, on screen and on
+download alike. They never render an empty table: with no rows every item would
+read as a 100% shortage, which is a finding that never happened.
+
+> The snapshot copies `photo_url` as well as the quantities. It is not part of
+> the figures — it is there so R6 can still report "counted but no photo" on a
+> submitted audit. Clearing deletes the ROW, never the file.
+
+### Status is the same word on both sides
+
+Both screens read `session_state` from the same query, so an auditor and an
+admin can never hold two different accounts of whether the data exists.
+
+| `session_state` | Admin dashboard | Auditor |
+| --- | --- | --- |
+| `counting` | Counting | Not submitted |
+| `submitted` | Submitted | Submitted 5 Aug 23:40 |
+| `cleared` | Cleared — resubmit pending | Submitted data was cleared by admin — you can submit again |
+
+The auditor's cleared banner names how many of their entries are still there,
+because the one thing they need to know is that nothing they counted was lost.
+
 ## Reports vs the admin working view
 
 - **Reports (the client deliverable) show TOTALS ONLY** — one line per item

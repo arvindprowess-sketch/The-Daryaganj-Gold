@@ -28,6 +28,25 @@ function wrap(fn) {
   return wrapped;
 }
 
+// `router.param` handlers take FOUR arguments (req, res, next, value), so the
+// wrap() above deliberately skips them — and an async param handler that
+// rejects would take the process down exactly like an unwrapped route. Param
+// handlers run before every matching route, so this is the worst place to
+// leave unguarded.
+function wrapParam(fn) {
+  if (typeof fn !== 'function') return fn;
+  return function (req, res, next, value, name) {
+    try {
+      const out = fn.call(this, req, res, next, value, name);
+      if (out && typeof out.then === 'function') out.catch(next);
+      return out;
+    } catch (err) {
+      next(err);
+      return undefined;
+    }
+  };
+}
+
 let patched = false;
 export function enableAsyncRouteSafety() {
   if (patched) return;
@@ -38,6 +57,14 @@ export function enableAsyncRouteSafety() {
     if (typeof original !== 'function') continue;
     proto[method] = function (...args) {
       return original.apply(this, args.map((a) => (typeof a === 'function' ? wrap(a) : a)));
+    };
+  }
+  const originalParam = proto.param;
+  if (typeof originalParam === 'function') {
+    proto.param = function (name, fn) {
+      return typeof fn === 'function'
+        ? originalParam.call(this, name, wrapParam(fn))
+        : originalParam.apply(this, arguments);
     };
   }
 }
