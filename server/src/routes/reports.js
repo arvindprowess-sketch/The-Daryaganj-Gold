@@ -7,6 +7,7 @@ import {
 import { buildWorkbook, buildPdf } from '../lib/exporters.js';
 import { buildAuditWorkbook } from '../lib/auditWorkbook.js';
 import { auditSource, clearedNotice, CLEARED } from '../lib/submissions.js';
+import { reportFields, reportColumns, fieldValue, bucketValue } from '../lib/columns.js';
 
 const router = Router();
 // Reports are ADMIN ONLY (auditors have no reports, no rates).
@@ -30,6 +31,31 @@ router.param('auditId', async (req, res, next, auditId) => {
 const LIQUOR_FOOTNOTE = 'Open bottle quantities are recorded by visual estimation.';
 const n = (v) => (v == null ? '' : v);
 
+// ── The one row builder every report uses ───────────────────────────────────
+// R1, R2, R3 and R4 all print the SAME columns for the same item, so they all
+// go through here. This is what stopped them drifting apart: there is nowhere
+// left for a report to decide for itself what a row looks like.
+//
+// A money column is BLANK when the item has no rate — never 0. On an audit
+// report "priced at zero" and "nobody has priced this yet" must not look the
+// same.
+const rowFor = (fields) => (r) => fields.map((f) => {
+  const v = fieldValue(r, f);
+  if (f.money) return v == null ? '' : v;
+  if (f.key === 'remarks' && r.not_counted) return `${r.remarks} · NOT COUNTED`;
+  return v == null ? '' : v;
+});
+
+// A subtotal carries the same figures in the same columns, so a column reads
+// straight down from an item line to the grand total. Anything that cannot be
+// summed is left blank rather than repeated misleadingly.
+const subtotalFor = (fields) => (label, b, labelKey = 'category') => fields.map((f) => {
+  if (f.key === labelKey) return label;
+  if (f.key === 'remarks') return `${b.items} items`;
+  const v = bucketValue(b, f);
+  return v == null ? '' : v;
+});
+
 // Reports given to the client show TOTALS ONLY — one line per item. The
 // per-entry breakdown lives on the admin count screen, never in a report.
 
@@ -47,6 +73,21 @@ async function sendPdf(res, filename, doc) {
 }
 const slug = (s) => String(s || 'store').replace(/[^A-Za-z0-9]+/g, '_').replace(/^_|_$/g, '');
 
+// Column widths for the standard set on A4 landscape. The location columns
+// share what is left over, so adding a location narrows them rather than
+// pushing the quantity columns off the page.
+function pdfWidths(locations = [], { withSystem = false } = {}) {
+  const locW = Math.max(24, Math.min(46, Math.round(
+    (withSystem ? 150 : 230) / Math.max(1, locations.length))));
+  return [
+    22, 30, withSystem ? 58 : 70, withSystem ? 58 : 70, withSystem ? 88 : 128,
+    withSystem ? 44 : 56, 34,
+    ...locations.map(() => locW),
+    40, 40, 50, withSystem ? 40 : 52,
+    ...(withSystem ? [36, 34, 44, 44, 36, 44, 40] : []),
+  ];
+}
+
 // A DATE column comes back from pg as a Date. Reports want the plain calendar
 // day, not "Wed Aug 05 2026 00:00:00 GMT+0000".
 const ymd = (v) => {
@@ -56,104 +97,97 @@ const ymd = (v) => {
 };
 
 // ── R1 Physical Stock Summary ────────────────────────────────────────────────
+// The standard columns, grouped Super Category › Category, with a Value column
+// and the subtotals kept.
 router.get('/physical-summary/:auditId', async (req, res) => {
-  const audit = await getAudit(req.params.auditId);
-  if (!audit) return res.status(404).json({ error: 'Not found' });
   const data = await physicalSummary(req.params.auditId);
+  const { audit, locations, groups, grand } = data;
+  if (!audit) return res.status(404).json({ error: 'Not found' });
   const format = req.query.format;
-  const sub = `${audit.store_name} — ${audit.audit_date}`;
   const fname = `R1_physical_summary_${slug(audit.store_name)}`;
-  // Grouped super category → category, with a subtotal per category, a subtotal
-  // per super category, and a grand total.
-  const cols = ['Super Category', 'Category', 'Items', 'Quantity', 'Value'];
-  const groupedAoa = () => {
-    const aoa = [cols];
-    for (const g of data.groups) {
-      for (const c of g.categories) {
-        aoa.push([g.super_category, c.category, c.items, c.qty, Number(c.value.toFixed(2))]);
-      }
-      aoa.push([`${g.super_category} — SUBTOTAL`, '', g.items, g.qty, Number(g.value.toFixed(2))]);
-      aoa.push([]);
-    }
-    aoa.push(['GRAND TOTAL', '', data.grand.items, data.grand.qty, Number(data.grand.value.toFixed(2))]);
-    return aoa;
-  };
+
+  // R1 summarises by category, so it drops the per-item identity columns and
+  // adds Value. The location columns and the three quantity columns are the
+  // same ones, in the same order, as every other report.
+  const cols = ['Super Category', 'Category', 'Items',
+                ...locations.map((l) => l.name),
+                'Total (native unit)', 'ML / Loose Qty (Open Bottle, ml)',
+                'Final Total Qty (ML / GM / KG / Count)', 'Value'];
+  const line = (label, cat, b) => [label, cat, b.items,
+    ...locations.map((_, i2) => b.by_location?.[i2] ?? 0),
+    b.location_total, b.loose_ml, b.final_total_qty, b.value];
+
+  const rowsOut = [];
+  for (const g of groups) {
+    for (const c of g.categories) rowsOut.push(line(g.super_category, c.category, c));
+    rowsOut.push(line(`${g.super_category} — SUBTOTAL`, '', g));
+    rowsOut.push([]);
+  }
+  rowsOut.push(line('GRAND TOTAL', '', grand));
 
   if (format === 'xlsx') {
-    return sendXlsx(res, fname, [{ name: 'Physical Summary', aoa: groupedAoa() }]);
+    return sendXlsx(res, fname, [{ name: 'Physical Summary', aoa: [cols, ...rowsOut] }]);
   }
   if (format === 'pdf') {
+    const w = [72, 72, 30, ...locations.map(() => 40), 52, 46, 58, 60];
     return sendPdf(res, fname, {
-      title: 'R1 — Physical Stock Summary', subtitle: sub,
-      blocks: [
-        ...data.groups.map((g) => ({
-          title: g.super_category,
-          columns: ['Category', 'Items', 'Quantity', 'Value'],
-          rows: [
-            ...g.categories.map((c) => [c.category, c.items, c.qty, c.value.toFixed(2)]),
-            ['SUBTOTAL', g.items, g.qty, g.value.toFixed(2)],
-          ],
-        })),
-        { title: 'Grand total', columns: ['Items', 'Quantity', 'Value'],
-          rows: [[data.grand.items, data.grand.qty, data.grand.value.toFixed(2)]] },
-      ],
+      title: 'R1 — Physical Stock Summary',
+      subtitle: `${audit.store_name} — ${ymd(audit.audit_date)}`,
+      blocks: [{ title: 'By super category and category', columns: cols, widths: w,
+                 rows: rowsOut.filter((r) => r.length) }],
     });
   }
-  res.json({ audit, ...data });
+  res.json({ audit, locations, groups, grand, categories: data.categories, columns: cols });
 });
 
-// ── R2 Item Detail — TOTALS ONLY, with Section and Category ─────────────────
+// ── R2 Item Detail — TOTALS ONLY, on the standard columns ────────────────────
 router.get('/item-detail/:auditId', async (req, res) => {
-  const audit = await getAudit(req.params.auditId);
+  const { audit, locations, rows } = await itemDetailTotals(req.params.auditId);
   if (!audit) return res.status(404).json({ error: 'Not found' });
-  const rows = await itemDetailTotals(req.params.auditId);
   const format = req.query.format;
   const fname = `R2_item_detail_${slug(audit.store_name)}`;
-  // Standard column order: Super Category | Category | Item Name | Unit | …
-  const cols = ['Super Category', 'Category', 'Item Name', 'Unit', 'Total Qty', 'Open (ml)'];
-  const toRow = (r) => [
-    r.super_category, r.category, r.name, r.unit,
-    r.not_applicable ? 'N/A' : (r.is_liquor ? r.total_bottles : r.total_qty),
-    r.is_liquor ? r.total_open_ml : '',
-  ];
+  const fields = reportFields(locations);
+  const cols = fields.map((f) => f.label);
+  const toRow = rowFor(fields);
+
   if (format === 'xlsx') {
     return sendXlsx(res, fname, [{ name: 'Item Detail', aoa: [cols, ...rows.map(toRow)] }]);
   }
   if (format === 'pdf') {
     return sendPdf(res, fname, {
-      title: 'R2 — Item Detail', subtitle: `${audit.store_name} — ${audit.audit_date}`,
-      blocks: [{ title: 'Totals by item', columns: cols,
-        widths: [90, 90, 140, 70, 60, 50], rows: rows.map(toRow), note: LIQUOR_FOOTNOTE }],
+      title: 'R2 — Item Detail', subtitle: `${audit.store_name} — ${ymd(audit.audit_date)}`,
+      blocks: [{ title: 'Totals by item', columns: cols, widths: pdfWidths(locations),
+                 rows: rows.map(toRow), note: LIQUOR_FOOTNOTE }],
     });
   }
-  res.json({ audit, rows });
+  res.json({ audit, locations, rows, columns: cols });
 });
 
-// ── R3 Liquor Report ─────────────────────────────────────────────────────────
+// ── R3 Liquor Report — the standard columns, liquor only ────────────────────
+// Sealed bottles and open ml stay SEPARATE and are never combined: the
+// location columns carry sealed bottles, open ml has its own column.
 router.get('/liquor/:auditId', async (req, res) => {
-  const audit = await getAudit(req.params.auditId);
+  const { audit, locations, rows, footnote } = await liquorReport(req.params.auditId);
   if (!audit) return res.status(404).json({ error: 'Not found' });
-  const data = await liquorReport(req.params.auditId);
   const format = req.query.format;
   const fname = `R3_liquor_${slug(audit.store_name)}`;
-  // Structure unchanged — bottles and ml stay in separate columns and are
-  // never combined. Super category / category added for consistency.
-  const cols = ['Super Category', 'Category', 'Brand', 'Unit', 'Sealed Bottles', 'Open (ml)'];
-  const toRow = (d) => [d.super_category, d.category, d.brand, d.unit, d.sealed_bottles, d.open_ml];
+  const fields = reportFields(locations);
+  const cols = fields.map((f) => f.label);
+  const toRow = rowFor(fields);
+
   if (format === 'xlsx') {
     return sendXlsx(res, fname, [{
-      name: 'Liquor', aoa: [cols, ...data.map(toRow), [], ['Note:', LIQUOR_FOOTNOTE]],
+      name: 'Liquor', aoa: [cols, ...rows.map(toRow), [], ['Note:', footnote]],
     }]);
   }
   if (format === 'pdf') {
     return sendPdf(res, fname, {
-      title: 'R3 — Liquor Report', subtitle: `${audit.store_name} — ${audit.audit_date}`,
-      blocks: [{ title: 'Liquor', columns: cols,
-        widths: [80, 80, 160, 70, 70, 63],
-        rows: data.map(toRow), note: LIQUOR_FOOTNOTE }],
+      title: 'R3 — Liquor Report', subtitle: `${audit.store_name} — ${ymd(audit.audit_date)}`,
+      blocks: [{ title: 'Liquor', columns: cols, widths: pdfWidths(locations),
+                 rows: rows.map(toRow), note: footnote }],
     });
   }
-  res.json({ audit, rows: data, footnote: LIQUOR_FOOTNOTE });
+  res.json({ audit, locations, rows, columns: cols, footnote });
 });
 
 // ── R4 Variance Report ───────────────────────────────────────────────────────
@@ -211,6 +245,11 @@ router.get('/variance/:auditId', async (req, res) => {
         ? `${totals.no_system_data} item(s) shown as NO SYSTEM DATA and excluded from variance totals` : null,
       totals.no_rate > 0
         ? `${totals.no_rate} item(s) have no rate — value figures exclude them` : null,
+      // Value is Final Total Qty × Rate, and Final Total Qty is in the BASE
+      // measure. For a packed item the rate must therefore be per ml / per gm.
+      totals.rate_per_base_unit > 0
+        ? `${totals.rate_per_base_unit} priced item(s) have a pack size above 1 — their value columns are Final Total Qty × Rate, so the rate must be per ML/GM, not per pack`
+        : null,
       totals.not_counted > 0
         ? `${totals.not_counted} item(s) marked NOT COUNTED — system stock exists but no count was recorded; shown as a full shortage` : null,
     ] : ['Physical count only — no system stock imported for this audit.']),
@@ -228,14 +267,11 @@ router.get('/variance/:auditId', async (req, res) => {
   // One column per LOCATION, read from the locations table in sort order —
   // never hardcoded, so renaming a place or adding a sixth changes the report
   // with no code change. The same columns appear for every store.
-  const BASE_COLS = ['S.No.', 'LOC', 'Super Category', 'Category', 'Item Name', 'Unit',
-                     'Bottle/Unit Size (ml)',
-                     ...locations.map((l) => l.name),
-                     'Total (native unit)',
-                     'ML / Loose Qty (Open Bottle, ml)',
-                     'Final Total Qty (ML / GM / KG / Count)', 'Remarks'];
-  const SYSTEM_COLS = ['System Qty', 'Rate', 'Value', 'Variance', 'Variance Value'];
-  const cols = withSystem ? [...BASE_COLS, ...SYSTEM_COLS] : BASE_COLS;
+  // The SAME definition R1, R2 and R3 use. With system stock the seven system
+  // columns are appended and nothing about the base columns changes — Unit,
+  // Bottle/Unit Size and the location columns all stay exactly where they are.
+  const fields = reportFields(locations, { withSystem });
+  const cols = fields.map((f) => f.label);
 
   if (format === 'xlsx') {
     return sendXlsx(res, fname, buildAuditWorkbook({
@@ -248,38 +284,11 @@ router.get('/variance/:auditId', async (req, res) => {
     // 13 (or 18) columns will not fit A4 portrait legibly, so the PDF carries
     // the identifying columns plus the quantity columns; the Excel export is
     // the full-fidelity deliverable.
-    // A5 landscape has room for a fixed set of columns plus the locations, so
-    // the location columns share whatever width is left rather than pushing
-    // the quantity columns off the page.
-    const locW = Math.max(26, Math.min(44, Math.round(
-      (withSystem ? 170 : 250) / Math.max(1, locations.length))));
-    const pdfCols = [
-      'S.No.', 'Item Name', 'Unit', 'Size',
-      ...locations.map((l) => l.name),
-      'Total', 'Loose ML', 'Final Total', 'Remarks',
-      ...(withSystem ? ['System', 'Variance', 'Var Value'] : []),
-    ];
-    const pdfWidths = [
-      withSystem ? 26 : 30, withSystem ? 96 : 140, withSystem ? 50 : 62, 32,
-      ...locations.map(() => locW),
-      38, 38, 48, 42,
-      ...(withSystem ? [38, 38, 46] : []),
-    ];
-    const pdfRow = (d) => {
-      const base = [d.s_no, d.name, d.unit, d.bottle_unit_size,
-                    ...locations.map((_, i) => d.by_location?.[i] ?? 0),
-                    d.location_total, d.loose_ml, d.final_total_qty,
-                    d.not_counted ? `${d.remarks} · NOT COUNTED` : d.remarks];
-      return withSystem
-        ? [...base, n(d.system_qty), n(d.variance), n(d.variance_value)]
-        : base;
-    };
-    const pdfSubtotal = (label, b) => {
-      const base = ['', label, '', '',
-                    ...locations.map((_, i) => b.by_location?.[i] ?? 0),
-                    b.location_total, b.loose_ml, b.final_total_qty, `${b.items} items`];
-      return withSystem ? [...base, b.system_qty, b.variance, n(b.variance_value)] : base;
-    };
+    const widths = pdfWidths(locations, { withSystem });
+    const pdfRow = rowFor(fields);
+    const pdfSubtotal = (label, b, key) => subtotalFor(fields)(label, b, key);
+    const pdfCols = cols;
+    const pdfWidthsArr = widths;
     return sendPdf(res, fname, {
       title: `R4 — ${withSystem ? 'Variance Report' : 'Physical Audit Report'}${provisional ? ' (PROVISIONAL)' : ''}`,
       subtitle: `${audit.store_name} — ${ymd(audit.audit_date)}\n${headerLines.join('\n')}`,
@@ -289,24 +298,24 @@ router.get('/variance/:auditId', async (req, res) => {
           ? [...groups.flatMap((g) => [
               ...g.categories.map((c) => ({
                 title: `${g.super_category} › ${c.category}`,
-                columns: pdfCols, widths: pdfWidths,
-                rows: [...c.rows.map(pdfRow), pdfSubtotal('SUBTOTAL', c)],
+                columns: pdfCols, widths: pdfWidthsArr,
+                rows: [...c.rows.map(pdfRow), pdfSubtotal('SUBTOTAL', c, 'category')],
               })),
               { title: `${g.super_category} — SUPER CATEGORY SUBTOTAL`,
-                columns: pdfCols, widths: pdfWidths, rows: [pdfSubtotal('SUBTOTAL', g)] },
+                columns: pdfCols, widths: pdfWidthsArr, rows: [pdfSubtotal('SUBTOTAL', g, 'super_category')] },
             ]),
-            { title: 'GRAND TOTAL', columns: pdfCols, widths: pdfWidths,
-              rows: [pdfSubtotal('GRAND TOTAL', grand)] }]
+            { title: 'GRAND TOTAL', columns: pdfCols, widths: pdfWidthsArr,
+              rows: [pdfSubtotal('GRAND TOTAL', { ...grand, items: rows.length }, 'super_category')] }]
           : [{ title: withSystem ? 'Variance (Physical − System)' : 'Physical count',
-               columns: pdfCols, widths: pdfWidths, rows: rows.map(pdfRow) },
-             { title: 'TOTAL', columns: pdfCols, widths: pdfWidths,
-               rows: [pdfSubtotal('TOTAL', { ...totals, items: rows.length })] }]),
+               columns: pdfCols, widths: pdfWidthsArr, rows: rows.map(pdfRow) },
+             { title: 'TOTAL', columns: pdfCols, widths: pdfWidthsArr,
+               rows: [pdfSubtotal('TOTAL', { ...totals, items: rows.length }, 'super_category')] }]),
         // Summary report, mirroring the Excel second sheet: the same seven
         // columns, the super category printed once per block, one Grand Total.
         { title: 'Summary report — by category',
           columns: ['Super Category', 'Category', ...locations.map((l) => l.name),
                     'Total', 'ML / Loose', 'Final Total'],
-          widths: [78, 78, ...locations.map(() => locW), 62, 58, 70],
+          widths: [78, 78, ...locations.map(() => Math.max(30, Math.round(200 / Math.max(1, locations.length)))), 62, 58, 70],
           rows: [
             ...summary.superCategories.flatMap((g) =>
               summary.categories

@@ -54,7 +54,9 @@ function layout(locationCount) {
     loose: total + 1,
     final: total + 2,
     remarks: total + 3,
-    firstSystem: total + 4,   // System Qty · Rate · Value · Variance · Var Value
+    // System Qty · Rate · Physical Value · System Value · Variance ·
+    // Variance Value · Status
+    firstSystem: total + 4,
   };
 }
 
@@ -97,8 +99,12 @@ export function buildAuditWorkbook({
   // total, loose ml, the final total — and with system stock, System Qty,
   // Value, Variance and Variance Value. Rate is deliberately absent; summing a
   // price list is meaningless.
+  // Rate is deliberately absent; summing a price list is meaningless. Status
+  // is text. Everything else totals.
   const sumCols = [...locCols, L.total, L.loose, L.final,
-    ...(withSystem ? [L.firstSystem, L.firstSystem + 2, L.firstSystem + 3, L.firstSystem + 4] : [])];
+    ...(withSystem
+      ? [L.firstSystem, L.firstSystem + 2, L.firstSystem + 3, L.firstSystem + 4, L.firstSystem + 5]
+      : [])];
   // The Total cell adds its own row's location columns, so the sheet shows the
   // reconciliation rather than asking the reader to take it on trust.
   const locRange = (r) => `${colLetter(L.firstLoc)}${r}:${colLetter(L.lastLoc)}${r}`;
@@ -132,8 +138,11 @@ export function buildAuditWorkbook({
     if (li !== -1) return b.by_location?.[li];
     return {
       [L.total]: b.location_total, [L.loose]: b.loose_ml, [L.final]: b.final_total_qty,
-      [L.firstSystem]: b.system_qty, [L.firstSystem + 2]: b.physical_value,
-      [L.firstSystem + 3]: b.variance, [L.firstSystem + 4]: b.variance_value,
+      [L.firstSystem]: b.system_qty,
+      [L.firstSystem + 2]: b.physical_value,
+      [L.firstSystem + 3]: b.system_value,
+      [L.firstSystem + 4]: b.variance,
+      [L.firstSystem + 5]: b.variance_value,
     }[c];
   };
   const totalFor = figure(totals);
@@ -164,9 +173,11 @@ export function buildAuditWorkbook({
       d.not_counted ? `${d.remarks} · NOT COUNTED` : d.remarks,
     ];
     if (!withSystem) return base;
+    // A money cell is NULL when the item has no rate — never 0. "Priced at
+    // zero" and "nobody has priced this yet" must not look the same.
     const num = (v) => (v == null ? null : Number(v));
     return [...base, num(d.system_qty), num(d.rate), num(d.physical_value),
-            num(d.variance), num(d.variance_value)];
+            num(d.system_value), num(d.variance), num(d.variance_value), d.status];
   };
 
   // A subtotal sums its own block with SUBTOTAL, for the same reason the LIVE

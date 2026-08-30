@@ -140,6 +140,19 @@ export default function Reports() {
         </div>
       )}
 
+      {/* Value is Final Total Qty × Rate, and Final Total Qty is in the BASE
+          measure. For a packed item the rate has to be per ml / per gm, or the
+          money is multiplied by the pack size. Say so rather than letting a
+          reader assume it is per pack. */}
+      {report === 'variance' && loadedReport === 'variance' && data?.totals?.rate_per_base_unit > 0 && (
+        <div className="mb-4 rounded-xl border-2 border-amber-300 bg-amber-50 px-4 py-3 text-amber-900">
+          <span className="font-bold">{data.totals.rate_per_base_unit} priced items have a pack size above 1</span>
+          {' '}— their value columns are <span className="font-mono">Final Total Qty × Rate</span>, so the rate
+          must be per ML/GM, not per pack.{' '}
+          <Link className="underline font-medium" to="/admin/items">Check rates in the item master</Link>
+        </div>
+      )}
+
       {/* Case (c): the system says stock is there and nobody counted it. Each
           one is a full shortage that has not been looked at. */}
       {report === 'variance' && loadedReport === 'variance' && data?.totals?.not_counted > 0 && (
@@ -370,47 +383,55 @@ function ReportView({ report, data, grouped }) {
   }
   if (data.error) return <p className="text-red-600">{data.error}</p>;
 
+  // ── R1 / R2 / R3 ─────────────────────────────────────────────────────────
+  // All three render from `data.columns`, the column list the SERVER built
+  // from the shared definition, so the screen cannot drift from the export the
+  // way these reports drifted from each other before.
+  const serverCols = data.columns || [];
+  const rightAligned = (label) => !['S.No.', 'LOC', 'Super Category', 'Category',
+    'Item Name', 'Unit', 'Remarks', 'Status'].includes(label) ? 'right' : '';
+
   // R1 — grouped super category → category, with a subtotal per category, a
   // subtotal per super category, and a grand total.
   if (report === 'physical-summary') {
+    const locs = data.locations || [];
+    const line = (label, cat, b) => [label, cat, b.items,
+      ...locs.map((_, i2) => b.by_location?.[i2] ?? 0),
+      b.location_total, b.loose_ml, b.final_total_qty, money(b.value)];
     return (
       <div className="space-y-6">
         {data.groups.map((g) => (
           <div key={g.super_category}>
             <h3 className="font-bold mb-2">{g.super_category}</h3>
-            <Table cols={['Category', 'Items', 'Quantity', 'Value']} rows={[
-              ...g.categories.map((c) => [c.category, c.items, c.qty, c.value.toFixed(2)]),
-              ['SUBTOTAL', g.items, g.qty, g.value.toFixed(2)],
-            ]} />
+            <Table cols={serverCols} align={serverCols.map(rightAligned)}
+              rowClass={(r) => (/SUBTOTAL/.test(String(r[0])) ? 'bg-slate-50 font-semibold' : undefined)}
+              rows={[
+                ...g.categories.map((c) => line(g.super_category, c.category, c)),
+                line(`${g.super_category} — SUBTOTAL`, '', g),
+              ]} />
           </div>
         ))}
-        <div className="rounded-xl bg-slate-100 px-4 py-3 font-bold text-slate-800">
-          Grand total — {data.grand.items} items · quantity {data.grand.qty} · value {data.grand.value.toFixed(2)}
-        </div>
+        <Table cols={serverCols} align={serverCols.map(rightAligned)}
+               rowClass={() => 'bg-slate-100 font-bold'}
+               rows={[line('GRAND TOTAL', '', data.grand)]} />
       </div>
     );
   }
 
   // R2 — one line per item carrying the total. No per-entry lines, no
   // redundant "<item> Total" row.
-  if (report === 'item-detail') {
+  if (report === 'item-detail' || report === 'liquor') {
+    const locs = data.locations || [];
+    const rows = data.rows.map((r) => [
+      r.s_no, r.loc, r.super_category, r.category, r.name, r.unit, r.bottle_unit_size,
+      ...locs.map((_, i2) => r.by_location?.[i2] ?? 0),
+      r.location_total, r.loose_ml, r.final_total_qty,
+      r.not_applicable ? 'N/A' : r.remarks,
+    ]);
     return (
-      <Table cols={['Super Category', 'Category', 'Item Name', 'Unit', 'Total quantity', 'Open (ml)']}
-             rows={data.rows.map((r) => [
-               r.super_category, r.category, r.name, r.unit,
-               r.not_applicable ? 'N/A' : (r.is_liquor ? r.total_bottles : r.total_qty),
-               r.is_liquor ? r.total_open_ml : '',
-             ])} />
-    );
-  }
-
-  if (report === 'liquor') {
-    return (
-      <div>
-        <Table cols={['Super Category', 'Category', 'Brand', 'Unit', 'Sealed bottles', 'Open (ml)']}
-               rows={data.rows.map((r) => [r.super_category, r.category, r.brand, r.unit,
-                 r.sealed_bottles, r.open_ml])} />
-        <p className="text-xs text-slate-500 mt-2 italic">{data.footnote}</p>
+      <div className="overflow-x-auto">
+        <Table cols={serverCols} align={serverCols.map(rightAligned)} rows={rows} />
+        {data.footnote && <p className="text-xs text-slate-500 mt-2 italic">{data.footnote}</p>}
       </div>
     );
   }
@@ -439,26 +460,32 @@ function ReportView({ report, data, grouped }) {
       ['bottle_unit_size', 'Bottle/Unit Size (ml)', 'right'],
       ...locations.map((l, i) => [`loc:${i}`, l.name, 'right']),
       ['location_total', 'Total (native unit)', 'right'],
-      ['loose_ml', 'ML / Loose Qty', 'right'],
-      ['final_total_qty', 'Final Total Qty', 'right'],
+      ['loose_ml', 'ML / Loose Qty (Open Bottle, ml)', 'right'],
+      ['final_total_qty', 'Final Total Qty (ML / GM / KG / Count)', 'right'],
       ['remarks', 'Remarks', ''],
     ];
     const SYSTEM = [
       ['system_qty', 'System Qty', 'right'],
       ['rate', 'Rate', 'right'],
-      ['physical_value', 'Value', 'right'],
+      ['physical_value', 'Physical Value', 'right'],
+      ['system_value', 'System Value', 'right'],
       ['variance', 'Variance', 'right'],
       ['variance_value', 'Variance Value', 'right'],
+      ['status', 'Status', ''],
     ];
     const spec = withSystem ? [...BASE, ...SYSTEM] : BASE;
-    const cols = spec.map(([, label]) => label);
+    // Labels come from the SERVER's shared definition whenever it sent them,
+    // so a wording change lands on the screen and in the export together —
+    // that divergence is exactly how these reports drifted apart before.
+    const cols = (data.columns && data.columns.length === spec.length)
+      ? data.columns : spec.map(([, label]) => label);
     const align = spec.map(([, , a]) => a);
 
     // Quantities print as given; money is formatted; a missing figure is '—',
     // never 0.
     const cell = (r, key) => {
       if (key.startsWith('loc:')) return r.by_location?.[Number(key.slice(4))] ?? 0;
-      if (key === 'rate' || key === 'physical_value' || key === 'variance_value') return money(r[key]);
+      if (['rate', 'physical_value', 'system_value', 'variance_value'].includes(key)) return money(r[key]);
       if (key === 'system_qty' || key === 'variance') return num(r[key]);
       if (key === 'remarks') {
         // NOT COUNTED rides alongside the measurement basis rather than
@@ -481,7 +508,7 @@ function ReportView({ report, data, grouped }) {
         if (key.startsWith('loc:')) return b.by_location?.[Number(key.slice(4))] ?? 0;
         if (['location_total', 'loose_ml',
              'final_total_qty', 'system_qty', 'variance'].includes(key)) return b[key];
-        if (key === 'physical_value' || key === 'variance_value') return money(b[key]);
+        if (['physical_value', 'system_value', 'variance_value'].includes(key)) return money(b[key]);
         if (key === 'remarks') return `${b.items} items`;
         return '';
       });

@@ -48,6 +48,14 @@ async function migrate() {
     }
     const sql = fs.readFileSync(path.join(__dirname, file), 'utf8');
     const client = await pool.connect();
+    // A migration that reports what it is about to change is useless if the
+    // report never reaches the operator. node-postgres swallows NOTICE unless
+    // something listens, and these run on deploy where the log is the only
+    // place anyone will see them.
+    const onNotice = (msg) => {
+      if (msg?.message) console.log(`   │ ${msg.message}`);
+    };
+    client.on('notice', onNotice);
     try {
       await client.query('BEGIN');
       await client.query(sql);
@@ -61,6 +69,7 @@ async function migrate() {
       console.error(`✗ failed ${file}`);
       throw err;
     } finally {
+      client.removeListener('notice', onNotice);
       client.release();
     }
   }

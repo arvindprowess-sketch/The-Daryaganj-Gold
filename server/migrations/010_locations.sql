@@ -40,29 +40,17 @@ CREATE INDEX IF NOT EXISTS idx_count_entries_location ON count_entries (audit_id
 CREATE INDEX IF NOT EXISTS idx_submission_entries_location ON submission_entries (submission_id, location_id);
 
 -- ── Mapping the free text that already exists ──────────────────────────────
--- Two steps, and the order matters.
+-- Matching is on the name, case- and whitespace-insensitive, so "kitchen" and
+-- "Kitchen " both map to Kitchen.
 --
--- STEP 1 creates a location for every distinct value that is not already one.
--- It deliberately does NOT guess: "Bar" is not silently folded into "FOH/Bar"
--- and "Store Room" is not folded into "Store". On an audit trail, a guess that
--- moves a recorded quantity into a place it was not counted is worse than an
--- extra column — the admin can merge them on the Locations screen, having seen
--- what was actually there. Matching is on the name, case- and
--- whitespace-insensitive, so "kitchen" and "Kitchen " do map to Kitchen.
-INSERT INTO locations (name, sort_order, is_active)
-SELECT DISTINCT btrim(ce.location_text),
-       100 + dense_rank() OVER (ORDER BY lower(btrim(ce.location_text)))::int,
-       TRUE
-  FROM count_entries ce
- WHERE COALESCE(btrim(ce.location_text), '') <> ''
-   AND NOT EXISTS (
-     SELECT 1 FROM locations l
-      WHERE lower(btrim(l.name)) = lower(btrim(ce.location_text))
-   )
-ON CONFLICT DO NOTHING;
-
--- STEP 2 attaches every entry to its location. Nothing is dropped: after step 1
--- every non-blank value has a row to point at.
+-- An earlier version of this migration CREATED a location for every value it
+-- did not recognise, so that no entry lost its location. That left the legacy
+-- vocabulary in the auditor's dropdown and as columns on every report.
+--
+-- The list is now fixed at five, so an unrecognised value is REPORTED, never
+-- added. On a database with legacy text this aborts and names the values, so
+-- somebody decides where they belong — silently dropping the location off a
+-- recorded count, or inventing a sixth place, are both worse than stopping.
 UPDATE count_entries ce
    SET location_id = l.id
   FROM locations l
@@ -75,22 +63,24 @@ UPDATE submission_entries se
  WHERE se.location_id IS NULL
    AND lower(btrim(l.name)) = lower(btrim(COALESCE(se.location_text, '')));
 
--- Entries recorded with NO location at all predate the mandatory dropdown.
--- They are given an explicit, visible home rather than being quietly counted
--- into one of the real places or dropped from the report.
-INSERT INTO locations (name, sort_order, is_active) VALUES ('Unspecified', 999, TRUE)
-ON CONFLICT DO NOTHING;
+DO $$
+DECLARE
+  unmatched text;
+  blanks    int;
+BEGIN
+  SELECT string_agg(DISTINCT format('"%s"', btrim(location_text)), ', ')
+    INTO unmatched
+    FROM count_entries
+   WHERE location_id IS NULL AND COALESCE(btrim(location_text), '') <> '';
 
-UPDATE count_entries
-   SET location_id = (SELECT id FROM locations WHERE lower(btrim(name)) = 'unspecified')
- WHERE location_id IS NULL;
+  SELECT count(*) INTO blanks
+    FROM count_entries
+   WHERE location_id IS NULL AND COALESCE(btrim(location_text), '') = '';
 
-UPDATE submission_entries
-   SET location_id = (SELECT id FROM locations WHERE lower(btrim(name)) = 'unspecified')
- WHERE location_id IS NULL;
-
--- Deactivate 'Unspecified' when nothing needed it, so a clean database does not
--- carry a location that exists only for history.
-UPDATE locations SET is_active = FALSE
- WHERE lower(btrim(name)) = 'unspecified'
-   AND NOT EXISTS (SELECT 1 FROM count_entries ce WHERE ce.location_id = locations.id);
+  IF unmatched IS NOT NULL OR blanks > 0 THEN
+    RAISE EXCEPTION
+      'Count entries reference locations that are not in the list: %. % entries have no location at all. %',
+      COALESCE(unmatched, '(none)'), blanks,
+      'Rename them to one of Kitchen / FOH/Bar / Store / L-4 / L-17, or clear those entries, then re-run. Nothing has been created.';
+  END IF;
+END $$;

@@ -458,6 +458,38 @@ Super Category | Category | Item Name | Unit | ... figures ...
   multiple entries, zero-quantity entries, items counted without a photo, items
   with no system figure, and **items with system stock that were never counted**
 
+### One column definition, shared
+
+R1, R2, R3 and R4 each used to build their own columns, and they drifted: R4
+grew the per-location columns while R3 was still returning six fields. Four
+reports of the same audit disagreeing about what a row looks like is a defect
+in an audit product — a reader cannot reconcile one against another.
+
+`server/src/lib/columns.js` is now the single definition. Every report, every
+Excel sheet and every PDF reads from it:
+
+```
+S.No. | LOC | Super Category | Category | Item Name | Unit |
+Bottle/Unit Size (ml) | Kitchen | FOH/Bar | Store | L-4 | L-17 |
+Total (native unit) | ML / Loose Qty (Open Bottle, ml) |
+Final Total Qty (ML / GM / KG / Count) | Remarks
+```
+
+The location columns are not written down there — they are spliced in from the
+`locations` table in `sort_order`, so renaming a location renames its column
+everywhere at once. `server/src/lib/reports.js` has the matching single row
+builder, `standardRows()`, on top of `auditItemAggregates()`; no report
+computes a figure for itself any more.
+
+- **R1** summarises by category, so it drops the per-item identity columns and
+  adds **Value**. Category subtotals, super-category subtotals and the grand
+  total are unchanged.
+- **R2** carries the full set, still **totals only** — the per-entry breakdown
+  stays on the admin count screen.
+- **R3** carries the full set for liquor. Sealed bottles ride in the location
+  columns, open ml in its own, **never combined**, and the visual-estimation
+  footnote stays.
+
 ### Variance and value
 
 R4 follows the firm's standard audit report format. The **base columns are
@@ -500,10 +532,31 @@ liquor — so a spirits shelf is never reported in `Nos`.
 > different rows. No rule can reproduce all three, so R4 normalises to the
 > eight bases as specified.
 
-**When system stock exists**, five columns are appended and nothing else about
-the layout changes: `System Qty · Rate · Value · Variance · Variance Value`.
+**When system stock exists**, seven columns are appended and nothing else about
+the layout changes — Unit, Bottle/Unit Size and the location columns all stay
+exactly where they are:
+
+```
+System Qty | Rate | Physical Value | System Value | Variance | Variance Value | Status
+```
+
+```
+Variance       = Final Total Qty − System Qty
+Physical Value = Final Total Qty × Rate
+System Value   = System Qty      × Rate
+Variance Value = Variance        × Rate
+```
+
+Where the rate is null the three value columns are **blank, never zero**.
 Status bands come from the **settings** table (liquor 2%/4%, others 1%/3%
 defaults — not hardcoded).
+
+> **Rates must be per base unit.** Value is `Final Total Qty × Rate`, and Final
+> Total Qty is in ML/GM — so for an item with a pack size above 1 the rate has
+> to be per ml or per gram. A per-pack rate is multiplied by the pack size:
+> 6 tins × 2500 at ₹200 *per tin* reports ₹30,00,000 rather than ₹1,200. R4
+> counts the priced items with a pack size above 1 and says so in the header
+> and on screen, so the figure is never read as per-pack by accident.
 
 **One column per location.** The report carries a column for each location in
 the global list, in `sort_order`, then a Total:
@@ -693,22 +746,32 @@ would silently mis-file a count. They can change it at any time.
 trail records the words as well as the id, so a mapping can always be checked
 against what was actually recorded, and a rename does not rewrite history.
 
-### What the migration did with the free text
+### Five, and only five
 
-Existing entries held typed values. Migration 010 mapped them and **created a
-location for anything that did not match**, rather than guessing:
+Migration 010 originally **created** a location for every legacy free-text
+value it did not recognise, so no entry would lose its location. That was the
+right call at the time, but it left the old vocabulary in the auditor's
+dropdown and as columns on every report.
 
-| Found | Became |
-| --- | --- |
-| `Kitchen` | mapped to the seeded **Kitchen** (case- and space-insensitive) |
-| `Bar`, `Store Room`, `Dry Store`, `Outlet`, `Pastry Section` | **new locations**, appended after the five |
-| no location at all | **Unspecified**, deactivated if nothing needed it |
+Two migrations close that off:
 
-`Bar` is deliberately **not** folded into `FOH/Bar`, nor `Store Room` into
-`Store`. On an audit trail a guess that moves a recorded quantity into a place
-it was not counted is worse than an extra column — the admin can merge them on
-the Locations screen, having seen what was actually there. **No count entry
-lost its location.**
+- **010 can no longer create one.** An unrecognised value is now *reported* —
+  it aborts and names the values, so somebody decides where they belong.
+  Silently dropping the location off a recorded count, or inventing a sixth
+  place, are both worse than stopping.
+- **011 removes the strays.** It prints how many count entries and snapshot
+  rows point at each one *before* changing anything, then deletes them — and
+  **aborts** if any stray holds entries from an audit that was ever delivered
+  (submitted, closed, or carrying a snapshot). Test data on an open,
+  never-submitted audit is safe to drop; a delivered count is a decision, not
+  a default.
+
+It also drops the now-obsolete `location_zones` table from migration 008.
+
+> Migrations run on start, so an abort **stops the deploy**. That is
+> deliberate: it is the loudest way to say "a real count is pointing at a
+> location you asked me to delete". The report reaches the deploy log — the
+> runner listens for `NOTICE`, which node-postgres otherwise swallows.
 
 ## Two-box entry for weights and volumes
 

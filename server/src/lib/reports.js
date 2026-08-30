@@ -3,6 +3,9 @@ import { measurementBasis, finalTotals, BASES } from './measure.js';
 import { auditSource, SNAPSHOT, CLEARED } from './submissions.js';
 import { reportLocations } from './locations.js';
 
+export const LIQUOR_ESTIMATION_NOTE =
+  'Open bottle quantities are recorded by visual estimation.';
+
 // ── Tolerance bands from settings (NOT hardcoded) ────────────────────────────
 export async function getTolerances() {
   const { rows } = await query('SELECT key, value FROM settings');
@@ -146,42 +149,118 @@ export async function auditProgress(auditId) {
   return { total, counted, uncounted: total - counted };
 }
 
+// ── The standard row, shared by R1 / R2 / R3 / R4 ───────────────────────────
+// Every report shows the same columns for the same item. This builds them once
+// from auditItemAggregates, so a figure cannot be computed one way in R2 and
+// another way in R4 — which is exactly how they drifted apart before.
+export function standardRow(i) {
+  const measures = finalTotals({
+    total: i.location_total,
+    size: i.bottle_unit_size,
+    looseMl: i.total_open_ml,
+  });
+  return {
+    item_id: i.id,
+    name: i.name,
+    unit: i.unit,
+    is_liquor: i.is_liquor,
+    super_category: i.super_category_name || '—',
+    category: i.category_name || '—',
+    super_category_id: i.super_category_id,
+    category_id: i.category_id,
+    bottle_unit_size: Number(i.bottle_unit_size ?? 1),
+    by_location: i.by_location,
+    ...measures,
+    // What Final Total Qty is expressed in.
+    remarks: measurementBasis(i.unit),
+    physical_qty: i.physical_qty,
+    // Liquor keeps sealed bottles and open ml SEPARATE — never combined.
+    total_bottles: i.is_liquor ? Number(i.total_bottles) : null,
+    total_open_ml: Number(i.total_open_ml || 0),
+    rate: i.rate == null ? null : Number(i.rate),
+    entry_count: i.entry_count,
+    counted: i.counted,
+    not_applicable: !!i.not_applicable,
+  };
+}
+
+// Every item on this audit, as standard rows, with the report's columns.
+// `loc` is the store code, part of the standard format.
+export async function standardRows(auditId, source = null) {
+  const src = source || await auditSource(auditId);
+  const [items, locations, audit] = await Promise.all([
+    auditItemAggregates(auditId, src),
+    auditLocations(auditId, src),
+    getAudit(auditId),
+  ]);
+  const loc = audit?.store_code || '';
+  const rows = items.map((i) => ({ ...standardRow(i), loc }));
+  rows.forEach((r, n) => { r.s_no = n + 1; });
+  return { rows, locations, audit, source: src };
+}
+
 // ── R1 Physical Stock Summary ───────────────────────────────────────────────
 // Grouped by super category, then category, with a subtotal per category, a
 // subtotal per super category, and a grand total.
 export async function physicalSummary(auditId) {
-  const items = await auditItemAggregates(auditId);
+  const { rows, locations, audit } = await standardRows(auditId);
+  // Only what was actually counted. An item nobody counted has nothing to
+  // summarise, and listing hundreds of zero rows buries the real figures.
+  const counted = rows.filter((r) => r.entry_count > 0 || r.not_applicable);
+
+  const bucket = (extra) => ({
+    ...extra, items: 0,
+    by_location: new Array(locations.length).fill(0),
+    location_total: 0, loose_ml: 0, final_total_qty: 0, value: 0,
+  });
+  const add = (b, r) => {
+    b.items += 1;
+    (r.by_location || []).forEach((v, k) => { b.by_location[k] += Number(v || 0); });
+    b.location_total += Number(r.location_total || 0);
+    b.loose_ml += Number(r.loose_ml || 0);
+    b.final_total_qty += Number(r.final_total_qty || 0);
+    // Value follows the same rule as R4: Final Total Qty × Rate, and an item
+    // with no rate contributes nothing rather than being counted as zero.
+    if (r.rate != null) b.value += Number(r.final_total_qty || 0) * r.rate;
+  };
+  const finish = (b) => ({
+    ...b,
+    by_location: b.by_location.map(round3),
+    location_total: round3(b.location_total),
+    loose_ml: round3(b.loose_ml),
+    final_total_qty: round3(b.final_total_qty),
+    value: round2(b.value),
+  });
 
   const bySuper = new Map();
-  for (const it of items) {
-    const sKey = it.super_category_name || 'Unassigned';
-    const cKey = it.category_name || 'Unassigned';
+  for (const r of counted) {
+    const sKey = r.super_category;
+    const cKey = r.category;
     if (!bySuper.has(sKey)) {
-      bySuper.set(sKey, { super_category: sKey, qty: 0, value: 0, items: 0, categories: new Map() });
+      bySuper.set(sKey, { ...bucket({ super_category: sKey }), categories: new Map() });
     }
-    const s = bySuper.get(sKey);
-    s.qty += it.physical_qty; s.value += it.value || 0; s.items += 1;
-    if (!s.categories.has(cKey)) {
-      s.categories.set(cKey, { super_category: sKey, category: cKey, qty: 0, value: 0, items: 0 });
+    const sg = bySuper.get(sKey);
+    if (!sg.categories.has(cKey)) {
+      sg.categories.set(cKey, bucket({ super_category: sKey, category: cKey }));
     }
-    const c = s.categories.get(cKey);
-    c.qty += it.physical_qty; c.value += it.value || 0; c.items += 1;
+    add(sg, r);
+    add(sg.categories.get(cKey), r);
   }
 
-  const groups = [...bySuper.values()].map((s) => ({
-    super_category: s.super_category,
-    qty: s.qty, value: s.value, items: s.items,
-    categories: [...s.categories.values()],
+  const groups = [...bySuper.values()].map((sg) => ({
+    ...finish(sg),
+    categories: [...sg.categories.values()].map(finish),
   }));
 
-  const grand = groups.reduce(
-    (t, g) => ({ qty: t.qty + g.qty, value: t.value + g.value, items: t.items + g.items }),
-    { qty: 0, value: 0, items: 0 }
-  );
+  const grandBucket = bucket({});
+  for (const r of counted) add(grandBucket, r);
+  const grand = finish(grandBucket);
 
-  // Flat category list retained for callers that want a single table.
-  const categories = groups.flatMap((g) => g.categories);
-  return { groups, categories, superCategories: groups.map(({ categories: _c, ...s }) => s), grand };
+  return {
+    audit, locations, groups, grand,
+    // Flat category list retained for callers that want a single table.
+    categories: groups.flatMap((g) => g.categories),
+  };
 }
 
 // ── R2 Item Detail — REPORT view: TOTALS ONLY ───────────────────────────────
@@ -190,21 +269,13 @@ export async function physicalSummary(auditId) {
 // missing). The per-entry breakdown still exists in the database and on the
 // admin count screen — it simply never appears in a client report.
 export async function itemDetailTotals(auditId) {
-  const items = await auditItemAggregates(auditId);
-  return items
-    .filter((i) => i.entry_count > 0 || i.not_applicable)
-    .map((i) => ({
-      name: i.name,
-      super_category: i.super_category_name || '—',
-      category: i.category_name || '—',
-      // Unit is displayed exactly as the master supplies it.
-      unit: i.unit,
-      is_liquor: i.is_liquor,
-      total_qty: i.is_liquor ? null : Number(i.total_qty),
-      total_bottles: i.is_liquor ? Number(i.total_bottles) : null,
-      total_open_ml: i.is_liquor ? Number(i.total_open_ml) : null,
-      not_applicable: i.not_applicable,
-    }));
+  const { rows, locations, audit } = await standardRows(auditId);
+  // TOTALS ONLY — one line per item. The per-entry breakdown lives on the
+  // admin count screen and never appears in a report given to the client.
+  return {
+    audit, locations,
+    rows: rows.filter((r) => r.entry_count > 0 || r.not_applicable),
+  };
 }
 
 // ── Admin-only working view: every individual entry, including voided ────────
@@ -243,17 +314,15 @@ export async function itemEntriesForAdmin(auditId, itemId = null) {
 
 // R3 — liquor report, bottles and ml separate
 export async function liquorReport(auditId) {
-  const items = (await auditItemAggregates(auditId)).filter((i) => i.is_liquor);
-  // Structure unchanged: bottles and ml stay separate and are never combined.
-  // Super category and category added for consistency with the other reports.
-  return items.map((i) => ({
-    super_category: i.super_category_name || '—',
-    category: i.category_name || '—',
-    brand: i.bottle_size_ml ? `${i.name} ${i.bottle_size_ml}ml` : i.name,
-    unit: i.unit,
-    sealed_bottles: Number(i.total_bottles),
-    open_ml: Number(i.total_open_ml),
-  }));
+  const { rows, locations, audit } = await standardRows(auditId);
+  // Sealed bottles and open ml stay SEPARATE and are never combined. The
+  // location columns count sealed bottles; open ml rides in its own column,
+  // exactly as it does on every other report.
+  return {
+    audit, locations,
+    rows: rows.filter((r) => r.is_liquor),
+    footnote: LIQUOR_ESTIMATION_NOTE,
+  };
 }
 
 // Groups variance rows by super category, then category, with subtotals at
@@ -310,6 +379,9 @@ function finishBucket(b) {
 }
 
 const round2 = (n) => Number(Number(n || 0).toFixed(2));
+// Quantities are NUMERIC(14,3); rounding once here keeps a float sum from
+// printing 1249.9999999999998.
+const round3 = (n) => Number(Number(n || 0).toFixed(3));
 
 // Signed variance as a percentage of the system figure. A system figure of zero
 // with a variance is 100% (all of it is excess); zero against zero is 0%.
@@ -455,8 +527,6 @@ export async function varianceReport(
     // an auditor stood in front of the shelf and entered zero.
     const notCounted = varianceCase(i) === 'not_counted';
     const physical = i.physical_qty;
-    const variance = hasSystem ? physical - system : null;
-    const pct = hasSystem ? pctOf(variance, system) : null;
 
     // ── Rupee impact ───────────────────────────────────────────────────────
     // A variance report is about the money, not just the count. Three separate
@@ -472,33 +542,34 @@ export async function varianceReport(
     const rate = i.rate == null ? null : Number(i.rate);
     const money = (qty) => (rate == null || qty == null ? null : round2(qty * rate));
 
-    // ── Standard audit report figures ──────────────────────────────────────
-    // Physical quantity split by zone, then carried through the one formula
-    // that covers the whole master:
-    //   Final Total Qty = Total (all locations) × Bottle/Unit Size + Loose ML
-    const measures = finalTotals({
-      total: i.location_total,
-      size: i.bottle_unit_size,
-      looseMl: i.total_open_ml,
-    });
+    // The base columns, identical to R1 / R2 / R3.
+    const base = standardRow(i);
+
+    // ── Variance and rupee impact ──────────────────────────────────────────
+    // Both are measured against FINAL TOTAL QTY, not the native count:
+    //
+    //   Variance       = Final Total Qty − System Qty
+    //   Physical Value = Final Total Qty × Rate
+    //   System Value   = System Qty      × Rate
+    //   Variance Value = Variance        × Rate
+    //
+    // A NULL rate is NOT zero. An item priced at ₹0 and an item nobody has
+    // priced yet are different things, and averaging a missing rate in as
+    // zero would understate every total silently, so all three stay null and
+    // the columns print blank.
+    const variance = hasSystem ? round3(base.final_total_qty - system) : null;
+    const pct = hasSystem ? pctOf(variance, system) : null;
 
     return {
-      name: i.name, unit: i.unit, is_liquor: i.is_liquor,
-      by_location: i.by_location,
-      super_category: i.super_category_name || '—', category: i.category_name || '—',
-      super_category_id: i.super_category_id, category_id: i.category_id,
+      ...base,
       rate,
-      bottle_unit_size: Number(i.bottle_unit_size ?? 1),
-      ...measures,
-      // What Final Total Qty is expressed in.
-      remarks: measurementBasis(i.unit),
       physical_qty: physical,
       physical_open_ml: i.is_liquor ? Number(i.total_open_ml) : null,
       system_qty: system,
       system_open_ml: i.is_liquor && hasSystem ? Number(i.system_open_ml ?? 0) : null,
       variance,
       variance_pct: pct,
-      physical_value: money(physical),
+      physical_value: money(base.final_total_qty),
       system_value: money(system),
       variance_value: money(variance),
       counted: i.counted,
@@ -577,6 +648,12 @@ export async function varianceReport(
       // system figure: the header states how many items the value columns
       // cannot speak for.
       no_rate: rows.filter((r) => r.rate == null).length,
+      // Value is Final Total Qty × Rate, and Final Total Qty is in the BASE
+      // measure (ml / gm). For an item whose pack size is greater than 1 the
+      // rate must therefore be per ml or per gram, not per pack — a per-pack
+      // rate is multiplied by the pack size. Counted so the header can say so
+      // rather than letting a reader assume the money is per pack.
+      rate_per_base_unit: rows.filter((r) => r.rate != null && Number(r.bottle_unit_size) > 1).length,
       no_rate_with_system: totals.no_rate,
       physical_qty: totals.physical_qty,
       // Standard-report quantity totals, over every row on the table.
