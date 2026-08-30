@@ -5,8 +5,8 @@
 // millilitres, grams, kilos, or a plain count — rather than in packs. ONE
 // formula covers the whole master:
 //
-//   Store+Outlet Total = Store Room Qty + Outlet Qty
-//   Final Total Qty    = (Store+Outlet Total × Bottle/Unit Size) + Loose ML
+//   Total (native unit) = sum of every location column
+//   Final Total Qty     = (Total × Bottle/Unit Size) + Loose ML
 //
 // A count-based item carries a size of 1, so the multiplier has no effect and
 // the count passes through unchanged. That is why there is no special case for
@@ -66,21 +66,19 @@ const num = (v) => {
 const round3 = (n) => Number(Number(n).toFixed(3));
 
 // The one calculation the whole report is built on.
-//   storeRoom / outlet — native quantity counted in each zone
-//   size               — items.bottle_unit_size (1 for count-based items)
-//   looseMl            — open-bottle millilitres, added AFTER the multiplier
-//                        because it is already in the base measure
-export function finalTotals({ storeRoom, outlet, size, looseMl }) {
-  const storeRoomQty = round3(num(storeRoom));
-  const outletQty = round3(num(outlet));
-  const storeOutletTotal = round3(storeRoomQty + outletQty);
+//   total   — native quantity, the SUM of the per-location columns. Taking it
+//             from the columns rather than aggregating it separately is what
+//             guarantees the row adds up across the page.
+//   size    — items.bottle_unit_size (1 for count-based items)
+//   looseMl — open-bottle millilitres, added AFTER the multiplier because it
+//             is already in the base measure
+export function finalTotals({ total, size, looseMl }) {
+  const locationTotal = round3(num(total));
   const unitSize = num(size) > 0 ? num(size) : 1;
   const loose = round3(num(looseMl));
   return {
-    store_room_qty: storeRoomQty,
-    outlet_qty: outletQty,
-    store_outlet_total: storeOutletTotal,
+    location_total: locationTotal,
     loose_ml: loose,
-    final_total_qty: round3(storeOutletTotal * unitSize + loose),
+    final_total_qty: round3(locationTotal * unitSize + loose),
   };
 }

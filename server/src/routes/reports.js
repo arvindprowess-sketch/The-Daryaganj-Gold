@@ -180,7 +180,7 @@ router.get('/variance/:auditId', async (req, res) => {
   // puts the nil-stock rows back on the table.
   const includeNilStock = req.query.include_nil === '1' || req.query.include_nil === 'true';
   const { rows, groups, grand, summary, provisional, progress, totals, hasSystemStock,
-          provenance, notStocked, nilStock } =
+          provenance, notStocked, nilStock, locations } =
     await varianceReport(req.params.auditId,
       { countedOnly, countFilter, categoryId, superCategoryId, systemData, rateFilter,
         includeNilStock });
@@ -225,9 +225,13 @@ router.get('/variance/:auditId', async (req, res) => {
   // ── Standard audit report column set ─────────────────────────────────────
   // Base columns are always present. The five system columns are appended only
   // when system figures exist, and nothing else about the layout changes.
+  // One column per LOCATION, read from the locations table in sort order —
+  // never hardcoded, so renaming a place or adding a sixth changes the report
+  // with no code change. The same columns appear for every store.
   const BASE_COLS = ['S.No.', 'LOC', 'Super Category', 'Category', 'Item Name', 'Unit',
-                     'Bottle/Unit Size (ml)', 'Store Room Qty (Physical)',
-                     'Outlet Qty (Physical)', 'Store+Outlet Total (native unit)',
+                     'Bottle/Unit Size (ml)',
+                     ...locations.map((l) => l.name),
+                     'Total (native unit)',
                      'ML / Loose Qty (Open Bottle, ml)',
                      'Final Total Qty (ML / GM / KG / Count)', 'Remarks'];
   const SYSTEM_COLS = ['System Qty', 'Rate', 'Value', 'Variance', 'Variance Value'];
@@ -236,7 +240,7 @@ router.get('/variance/:auditId', async (req, res) => {
   if (format === 'xlsx') {
     return sendXlsx(res, fname, buildAuditWorkbook({
       audit, rows, groups, grand, summary, totals, withSystem, grouped, stamp,
-      headerLines, cols, nilStock,
+      headerLines, cols, nilStock, locations,
     }));
   }
 
@@ -244,25 +248,36 @@ router.get('/variance/:auditId', async (req, res) => {
     // 13 (or 18) columns will not fit A4 portrait legibly, so the PDF carries
     // the identifying columns plus the quantity columns; the Excel export is
     // the full-fidelity deliverable.
-    const pdfCols = withSystem
-      ? ['S.No.', 'Item Name', 'Unit', 'Size', 'Store', 'Outlet', 'Total', 'Loose ML',
-         'Final Total', 'Remarks', 'System', 'Variance', 'Var Value']
-      : ['S.No.', 'Item Name', 'Unit', 'Size', 'Store', 'Outlet', 'Total', 'Loose ML',
-         'Final Total', 'Remarks'];
-    const pdfWidths = withSystem
-      ? [26, 96, 52, 34, 34, 34, 38, 38, 48, 42, 38, 38, 46]
-      : [30, 150, 70, 44, 44, 44, 50, 50, 62, 58];
+    // A5 landscape has room for a fixed set of columns plus the locations, so
+    // the location columns share whatever width is left rather than pushing
+    // the quantity columns off the page.
+    const locW = Math.max(26, Math.min(44, Math.round(
+      (withSystem ? 170 : 250) / Math.max(1, locations.length))));
+    const pdfCols = [
+      'S.No.', 'Item Name', 'Unit', 'Size',
+      ...locations.map((l) => l.name),
+      'Total', 'Loose ML', 'Final Total', 'Remarks',
+      ...(withSystem ? ['System', 'Variance', 'Var Value'] : []),
+    ];
+    const pdfWidths = [
+      withSystem ? 26 : 30, withSystem ? 96 : 140, withSystem ? 50 : 62, 32,
+      ...locations.map(() => locW),
+      38, 38, 48, 42,
+      ...(withSystem ? [38, 38, 46] : []),
+    ];
     const pdfRow = (d) => {
-      const base = [d.s_no, d.name, d.unit, d.bottle_unit_size, d.store_room_qty,
-                    d.outlet_qty, d.store_outlet_total, d.loose_ml, d.final_total_qty,
+      const base = [d.s_no, d.name, d.unit, d.bottle_unit_size,
+                    ...locations.map((_, i) => d.by_location?.[i] ?? 0),
+                    d.location_total, d.loose_ml, d.final_total_qty,
                     d.not_counted ? `${d.remarks} · NOT COUNTED` : d.remarks];
       return withSystem
         ? [...base, n(d.system_qty), n(d.variance), n(d.variance_value)]
         : base;
     };
     const pdfSubtotal = (label, b) => {
-      const base = ['', label, '', '', b.store_room_qty, b.outlet_qty, b.store_outlet_total,
-                    b.loose_ml, b.final_total_qty, `${b.items} items`];
+      const base = ['', label, '', '',
+                    ...locations.map((_, i) => b.by_location?.[i] ?? 0),
+                    b.location_total, b.loose_ml, b.final_total_qty, `${b.items} items`];
       return withSystem ? [...base, b.system_qty, b.variance, n(b.variance_value)] : base;
     };
     return sendPdf(res, fname, {
@@ -289,18 +304,19 @@ router.get('/variance/:auditId', async (req, res) => {
         // Summary report, mirroring the Excel second sheet: the same seven
         // columns, the super category printed once per block, one Grand Total.
         { title: 'Summary report — by category',
-          columns: ['Super Category', 'Category', 'Store Room', 'Outlet',
-                    'Store+Outlet', 'ML / Loose', 'Final Total'],
-          widths: [78, 78, 62, 58, 66, 58, 70],
+          columns: ['Super Category', 'Category', ...locations.map((l) => l.name),
+                    'Total', 'ML / Loose', 'Final Total'],
+          widths: [78, 78, ...locations.map(() => locW), 62, 58, 70],
           rows: [
             ...summary.superCategories.flatMap((g) =>
               summary.categories
                 .filter((x) => x.super_category === g.super_category)
                 .map((c, i) => [i === 0 ? c.super_category : '', c.category,
-                  c.store_room_qty, c.outlet_qty, c.store_outlet_total,
-                  c.loose_ml, c.final_total_qty])),
-            ['Grand Total', '', summary.grand.store_room_qty,
-             summary.grand.outlet_qty, summary.grand.store_outlet_total,
+                  ...locations.map((_, k) => c.by_location?.[k] ?? 0),
+                  c.location_total, c.loose_ml, c.final_total_qty])),
+            ['Grand Total', '',
+             ...locations.map((_, k) => summary.grand.by_location?.[k] ?? 0),
+             summary.grand.location_total,
              summary.grand.loose_ml, summary.grand.final_total_qty],
           ],
           note: [
@@ -316,7 +332,7 @@ router.get('/variance/:auditId', async (req, res) => {
 
   res.json({ audit, rows, groups, grand, summary, columns: cols, withSystem,
              provisional, progress, totals, hasSystemStock, provenance, notStocked,
-             nilStock });
+             nilStock, locations });
 });
 
 // ── R5 Consolidated (all stores) ─────────────────────────────────────────────

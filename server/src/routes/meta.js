@@ -1,6 +1,9 @@
 import { Router } from 'express';
 import { query } from '../db.js';
 import { requireAuth, requireRole } from '../middleware/auth.js';
+import { requireIntParams } from '../lib/asyncRoutes.js';
+import { logActivity } from '../lib/activityLog.js';
+import { allLocations, activeLocations } from '../lib/locations.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -99,86 +102,92 @@ router.put('/categories/:id', requireRole('admin'), async (req, res) => {
   res.json(rows[0]);
 });
 
-// ── Store Room / Outlet zones ──────────────────────────────────────────────
-// The audit report splits physical quantity into Store Room and Outlet
-// columns, but auditors type the location as free text. This is where an admin
-// assigns each name they actually use to one side.
+// ── Locations ──────────────────────────────────────────────────────────────
+// ONE GLOBAL LIST for every store. The report reads its columns from here, so
+// this screen is what decides what the report looks like — renaming a place
+// renames a column, reordering reorders them, and adding one adds a column.
 //
-// `unmapped` lists the location names already recorded on count entries that
-// have no assignment yet, so existing data can be mapped correctly rather than
-// silently landing on the default.
-router.get('/location-zones', requireRole('admin'), async (_req, res) => {
-  const { rows: zones } = await query(
-    'SELECT id, name, zone FROM location_zones ORDER BY zone, lower(name)');
-  const { rows: unmapped } = await query(
-    `SELECT btrim(ce.location_text) AS name, count(*)::int AS entries
-       FROM count_entries ce
-       LEFT JOIN location_zones lz
-              ON lower(btrim(lz.name)) = lower(btrim(ce.location_text))
-      WHERE ce.status = 'active'
-        AND COALESCE(btrim(ce.location_text), '') <> ''
-        AND lz.id IS NULL
-      GROUP BY btrim(ce.location_text)
-      ORDER BY count(*) DESC`);
-  const { rows: setting } = await query(
-    `SELECT value FROM settings WHERE key = 'location_default_zone'`);
-  // Entries with no location at all also fall to the default — worth stating.
-  const { rows: blank } = await query(
-    `SELECT count(*)::int AS n FROM count_entries
-      WHERE status='active' AND COALESCE(btrim(location_text), '') = ''`);
-  res.json({
-    zones,
-    unmapped,
-    blank_location_entries: blank[0].n,
-    default_zone: setting[0]?.value === 'store_room' ? 'store_room' : 'outlet',
-  });
+// Superseded the old store_room / outlet zone mapping: a per-location column
+// says everything the two-way split did and more, from a value the auditor
+// picks rather than a word they type.
+router.get('/locations', async (_req, res) => {
+  res.json(await allLocations());
 });
 
-router.post('/location-zones', requireRole('admin'), async (req, res) => {
+// What the entry screen offers. Auditors need this, so it is not admin-only.
+router.get('/locations/active', async (_req, res) => {
+  res.json(await activeLocations());
+});
+
+router.post('/locations', requireRole('admin'), async (req, res) => {
   const name = String(req.body?.name || '').trim();
-  const zone = req.body?.zone;
   if (!name) return res.status(400).json({ error: 'name required' });
-  if (!['store_room', 'outlet'].includes(zone)) {
-    return res.status(400).json({ error: "zone must be 'store_room' or 'outlet'" });
-  }
+  const sort = Number.isFinite(Number(req.body?.sort_order))
+    ? Number(req.body.sort_order) : null;
   try {
     const { rows } = await query(
-      'INSERT INTO location_zones (name, zone) VALUES ($1,$2) RETURNING *', [name, zone]);
+      `INSERT INTO locations (name, sort_order)
+       VALUES ($1, COALESCE($2, (SELECT COALESCE(MAX(sort_order),0) + 1 FROM locations)))
+       RETURNING *`, [name, sort]);
+    await logActivity({ entityType: 'location', entityId: rows[0].id, action: 'create',
+      detail: { name }, userId: req.user.id });
     res.status(201).json(rows[0]);
   } catch (err) {
-    if (err.code === '23505') return res.status(409).json({ error: `"${name}" is already assigned` });
+    if (err.code === '23505') return res.status(409).json({ error: `"${name}" already exists` });
     throw err;
   }
 });
 
-// Declared BEFORE /:id — otherwise Express matches 'default' as an id.
-// Where an unmapped location is counted.
-router.put('/location-zones/default', requireRole('admin'), async (req, res) => {
-  const zone = req.body?.zone;
-  if (!['store_room', 'outlet'].includes(zone)) {
-    return res.status(400).json({ error: "zone must be 'store_room' or 'outlet'" });
+// Rename / reorder / deactivate. A rename carries every past entry with it,
+// because entries point at the ID — which is the point of the change.
+router.put('/locations/:id', requireRole('admin'), requireIntParams('id'), async (req, res) => {
+  const { rows: cur } = await query('SELECT * FROM locations WHERE id=$1', [req.params.id]);
+  if (!cur[0]) return res.status(404).json({ error: 'Not found' });
+
+  const name = req.body?.name === undefined ? cur[0].name : String(req.body.name).trim();
+  if (!name) return res.status(400).json({ error: 'name required' });
+  const sort = req.body?.sort_order === undefined ? cur[0].sort_order : Number(req.body.sort_order);
+  if (!Number.isFinite(sort)) return res.status(400).json({ error: 'sort_order must be a number' });
+  const active = req.body?.is_active === undefined ? cur[0].is_active : !!req.body.is_active;
+
+  // Deactivating is always allowed — a location with history keeps its report
+  // column for as long as the data references it, so nothing is orphaned. It
+  // simply stops being offered on the entry screen.
+  try {
+    const { rows } = await query(
+      `UPDATE locations SET name=$2, sort_order=$3, is_active=$4 WHERE id=$1 RETURNING *`,
+      [req.params.id, name, sort, active]);
+    await logActivity({ entityType: 'location', entityId: Number(req.params.id), action: 'update',
+      detail: { from: cur[0].name, to: name, sort_order: sort, is_active: active },
+      userId: req.user.id });
+    res.json(rows[0]);
+  } catch (err) {
+    if (err.code === '23505') return res.status(409).json({ error: `"${name}" already exists` });
+    throw err;
   }
-  await query(
-    `INSERT INTO settings (key, value) VALUES ('location_default_zone', $1)
-     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`, [zone]);
-  res.json({ ok: true, default_zone: zone });
 });
 
-router.put('/location-zones/:id', requireRole('admin'), async (req, res) => {
-  const zone = req.body?.zone;
-  if (!['store_room', 'outlet'].includes(zone)) {
-    return res.status(400).json({ error: "zone must be 'store_room' or 'outlet'" });
-  }
-  const { rows } = await query(
-    'UPDATE location_zones SET zone=$2 WHERE id=$1 RETURNING *', [req.params.id, zone]);
-  if (!rows[0]) return res.status(404).json({ error: 'Not found' });
-  res.json(rows[0]);
-});
+// Hard delete only when nothing was ever counted there. Anything with history
+// is deactivated instead, so no entry is left pointing at a location that no
+// longer exists.
+router.delete('/locations/:id', requireRole('admin'), requireIntParams('id'), async (req, res) => {
+  const { rows: cur } = await query(
+    `SELECT l.*, (SELECT count(*)::int FROM count_entries ce WHERE ce.location_id = l.id) AS entries
+       FROM locations l WHERE l.id = $1`, [req.params.id]);
+  if (!cur[0]) return res.status(404).json({ error: 'Not found' });
 
-router.delete('/location-zones/:id', requireRole('admin'), async (req, res) => {
-  const { rowCount } = await query('DELETE FROM location_zones WHERE id=$1', [req.params.id]);
-  if (!rowCount) return res.status(404).json({ error: 'Not found' });
-  res.json({ ok: true });
+  if (cur[0].entries > 0) {
+    const { rows } = await query(
+      'UPDATE locations SET is_active=FALSE WHERE id=$1 RETURNING *', [req.params.id]);
+    await logActivity({ entityType: 'location', entityId: Number(req.params.id),
+      action: 'deactivate', recordCount: cur[0].entries,
+      detail: { name: cur[0].name, reason: 'location has count history' }, userId: req.user.id });
+    return res.json({ ok: true, softDeleted: true, location: rows[0], entries: cur[0].entries });
+  }
+  await query('DELETE FROM locations WHERE id=$1', [req.params.id]);
+  await logActivity({ entityType: 'location', entityId: Number(req.params.id), action: 'delete',
+    detail: { name: cur[0].name }, userId: req.user.id });
+  res.json({ ok: true, softDeleted: false });
 });
 
 export default router;

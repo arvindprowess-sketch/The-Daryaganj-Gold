@@ -424,6 +424,11 @@ function ReportView({ report, data, grouped }) {
     // figures exist, and nothing else about the layout changes.
     const withSystem = !!data.withSystem;
 
+    // One column per LOCATION, named and ordered by the server from the
+    // locations table — never hardcoded here, so renaming a place or adding a
+    // sixth changes this table with no code change. The same columns appear
+    // for every store, and they must always add up to Total.
+    const locations = data.locations || [];
     const BASE = [
       ['s_no', 'S.No.', 'right'],
       ['loc', 'LOC', ''],
@@ -432,9 +437,8 @@ function ReportView({ report, data, grouped }) {
       ['name', 'Item Name', ''],
       ['unit', 'Unit', ''],
       ['bottle_unit_size', 'Bottle/Unit Size (ml)', 'right'],
-      ['store_room_qty', 'Store Room Qty (Physical)', 'right'],
-      ['outlet_qty', 'Outlet Qty (Physical)', 'right'],
-      ['store_outlet_total', 'Store+Outlet Total', 'right'],
+      ...locations.map((l, i) => [`loc:${i}`, l.name, 'right']),
+      ['location_total', 'Total (native unit)', 'right'],
       ['loose_ml', 'ML / Loose Qty', 'right'],
       ['final_total_qty', 'Final Total Qty', 'right'],
       ['remarks', 'Remarks', ''],
@@ -453,6 +457,7 @@ function ReportView({ report, data, grouped }) {
     // Quantities print as given; money is formatted; a missing figure is '—',
     // never 0.
     const cell = (r, key) => {
+      if (key.startsWith('loc:')) return r.by_location?.[Number(key.slice(4))] ?? 0;
       if (key === 'rate' || key === 'physical_value' || key === 'variance_value') return money(r[key]);
       if (key === 'system_qty' || key === 'variance') return num(r[key]);
       if (key === 'remarks') {
@@ -473,7 +478,8 @@ function ReportView({ report, data, grouped }) {
     // column reads straight down from an item line to the grand total.
     const summaryRow = (label, b, labelCol = 3) => {
       const r = spec.map(([key]) => {
-        if (['store_room_qty', 'outlet_qty', 'store_outlet_total', 'loose_ml',
+        if (key.startsWith('loc:')) return b.by_location?.[Number(key.slice(4))] ?? 0;
+        if (['location_total', 'loose_ml',
              'final_total_qty', 'system_qty', 'variance'].includes(key)) return b[key];
         if (key === 'physical_value' || key === 'variance_value') return money(b[key]);
         if (key === 'remarks') return `${b.items} items`;
@@ -546,8 +552,9 @@ function ReportView({ report, data, grouped }) {
         {data.totals && (
           <div className="mt-3 rounded-lg bg-slate-100 px-3 py-2 text-sm text-slate-700">
             <div className="font-semibold">
-              Totals — store room {data.totals.store_room_qty} · outlet {data.totals.outlet_qty}
-              {' '}· store+outlet {data.totals.store_outlet_total} · loose {data.totals.loose_ml} ml
+              Totals — {(data.locations || []).map((l, i) =>
+                `${l.name} ${data.totals.by_location?.[i] ?? 0}`).join(' · ')}
+              {' '}· total {data.totals.location_total} · loose {data.totals.loose_ml} ml
               {' '}· <span className="tabular-nums">final total {data.totals.final_total_qty}</span>
             </div>
             {withSystem && (
@@ -643,21 +650,26 @@ function SummaryReport({ summary }) {
         </div>
       </div>
       <Table
-        cols={['Super Category', 'Category', 'Items', 'Store Room Qty', 'Outlet Qty',
-               'Store+Outlet Total', 'ML / Loose Qty', 'Final Total Qty']}
-        align={['', '', 'right', 'right', 'right', 'right', 'right', 'right']}
+        cols={['Super Category', 'Category', 'Items',
+               ...(h.locations || []).map((l) => l.name),
+               'Total (native unit)', 'ML / Loose Qty', 'Final Total Qty']}
+        align={['', '', 'right', ...(h.locations || []).map(() => 'right'),
+                'right', 'right', 'right']}
         rowClass={(r) => (/SUBTOTAL|GRAND TOTAL/.test(String(r[0])) ? 'bg-slate-50 font-semibold' : undefined)}
         rows={[
           ...summary.superCategories.flatMap((g) => [
             ...summary.categories
               .filter((c) => c.super_category === g.super_category)
-              .map((c) => [c.super_category, c.category, c.items, c.store_room_qty,
-                           c.outlet_qty, c.store_outlet_total, c.loose_ml, c.final_total_qty]),
-            [`${g.super_category} — SUBTOTAL`, '', g.items, g.store_room_qty, g.outlet_qty,
-             g.store_outlet_total, g.loose_ml, g.final_total_qty],
+              .map((c) => [c.super_category, c.category, c.items,
+                           ...(h.locations || []).map((_, i) => c.by_location?.[i] ?? 0),
+                           c.location_total, c.loose_ml, c.final_total_qty]),
+            [`${g.super_category} — SUBTOTAL`, '', g.items,
+             ...(h.locations || []).map((_, i) => g.by_location?.[i] ?? 0),
+             g.location_total, g.loose_ml, g.final_total_qty],
           ]),
-          ['GRAND TOTAL', '', summary.grand.items, summary.grand.store_room_qty,
-           summary.grand.outlet_qty, summary.grand.store_outlet_total,
+          ['GRAND TOTAL', '', summary.grand.items,
+           ...(h.locations || []).map((_, i) => summary.grand.by_location?.[i] ?? 0),
+           summary.grand.location_total,
            summary.grand.loose_ml, summary.grand.final_total_qty],
         ]} />
     </div>

@@ -7,6 +7,8 @@ import { useToast } from '../../components/Toast.jsx';
 import useDebounced, { normalizeName } from '../../lib/useDebounced.js';
 import { liquorBadge } from '../../lib/liquor.js';
 import { fmtDateTime, fmtDate } from '../../lib/datetime.js';
+import { subUnitFor, combine, preview } from '../../lib/measuredUnit.js';
+import { useLocations, useStickyLocation } from '../../components/LocationSelect.jsx';
 
 // D5 — Count entry on desktop: wide table for fast keyboard entry.
 //
@@ -23,6 +25,10 @@ export default function CountEntry() {
   const [rowState, setRowState] = useState({});
   const [active, setActive] = useState(null);
   const [savingId, setSavingId] = useState(null);
+  const locations = useLocations();
+  // One sticky choice for the whole grid: the admin picks where they are, then
+  // types down the column. A row can still override it.
+  const [locationId, setLocationId] = useStickyLocation(auditId);
   const [categories, setCategories] = useState([]);
   const [supers, setSupers] = useState([]);
   const [superCat, setSuperCat] = useState('');
@@ -179,6 +185,24 @@ export default function CountEntry() {
                                  value={r.open_ml ?? ''} onChange={(e) => setRow(i.id, { open_ml: e.target.value.replace(/[^0-9]/g, '') })}
                                  onKeyDown={(e) => e.key === 'Enter' && saveRow(i)} />
                         </div>
+                      ) : subUnitFor(i.unit) ? (
+                        <div>
+                          <div className="flex gap-1">
+                            <input className="field py-1.5 px-2 w-20" disabled={closed}
+                                   placeholder={subUnitFor(i.unit).major}
+                                   value={r.major ?? ''} onChange={(e) => setRow(i.id, { major: e.target.value.replace(/[^0-9]/g, '') })}
+                                   onKeyDown={(e) => e.key === 'Enter' && saveRow(i)} />
+                            <input className="field py-1.5 px-2 w-20" disabled={closed}
+                                   placeholder={subUnitFor(i.unit).minor}
+                                   value={r.minor ?? ''} onChange={(e) => setRow(i.id, { minor: e.target.value.replace(/[^0-9]/g, '') })}
+                                   onKeyDown={(e) => e.key === 'Enter' && saveRow(i)} />
+                          </div>
+                          {((r.major ?? '') !== '' || (r.minor ?? '') !== '') && (
+                            <div className="text-xs font-semibold text-teal-700 tabular-nums mt-0.5">
+                              {preview(r.major ?? '', r.minor ?? '', subUnitFor(i.unit))}
+                            </div>
+                          )}
+                        </div>
                       ) : (
                         <input className="field py-1.5 px-2 w-28" placeholder="qty (0 ok)" disabled={closed}
                                value={r.qty ?? ''} onChange={(e) => setRow(i.id, { qty: e.target.value.replace(/[^0-9.]/g, '') })}
@@ -186,9 +210,14 @@ export default function CountEntry() {
                       )}
                     </td>
                     <td className="px-3 py-2">
-                      <input className="field py-1.5 px-2 w-40" placeholder="location" disabled={closed}
-                             value={r.location ?? ''} onChange={(e) => setRow(i.id, { location: e.target.value })}
-                             onKeyDown={(e) => e.key === 'Enter' && saveRow(i)} />
+                      {/* Defaults to the sticky location chosen above the grid;
+                          a row can still override it. */}
+                      <select className="field py-1.5 px-2 w-40" disabled={closed}
+                              value={r.location_id ?? locationId ?? ''}
+                              onChange={(e) => setRow(i.id, { location_id: e.target.value })}>
+                        <option value="">location…</option>
+                        {(locations || []).map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
+                      </select>
                     </td>
                     <td className="px-3 py-2 whitespace-nowrap">
                       <button className="btn-primary py-1.5 px-3 text-sm" disabled={closed || savingId === i.id}
@@ -252,11 +281,20 @@ export default function CountEntry() {
 
   async function saveRow(item) {
     const r = rowState[item.id] || {};
-    const payload = { item_id: item.id, location_text: r.location || null };
+    // Location is mandatory here too — the same rule the phone enforces, and
+    // the same rule the server enforces underneath both.
+    const loc = r.location_id || locationId;
+    if (!loc) { toast('Choose a location first', 'error'); return; }
+    const payload = { item_id: item.id, location_id: loc };
+    const sub = item.is_liquor ? null : subUnitFor(item.unit);
     if (item.is_liquor) {
       if ((r.bottles ?? '') === '' && (r.open_ml ?? '') === '') return;
       payload.bottles = r.bottles === '' || r.bottles == null ? 0 : Number(r.bottles);
       payload.open_ml = r.open_ml === '' || r.open_ml == null ? 0 : Number(r.open_ml);
+    } else if (sub) {
+      if ((r.major ?? '') === '' && (r.minor ?? '') === '') return;
+      payload.qty = combine(r.major ?? '', r.minor ?? '', sub.per);
+      if (payload.qty == null) { toast('Quantity must be a positive number', 'error'); return; }
     } else {
       if ((r.qty ?? '') === '') return;
       payload.qty = Number(r.qty);
@@ -297,6 +335,24 @@ export default function CountEntry() {
       {closed && (
         <div className="mb-3 rounded-xl bg-amber-50 border border-amber-200 text-amber-700 px-4 py-2 text-sm">
           This audit is {audit.status} — new entries are disabled.
+        </div>
+      )}
+
+      {/* Where you are counting. Set once, applies to every row you save, and
+          is remembered until you switch audit. */}
+      {!closed && (
+        <div className={`mb-3 flex flex-wrap items-center gap-3 rounded-xl border px-4 py-3
+                        ${locationId ? 'bg-slate-50 border-slate-200' : 'bg-amber-50 border-amber-300'}`}>
+          <span className="text-sm font-medium text-slate-700">Counting in</span>
+          <select className="field py-1.5 px-2 w-52" value={locationId || ''}
+                  onChange={(e) => setLocationId(e.target.value)}>
+            <option value="">Choose a location…</option>
+            {(locations || []).map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
+          </select>
+          <span className="text-xs text-slate-500">
+            {locationId ? 'Applies to every row you save. Override it on a row if needed.'
+                        : 'Required before any entry can be saved.'}
+          </span>
         </div>
       )}
 

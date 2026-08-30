@@ -6,13 +6,22 @@ import { api, bustCache } from '../lib/api.js';
 import { useToast } from './Toast.jsx';
 import { saveDraft, loadDraft, clearDraft, queueEntry } from '../lib/queue.js';
 import { fmtTime } from '../lib/datetime.js';
+import { subUnitFor, combine, preview } from '../lib/measuredUnit.js';
+import LocationSelect, { useStickyLocation } from './LocationSelect.jsx';
 
 // M6 — Item entry bottom sheet. Non-liquor and liquor layouts.
 // M7 — Duplicate prompt when adding a second entry (warn, never block).
 // On success the sheet CLOSES and the caller returns to the list (#6).
 export default function ItemEntry({ auditId, item, onClose, onSaved, uploadOnly = false, canVoid = true }) {
-  const empty = { qty: '', bottles: '', open_ml: '', location_text: '', remarks: '', photo_url: null };
+  // A KG or LTR item is entered as two boxes; the stored value is still one
+  // number in the item's own unit.
+  const sub = item.is_liquor ? null : subUnitFor(item.unit);
+  const empty = { qty: '', major: '', minor: '', bottles: '', open_ml: '',
+                  remarks: '', photo_url: null };
   const [form, setForm] = useState(() => loadDraft(auditId, item.id) || empty);
+  // Sticky: an auditor counts everything in one place before moving on, so the
+  // last location carries to the next item rather than being re-picked 618 times.
+  const [locationId, setLocationId] = useStickyLocation(auditId);
   const [entries, setEntries] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -34,11 +43,15 @@ export default function ItemEntry({ auditId, item, onClose, onSaved, uploadOnly 
   }
 
   function buildPayload() {
-    const p = { item_id: item.id, location_text: form.location_text || null,
+    const p = { item_id: item.id, location_id: locationId || null,
                 remarks: form.remarks || null, photo_url: form.photo_url || null };
     if (item.is_liquor) {
       p.bottles = form.bottles === '' ? null : Number(form.bottles);
       p.open_ml = form.open_ml === '' ? null : Number(form.open_ml);
+    } else if (sub) {
+      // Either box may be blank; blank is zero. 5 kg + 200 gm is stored as
+      // 5.200 KG — one number, in the item's own unit, exactly as before.
+      p.qty = combine(form.major, form.minor, sub.per);
     } else {
       p.qty = form.qty === '' ? null : Number(form.qty);
     }
@@ -46,8 +59,14 @@ export default function ItemEntry({ auditId, item, onClose, onSaved, uploadOnly 
   }
 
   function validate() {
+    if (!locationId) return 'Choose a location.';
     if (item.is_liquor) {
       if (form.bottles === '' && form.open_ml === '') return 'Enter sealed bottles and/or open ml (type 0 if none).';
+    } else if (sub) {
+      if (form.major === '' && form.minor === '') {
+        return `Enter ${sub.major} and/or ${sub.minor} (type 0 if none found).`;
+      }
+      if (combine(form.major, form.minor, sub.per) == null) return 'Quantity must be a positive number.';
     } else if (form.qty === '') {
       return 'Enter quantity (type 0 if none found).';
     }
@@ -180,6 +199,29 @@ export default function ItemEntry({ auditId, item, onClose, onSaved, uploadOnly 
                      value={form.open_ml} onChange={(e) => update({ open_ml: e.target.value.replace(/[^0-9]/g, '') })} />
             </label>
           </div>
+        ) : sub ? (
+          <div>
+            <div className="grid grid-cols-2 gap-3">
+              <label className="block">
+                <span className="text-sm font-medium text-slate-600">{sub.major}</span>
+                <input className="field mt-1 text-lg" inputMode="numeric" pattern="[0-9]*"
+                       value={form.major}
+                       onChange={(e) => update({ major: e.target.value.replace(/[^0-9]/g, '') })}
+                       placeholder="0" />
+              </label>
+              <label className="block">
+                <span className="text-sm font-medium text-slate-600">{sub.minor}</span>
+                <input className="field mt-1 text-lg" inputMode="numeric" pattern="[0-9]*"
+                       value={form.minor}
+                       onChange={(e) => update({ minor: e.target.value.replace(/[^0-9]/g, '') })}
+                       placeholder="0" />
+              </label>
+            </div>
+            {/* What will actually be saved, live. No arithmetic left to guess. */}
+            <div className="mt-1 text-sm font-semibold text-teal-700 tabular-nums">
+              {preview(form.major, form.minor, sub) || ''}
+            </div>
+          </div>
         ) : (
           <label className="block">
             <span className="text-sm font-medium text-slate-600">Quantity</span>
@@ -188,11 +230,7 @@ export default function ItemEntry({ auditId, item, onClose, onSaved, uploadOnly 
                    placeholder="Type 0 if none found" />
           </label>
         )}
-        <label className="block">
-          <span className="text-sm font-medium text-slate-600">Location</span>
-          <input className="field mt-1" value={form.location_text}
-                 onChange={(e) => update({ location_text: e.target.value })} placeholder="e.g. Dry Store, rack 3" />
-        </label>
+        <LocationSelect value={locationId} onChange={setLocationId} />
         <label className="block">
           <span className="text-sm font-medium text-slate-600">Remarks</span>
           <input className="field mt-1" value={form.remarks}
@@ -204,7 +242,9 @@ export default function ItemEntry({ auditId, item, onClose, onSaved, uploadOnly 
 
         {error && <p className="text-sm text-red-600">{error}</p>}
 
-        <button className="btn-primary w-full text-lg" disabled={busy} onClick={attemptSave}>
+        {/* Location is mandatory. Disabled here, and rejected server-side —
+            the report's location columns are only as good as this. */}
+        <button className="btn-primary w-full text-lg" disabled={busy || !locationId} onClick={attemptSave}>
           {busy ? 'Saving…' : 'SAVE ENTRY'}
         </button>
       </div>

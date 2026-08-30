@@ -108,10 +108,10 @@ export async function createSubmission(client, auditId, userId) {
 
   await client.query(
     `INSERT INTO submission_entries
-       (submission_id, item_id, qty, bottles, open_ml, location_text, remarks,
-        photo_url, counted_by, counted_at)
-     SELECT $2, ce.item_id, ce.qty, ce.bottles, ce.open_ml, ce.location_text,
-            ce.remarks, ce.photo_url, ce.counted_by, ce.counted_at
+       (submission_id, item_id, qty, bottles, open_ml, location_id, location_text,
+        remarks, photo_url, counted_by, counted_at)
+     SELECT $2, ce.item_id, ce.qty, ce.bottles, ce.open_ml, ce.location_id,
+            ce.location_text, ce.remarks, ce.photo_url, ce.counted_by, ce.counted_at
        FROM count_entries ce
       WHERE ce.audit_id = $1 AND ce.status = 'active'`,
     [auditId, submission.id]

@@ -1,6 +1,7 @@
 import { query } from '../db.js';
 import { measurementBasis, finalTotals, BASES } from './measure.js';
 import { auditSource, SNAPSHOT, CLEARED } from './submissions.js';
+import { reportLocations } from './locations.js';
 
 // ── Tolerance bands from settings (NOT hardcoded) ────────────────────────────
 export async function getTolerances() {
@@ -35,16 +36,19 @@ export async function auditItemAggregates(auditId, source = null) {
   // photo coverage — is identical, so the two stay impossible to drift apart.
   const fromSnapshot = src.mode === SNAPSHOT;
   const entrySource = fromSnapshot
-    ? `SELECT e.qty, e.bottles, e.open_ml, e.photo_url, e.location_text
+    ? `SELECT e.qty, e.bottles, e.open_ml, e.photo_url, e.location_id
          FROM submission_entries e
-        WHERE e.item_id = i.id AND e.submission_id = $3`
-    : `SELECT e.qty, e.bottles, e.open_ml, e.photo_url, e.location_text
+        WHERE e.item_id = i.id AND e.submission_id = $2`
+    : `SELECT e.qty, e.bottles, e.open_ml, e.photo_url, e.location_id
          FROM count_entries e
         WHERE e.item_id = i.id AND e.audit_id = $1 AND e.status = 'active'`;
   // A cleared submission has nothing to read. Routes stop before they get
   // here; this makes the fallback empty rather than wrong.
   const noRows = src.mode === CLEARED;
-  const params = [auditId, await defaultZone()];
+  // The report's columns. Read from the locations table, never hardcoded, so
+  // renaming a place or adding a sixth changes the report with no code change.
+  const locations = await reportLocations(auditId, fromSnapshot ? src.submission.id : null);
+  const params = [auditId];
   if (fromSnapshot) params.push(src.submission.id);
 
   const { rows } = await query(
@@ -54,11 +58,10 @@ export async function auditItemAggregates(auditId, source = null) {
             COALESCE(agg.total_qty, 0)      AS total_qty,
             COALESCE(agg.total_bottles, 0)  AS total_bottles,
             COALESCE(agg.total_open_ml, 0)  AS total_open_ml,
-            -- Physical quantity split by ZONE, from the location recorded on
-            -- each entry. An entry whose location is not in location_zones
-            -- falls to the configured default so no quantity is ever dropped.
-            COALESCE(agg.store_room_qty, 0) AS store_room_qty,
-            COALESCE(agg.outlet_qty, 0)     AS outlet_qty,
+            -- Physical quantity broken down by LOCATION — one figure per
+            -- place the item was counted, keyed by location id. The report
+            -- turns this into one column per location.
+            COALESCE(locagg.by_location, '{}'::jsonb) AS by_location,
             COALESCE(agg.entry_count, 0)::int AS entry_count,
             COALESCE(agg.active_zero, 0)::int AS active_zero,
             COALESCE(agg.with_photo, 0)::int  AS with_photo,
@@ -71,22 +74,27 @@ export async function auditItemAggregates(auditId, source = null) {
        LEFT JOIN LATERAL (
          SELECT SUM(native) AS total_qty, SUM(bottles) AS total_bottles,
                 SUM(open_ml) AS total_open_ml, COUNT(*) AS entry_count,
-                SUM(native) FILTER (WHERE zone = 'store_room') AS store_room_qty,
-                SUM(native) FILTER (WHERE zone = 'outlet')     AS outlet_qty,
                 COUNT(*) FILTER (WHERE COALESCE(qty,0)=0 AND COALESCE(bottles,0)=0 AND COALESCE(open_ml,0)=0) AS active_zero,
                 COUNT(*) FILTER (WHERE photo_url IS NOT NULL) AS with_photo
            FROM (
              SELECT src.qty, src.bottles, src.open_ml, src.photo_url,
                     -- Liquor counts in sealed bottles; everything else in its
                     -- own unit. Open ml is NEVER folded in here.
-                    COALESCE(CASE WHEN i.is_liquor THEN src.bottles ELSE src.qty END, 0) AS native,
-                    COALESCE(lz.zone, $2) AS zone
+                    COALESCE(CASE WHEN i.is_liquor THEN src.bottles ELSE src.qty END, 0) AS native
                FROM ( ${entrySource} ) src
-               LEFT JOIN location_zones lz
-                      ON lower(btrim(lz.name)) = lower(btrim(COALESCE(src.location_text, '')))
               WHERE ${noRows ? 'FALSE' : 'TRUE'}
            ) e
        ) agg ON TRUE
+       LEFT JOIN LATERAL (
+         SELECT jsonb_object_agg(t.lid::text, t.q) AS by_location
+           FROM (
+             SELECT src.location_id AS lid,
+                    SUM(COALESCE(CASE WHEN i.is_liquor THEN src.bottles ELSE src.qty END, 0)) AS q
+               FROM ( ${entrySource} ) src
+              WHERE src.location_id IS NOT NULL AND ${noRows ? 'FALSE' : 'TRUE'}
+              GROUP BY src.location_id
+           ) t
+       ) locagg ON TRUE
        LEFT JOIN system_stock ss ON ss.item_id = i.id AND ss.audit_id = $1
        LEFT JOIN audit_na na ON na.item_id = i.id AND na.audit_id = $1
       WHERE i.is_active = TRUE
@@ -96,13 +104,17 @@ export async function auditItemAggregates(auditId, source = null) {
   return rows.map((r) => {
     const physicalQty = r.is_liquor ? Number(r.total_bottles) : Number(r.total_qty);
     const value = r.rate != null ? physicalQty * Number(r.rate) : null;
-    // Store Room + Outlet must always reconcile to the item's physical total,
-    // whatever the zone mapping says.
+    // One number per location column, in column order, zero-filled. The
+    // location columns must always add up to the physical total — that is the
+    // reconciliation a reader checks first — so the total is the SUM of these,
+    // not a separately aggregated figure that could drift from them.
+    const by = r.by_location || {};
+    const byLocation = locations.map((l) => Number(by[String(l.id)] || 0));
     return {
       ...r,
       physical_qty: physicalQty,
-      store_room_qty: Number(r.store_room_qty),
-      outlet_qty: Number(r.outlet_qty),
+      by_location: byLocation,
+      location_total: Number(byLocation.reduce((a, b) => a + b, 0).toFixed(3)),
       bottle_unit_size: Number(r.bottle_unit_size ?? 1),
       value,
       counted: r.entry_count > 0,
@@ -110,11 +122,11 @@ export async function auditItemAggregates(auditId, source = null) {
   });
 }
 
-// Where an entry whose location is not in location_zones is counted. Explicit
-// and admin-editable, so a quantity is never silently dropped from both columns.
-export async function defaultZone() {
-  const { rows } = await query(`SELECT value FROM settings WHERE key='location_default_zone'`);
-  return rows[0]?.value === 'store_room' ? 'store_room' : 'outlet';
+// The columns for one audit, so a caller can label what auditItemAggregates
+// returned without querying again.
+export async function auditLocations(auditId, source = null) {
+  const src = source || await auditSource(auditId);
+  return reportLocations(auditId, src.mode === SNAPSHOT ? src.submission.id : null);
 }
 
 export async function getAudit(auditId) {
@@ -253,14 +265,16 @@ export async function liquorReport(auditId) {
 // Rupee figures are summed ONLY over items that actually have a rate. An item
 // with no rate contributes nothing rather than a false zero, and `no_rate`
 // records how many were left out so the shortfall is always visible.
-function emptyBucket(extra) {
+// Subtotals carry the SAME location columns as the rows above them, so a
+// column reads straight down from an item to the grand total. The width comes
+// from the location list, so adding a location widens the subtotals too.
+function emptyBucket(extra, locationCount = 0) {
   return {
     ...extra, items: 0, no_rate: 0,
     physical_qty: 0, system_qty: 0, variance: 0,
     physical_value: 0, system_value: 0, variance_value: 0,
-    // Standard-report quantity columns, subtotalled alongside the rest.
-    store_room_qty: 0, outlet_qty: 0, store_outlet_total: 0,
-    loose_ml: 0, final_total_qty: 0,
+    by_location: new Array(locationCount).fill(0),
+    location_total: 0, loose_ml: 0, final_total_qty: 0,
   };
 }
 
@@ -269,9 +283,8 @@ function addToBucket(bucket, r) {
   bucket.physical_qty += Number(r.physical_qty || 0);
   bucket.system_qty += Number(r.system_qty || 0);
   bucket.variance += Number(r.variance || 0);
-  bucket.store_room_qty += Number(r.store_room_qty || 0);
-  bucket.outlet_qty += Number(r.outlet_qty || 0);
-  bucket.store_outlet_total += Number(r.store_outlet_total || 0);
+  (r.by_location || []).forEach((v, i) => { bucket.by_location[i] = (bucket.by_location[i] || 0) + Number(v || 0); });
+  bucket.location_total += Number(r.location_total || 0);
   bucket.loose_ml += Number(r.loose_ml || 0);
   bucket.final_total_qty += Number(r.final_total_qty || 0);
   if (r.rate == null) { bucket.no_rate += 1; return; }
@@ -288,9 +301,8 @@ function finishBucket(b) {
     physical_value: round2(b.physical_value),
     system_value: round2(b.system_value),
     variance_value: round2(b.variance_value),
-    store_room_qty: r3(b.store_room_qty),
-    outlet_qty: r3(b.outlet_qty),
-    store_outlet_total: r3(b.store_outlet_total),
+    by_location: (b.by_location || []).map(r3),
+    location_total: r3(b.location_total),
     loose_ml: r3(b.loose_ml),
     final_total_qty: r3(b.final_total_qty),
     variance_pct: pctOf(b.variance, b.system_qty),
@@ -306,17 +318,17 @@ function pctOf(variance, system) {
   return variance ? 100 : 0;
 }
 
-function groupVariance(rows) {
+function groupVariance(rows, locationCount = 0) {
   const bySuper = new Map();
   for (const r of rows) {
     const sKey = r.super_category || '—';
     const cKey = r.category || '—';
     if (!bySuper.has(sKey)) {
-      bySuper.set(sKey, { ...emptyBucket({ super_category: sKey }), categories: new Map() });
+      bySuper.set(sKey, { ...emptyBucket({ super_category: sKey }, locationCount), categories: new Map() });
     }
     const s = bySuper.get(sKey);
     if (!s.categories.has(cKey)) {
-      s.categories.set(cKey, { ...emptyBucket({ category: cKey, super_category: sKey }), rows: [] });
+      s.categories.set(cKey, { ...emptyBucket({ category: cKey, super_category: sKey }, locationCount), rows: [] });
     }
     const c = s.categories.get(cKey);
     addToBucket(s, r);
@@ -381,7 +393,9 @@ export async function varianceReport(
   { countedOnly = false, countFilter = null, categoryId = null, superCategoryId = null,
     systemData = 'all', rateFilter = 'all', includeNilStock = false } = {}
 ) {
-  const items = await auditItemAggregates(auditId);
+  const src = await auditSource(auditId);
+  const items = await auditItemAggregates(auditId, src);
+  const locations = await auditLocations(auditId, src);
   const tol = await getTolerances();
   const audit = await getAudit(auditId);
   const provisional = !audit || audit.status === 'open';
@@ -404,8 +418,7 @@ export async function varianceReport(
   // was never counted. So no variance and no shortage can be hidden by this.
   // `include_nil=1` puts them back.
   const isNilStock = (i) => !i.has_system
-    && Number(i.store_room_qty || 0) === 0
-    && Number(i.outlet_qty || 0) === 0
+    && Number(i.location_total || 0) === 0
     && Number(i.total_open_ml || 0) === 0;
   const nilStock = includeNilStock ? [] : source.filter(isNilStock);
   if (!includeNilStock) source = source.filter((i) => !isNilStock(i));
@@ -462,16 +475,16 @@ export async function varianceReport(
     // ── Standard audit report figures ──────────────────────────────────────
     // Physical quantity split by zone, then carried through the one formula
     // that covers the whole master:
-    //   Final Total Qty = (Store Room + Outlet) × Bottle/Unit Size + Loose ML
+    //   Final Total Qty = Total (all locations) × Bottle/Unit Size + Loose ML
     const measures = finalTotals({
-      storeRoom: i.store_room_qty,
-      outlet: i.outlet_qty,
+      total: i.location_total,
       size: i.bottle_unit_size,
       looseMl: i.total_open_ml,
     });
 
     return {
       name: i.name, unit: i.unit, is_liquor: i.is_liquor,
+      by_location: i.by_location,
       super_category: i.super_category_name || '—', category: i.category_name || '—',
       super_category_id: i.super_category_id, category_id: i.category_id,
       rate,
@@ -513,11 +526,11 @@ export async function varianceReport(
   // what was actually counted — a physical-only audit has no system rows at
   // all. Variance and value are unaffected: a row without a system figure
   // carries null there and contributes nothing.
-  const totalBucket = emptyBucket({});
+  const totalBucket = emptyBucket({}, locations.length);
   for (const r of rows) addToBucket(totalBucket, r);
   const totals = finishBucket(totalBucket);
 
-  const groups = groupVariance(rows);
+  const groups = groupVariance(rows, locations.length);
 
   const total = items.length;
   const counted = items.filter((i) => i.counted || i.not_applicable).length;
@@ -533,7 +546,10 @@ export async function varianceReport(
     // separately so the grouped view does not have to reach for the flat one.
     grand: totals,
     // Second sheet of the export.
-    summary: buildSummary(rows, groups, audit),
+    summary: buildSummary(rows, groups, audit, locations),
+    // The report's columns, in order. The client and the exporter both label
+    // from this rather than assuming what the places are called.
+    locations,
     provisional,
     progress: { total, counted, uncounted: total - counted },
     // True only when nothing at all has been imported or entered.
@@ -564,9 +580,8 @@ export async function varianceReport(
       no_rate_with_system: totals.no_rate,
       physical_qty: totals.physical_qty,
       // Standard-report quantity totals, over every row on the table.
-      store_room_qty: totals.store_room_qty,
-      outlet_qty: totals.outlet_qty,
-      store_outlet_total: totals.store_outlet_total,
+      by_location: totals.by_location,
+      location_total: totals.location_total,
       loose_ml: totals.loose_ml,
       final_total_qty: totals.final_total_qty,
       system_qty: totals.system_qty,
@@ -585,7 +600,7 @@ export async function varianceReport(
 // under its super category, carrying the five quantity columns. Item counts are
 // broken down by measurement basis so a reader can see at a glance how much of
 // the master is measured (ML/GM/KG) versus counted (Nos/POR/PKT/PIECE).
-function buildSummary(rows, groups, audit) {
+function buildSummary(rows, groups, audit, locations = []) {
   const byBasis = {};
   for (const b of BASES) byBasis[b] = 0;
   for (const r of rows) byBasis[r.remarks] = (byBasis[r.remarks] || 0) + 1;
@@ -595,9 +610,8 @@ function buildSummary(rows, groups, audit) {
       super_category: g.super_category,
       category: c.category,
       items: c.items,
-      store_room_qty: c.store_room_qty,
-      outlet_qty: c.outlet_qty,
-      store_outlet_total: c.store_outlet_total,
+      by_location: c.by_location,
+      location_total: c.location_total,
       loose_ml: c.loose_ml,
       final_total_qty: c.final_total_qty,
     }))
@@ -606,21 +620,20 @@ function buildSummary(rows, groups, audit) {
   const superCategories = groups.map((g) => ({
     super_category: g.super_category,
     items: g.items,
-    store_room_qty: g.store_room_qty,
-    outlet_qty: g.outlet_qty,
-    store_outlet_total: g.store_outlet_total,
+    by_location: g.by_location,
+    location_total: g.location_total,
     loose_ml: g.loose_ml,
     final_total_qty: g.final_total_qty,
   }));
 
   const grand = superCategories.reduce((t, g) => ({
     items: t.items + g.items,
-    store_room_qty: Number((t.store_room_qty + g.store_room_qty).toFixed(3)),
-    outlet_qty: Number((t.outlet_qty + g.outlet_qty).toFixed(3)),
-    store_outlet_total: Number((t.store_outlet_total + g.store_outlet_total).toFixed(3)),
+    by_location: t.by_location.map((v, i) => Number((v + Number(g.by_location?.[i] || 0)).toFixed(3))),
+    location_total: Number((t.location_total + g.location_total).toFixed(3)),
     loose_ml: Number((t.loose_ml + g.loose_ml).toFixed(3)),
     final_total_qty: Number((t.final_total_qty + g.final_total_qty).toFixed(3)),
-  }), { items: 0, store_room_qty: 0, outlet_qty: 0, store_outlet_total: 0, loose_ml: 0, final_total_qty: 0 });
+  }), { items: 0, by_location: new Array(locations.length).fill(0),
+        location_total: 0, loose_ml: 0, final_total_qty: 0 });
 
   return {
     header: {
@@ -628,6 +641,7 @@ function buildSummary(rows, groups, audit) {
       store_name: audit?.store_name || '',
       audit_date: audit?.audit_date || null,
       total_items: rows.length,
+      locations,
       by_basis: byBasis,
       // The four buckets the standard summary block prints. Everything that is
       // not a volume or a weight collapses into one count-based figure —

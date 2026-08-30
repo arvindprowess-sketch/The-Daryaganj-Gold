@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { query } from '../db.js';
+import { resolveLocation } from '../lib/locations.js';
 import { requireAuth, loadAuditForUser } from '../middleware/auth.js';
 import { forRole } from '../lib/blindCount.js';
 
@@ -35,6 +36,12 @@ router.post('/audits/:auditId/entries', async (req, res) => {
   const itemId = b.item_id;
   if (!itemId) return res.status(400).json({ error: 'item_id required' });
 
+  // Location is MANDATORY and must be a live entry in the global list. The UI
+  // keeps Save disabled without one; this is the half that cannot be bypassed,
+  // and it is what makes the report's location columns trustworthy.
+  const loc = await resolveLocation(b.location_id);
+  if (loc.error) return res.status(400).json({ error: loc.error });
+
   const { rows: itemRows } = await query('SELECT * FROM items WHERE id = $1 AND is_active = TRUE', [itemId]);
   const item = itemRows[0];
   if (!item) return res.status(404).json({ error: 'Item not found' });
@@ -64,10 +71,14 @@ router.post('/audits/:auditId/entries', async (req, res) => {
 
   const { rows } = await query(
     `INSERT INTO count_entries
-       (audit_id, item_id, qty, bottles, open_ml, location_text, remarks, photo_url, counted_by)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
-    [req.params.auditId, itemId, qty, bottles, openMl,
-     b.location_text || null, b.remarks || null, b.photo_url || null, req.user.id]
+       (audit_id, item_id, qty, bottles, open_ml, location_id, location_text,
+        remarks, photo_url, counted_by)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
+    // location_text is written from the chosen location's name, so the audit
+    // trail still records the words, and old rows stay readable alongside new
+    // ones without a special case.
+    [req.params.auditId, itemId, qty, bottles, openMl, loc.location.id, loc.location.name,
+     b.remarks || null, b.photo_url || null, req.user.id]
   );
   const entry = rows[0];
 

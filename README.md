@@ -466,16 +466,17 @@ report never demands a system stock upload:
 
 ```
 S.No. | LOC | Super Category | Category | Item Name | Unit |
-Bottle/Unit Size (ml) | Store Room Qty (Physical) | Outlet Qty (Physical) |
-Store+Outlet Total (native unit) | ML / Loose Qty (Open Bottle, ml) |
+Bottle/Unit Size (ml) |
+<one column per location> | Total (native unit) |
+ML / Loose Qty (Open Bottle, ml) |
 Final Total Qty (ML / GM / KG / Count) | Remarks
 ```
 
 **One formula covers the whole master** (`server/src/lib/measure.js`):
 
 ```
-Store+Outlet Total = Store Room Qty + Outlet Qty
-Final Total Qty    = (Store+Outlet Total × Bottle/Unit Size) + Loose ML
+Total (native unit) = sum of every location column
+Final Total Qty     = (Total × Bottle/Unit Size) + Loose ML
 ```
 
 Count-based items carry a size of 1, so they pass through unchanged — there is
@@ -504,11 +505,22 @@ the layout changes: `System Qty · Rate · Value · Variance · Variance Value`.
 Status bands come from the **settings** table (liquor 2%/4%, others 1%/3%
 defaults — not hardcoded).
 
-**Store Room vs Outlet** comes from the location recorded on each count entry,
-mapped through `location_zones` on Admin → Settings. Unrecognised names fall to
-a configurable default and are listed there for assignment, so an existing
-audit's entries can be mapped correctly and no quantity is ever dropped from
-both columns.
+**One column per location.** The report carries a column for each location in
+the global list, in `sort_order`, then a Total:
+
+```
+Kitchen | FOH/Bar | Store | L-4 | L-17 | Total (native unit)
+```
+
+The names are read from the `locations` table, never hardcoded — renaming a
+location renames its column, reordering reorders them, adding one adds a
+column. The same columns appear for every store, so two stores' reports can be
+compared line for line. `Total (native unit)` is the **sum of those columns**,
+not a separately aggregated figure, so the row always adds up across the page.
+
+A deactivated location keeps its column for as long as an audit still holds
+quantity in it — retiring a place must not erase the stock counted there — and
+the column disappears on its own once nothing references it.
 
 **Only items with physical stock** are listed — the standard "closing stock"
 basis. The exclusion is narrow: a row is dropped only when it has **no system
@@ -650,6 +662,85 @@ count (audit status `submitted`).
 > `variance_value` are all in the `FORBIDDEN_FOR_AUDITOR` set in
 > `blindCount.js`, and every report endpoint is admin-only — an auditor
 > requesting R4 gets a 403. This is design rule #1 and is enforced server-side.
+
+## Locations — a fixed global list
+
+Location used to be typed on every entry. Two auditors writing "Store Room" and
+"store room" produced two columns in the report, and 618 items meant 618 chances
+to spell one differently. It is now **chosen, not typed**.
+
+```
+locations: id · name · sort_order · is_active
+seeded:    Kitchen · FOH/Bar · Store · L-4 · L-17
+```
+
+**Global, not per store.** The same places exist in every outlet. Scoping the
+list to `store_id` would mean maintaining a copy per store and reports whose
+columns could not be compared between them. Admin → Settings → **Locations**
+renames, reorders, deactivates and adds; a change applies everywhere at once.
+
+**Mandatory, enforced twice.** The entry screen keeps Save disabled until a
+location is chosen, and the server rejects any entry whose `location_id` is
+missing, unknown or retired. The UI half is a convenience; the server half is
+what makes the report's location columns worth trusting.
+
+**Sticky.** An auditor stands in one place and counts everything there before
+moving on, so the last choice pre-fills the next item. It is keyed by AUDIT, so
+it resets when they switch store or audit — a location remembered across stores
+would silently mis-file a count. They can change it at any time.
+
+**`location_text` is still written**, from the chosen location's name. The audit
+trail records the words as well as the id, so a mapping can always be checked
+against what was actually recorded, and a rename does not rewrite history.
+
+### What the migration did with the free text
+
+Existing entries held typed values. Migration 010 mapped them and **created a
+location for anything that did not match**, rather than guessing:
+
+| Found | Became |
+| --- | --- |
+| `Kitchen` | mapped to the seeded **Kitchen** (case- and space-insensitive) |
+| `Bar`, `Store Room`, `Dry Store`, `Outlet`, `Pastry Section` | **new locations**, appended after the five |
+| no location at all | **Unspecified**, deactivated if nothing needed it |
+
+`Bar` is deliberately **not** folded into `FOH/Bar`, nor `Store Room` into
+`Store`. On an audit trail a guess that moves a recorded quantity into a place
+it was not counted is worse than an extra column — the admin can merge them on
+the Locations screen, having seen what was actually there. **No count entry
+lost its location.**
+
+## Two-box entry for weights and volumes
+
+200 grams had to be typed as `0.200`. The decimal point is where the mistakes
+happen: `0.2` and `0.02` look almost identical on a phone and differ by a factor
+of ten.
+
+An item measured in a **whole unit** now gets two boxes, the shape auditors
+already use for liquor, with the stored value shown live underneath:
+
+```
+Unit KG   →  [ 5 ] kg  [ 200 ] gm     = 5.200 KG
+Unit LTR  →  [ 2 ] ltr [ 500 ] ml     = 2.500 LTR
+```
+
+- Either box may be blank; blank is zero (`0 kg + 200 gm = 0.200 KG`)
+- The **stored value is unchanged** — one number, in the item's own unit, so
+  every report reads exactly as before
+- The sub-unit box is **not capped**: `2 kg + 1500 gm` is `3.500 KG`. An auditor
+  who counted 1500 g should be able to type it; rejecting the input would send
+  them back to the arithmetic the two boxes exist to remove
+- Both the phone and the desktop grid
+
+The split is decided by the unit **itself**, not by anything found inside it:
+
+| Unit | Boxes |
+| --- | --- |
+| `KG`, `kg`, `LTR`, `L` | two |
+| `GM`, `ML` | one — already the small unit |
+| `TIN (2.5 KG)`, `BTL (1LTR)` | one — these count tins and bottles; the size lives in Bottle/Unit Size |
+| `Nos`, `Pcs`, `Por`, `Pkt`, `PIECE` | one |
+| liquor | unchanged — Sealed bottles + Open ml |
 
 ## Finding an item while counting
 

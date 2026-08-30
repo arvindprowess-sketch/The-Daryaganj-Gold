@@ -32,20 +32,31 @@
 const FIRST_DATA_ROW = 6;
 
 // Column positions the formulas depend on. 1-based, matching Excel.
-const C = {
-  size: 7,        // G — Bottle/Unit Size
-  storeRoom: 8,   // H
-  outlet: 9,      // I
-  total: 10,      // J — Store+Outlet Total
-  loose: 11,      // K — ML / Loose Qty
-  final: 12,      // L — Final Total Qty
-  remarks: 13,    // M
-};
-// The quantity columns the LIVE TOTAL and every subtotal sum over.
-const QTY_COLS = [C.storeRoom, C.outlet, C.total, C.loose, C.final];
-// With system stock: System Qty (N), Value (P), Variance (Q), Variance Value
-// (R). Rate (O) is deliberately absent — summing a price list is meaningless.
-const SYS_SUM_COLS = [14, 16, 17, 18];
+//
+// The sheet is no longer a fixed width: there is one column per LOCATION, and
+// the location list is admin-editable. So the positions after column G are
+// computed from how many locations the report carries rather than written
+// down, and every formula below is built from these.
+//
+//   A..F  S.No. · LOC · Super Category · Category · Item Name · Unit
+//   G     Bottle/Unit Size
+//   H..   one column per location, in sort order
+//   ..    Total (native unit) · ML / Loose Qty · Final Total Qty · Remarks
+function layout(locationCount) {
+  const size = 7;
+  const firstLoc = 8;
+  const total = firstLoc + locationCount;
+  return {
+    size,
+    firstLoc,
+    lastLoc: total - 1,
+    total,
+    loose: total + 1,
+    final: total + 2,
+    remarks: total + 3,
+    firstSystem: total + 4,   // System Qty · Rate · Value · Variance · Var Value
+  };
+}
 
 function colLetter(i) {
   let s = '';
@@ -67,20 +78,30 @@ const ymd = (v) => {
   return Number.isNaN(d.getTime()) ? '' : d.toISOString().slice(0, 10);
 };
 
-const NOTES = [
-  '1. This report includes only items with physical stock (Store Room, Outlet, or open-bottle ML > 0). Nil-stock items are excluded, except where system stock exists for them.',
-  '2. "Store+Outlet Total" = Store Room Qty + Outlet Qty, in the item\'s native counting unit (bottles/packs/pieces).',
-  '3. "Final Total Qty" = (Store+Outlet) × Bottle/Unit Size + ML for items tracked by volume/weight per pack (e.g. liquor, syrups) — converting the count of closed bottles/packs plus any open/loose quantity into one true ML or GM figure. For items counted as whole units (cans, packets, portions, pieces) or bulk-weighed items (KG), Bottle/Unit Size is 1 and Final Total Qty = Store+Outlet as-is.',
+const notes = (locationNames) => [
+  '1. This report includes only items with physical stock in at least one location, or open-bottle ML > 0. Nil-stock items are excluded, except where system stock exists for them.',
+  `2. "Total (native unit)" = the sum of the location columns (${locationNames.join(', ')}), in the item's native counting unit (bottles/packs/pieces).`,
+  '3. "Final Total Qty" = Total × Bottle/Unit Size + ML for items tracked by volume/weight per pack (e.g. liquor, syrups) — converting the count of closed bottles/packs plus any open/loose quantity into one true ML or GM figure. For items counted as whole units (cans, packets, portions, pieces) or bulk-weighed items (KG), Bottle/Unit Size is 1 and Final Total Qty = Total as-is.',
   '4. "Remarks" shows what the Final Total Qty is actually measured in for that row: ML, GM, KG, or a count unit (Nos/Pkt/Por/Piece/Meter).',
   '5. The "LIVE TOTAL" row on the Audit Detail sheet uses SUBTOTAL formulas, so it updates automatically to reflect only the rows visible when a filter is applied.',
 ];
 
 export function buildAuditWorkbook({
   audit, rows, groups, grand, summary, totals, withSystem, grouped, stamp,
-  headerLines, cols, nilStock,
+  headerLines, cols, nilStock, locations = [],
 }) {
   const lastCol = cols.length;
-  const sumCols = withSystem ? [...QTY_COLS, ...SYS_SUM_COLS] : QTY_COLS;
+  const L = layout(locations.length);
+  const locCols = locations.map((_, i) => L.firstLoc + i);
+  // Every column the LIVE TOTAL and the subtotals sum over: each location, the
+  // total, loose ml, the final total — and with system stock, System Qty,
+  // Value, Variance and Variance Value. Rate is deliberately absent; summing a
+  // price list is meaningless.
+  const sumCols = [...locCols, L.total, L.loose, L.final,
+    ...(withSystem ? [L.firstSystem, L.firstSystem + 2, L.firstSystem + 3, L.firstSystem + 4] : [])];
+  // The Total cell adds its own row's location columns, so the sheet shows the
+  // reconciliation rather than asking the reader to take it on trust.
+  const locRange = (r) => `${colLetter(L.firstLoc)}${r}:${colLetter(L.lastLoc)}${r}`;
 
   // ── Detail sheet ─────────────────────────────────────────────────────────
   const aoa = [];
@@ -88,9 +109,9 @@ export function buildAuditWorkbook({
   const push = (row) => { aoa.push(pad(row)); return aoa.length; }; // → 1-based row number
 
   const title = `${(audit.store_name || '').toUpperCase()} — PHYSICAL ${withSystem ? 'STOCK VARIANCE' : 'STOCK AUDIT'} REPORT`;
-  const basis = withSystem
-    ? 'Physical Count basis: Store Room + Outlet + Open/Loose Bottle (ML)  |  Compared against imported system stock'
-    : 'Physical Count basis: Store Room + Outlet + Open/Loose Bottle (ML)  |  No system stock used';
+  const locNames = locations.map((l) => l.name);
+  const basis = `Physical Count basis: ${locNames.join(' + ')} + Open/Loose Bottle (ML)  |  `
+    + (withSystem ? 'Compared against imported system stock' : 'No system stock used');
   // Everything the reader needs to trust the numbers, on one line, so the data
   // block stays anchored at row 6.
   const subtitle = [stamp, basis, ...headerLines].filter(Boolean).join('  |  ');
@@ -103,16 +124,22 @@ export function buildAuditWorkbook({
   // any nested SUBTOTAL, so the subtotal rows further down are never counted
   // twice. Placed above the header so it stays on screen while scrolling.
   const liveRow = [];
-  liveRow[C.size - 1] = 'LIVE TOTAL';
-  const totalFor = (c) => ({
-    [C.storeRoom]: totals.store_room_qty, [C.outlet]: totals.outlet_qty,
-    [C.total]: totals.store_outlet_total, [C.loose]: totals.loose_ml,
-    [C.final]: totals.final_total_qty, 14: totals.system_qty, 16: totals.physical_value,
-    17: totals.variance, 18: totals.variance_value,
-  }[c]);
+  liveRow[L.size - 1] = 'LIVE TOTAL';
+  // One lookup used by the LIVE TOTAL and by every subtotal, so a column can
+  // never be totalled from a different figure than the one above it.
+  const figure = (b) => (c) => {
+    const li = locCols.indexOf(c);
+    if (li !== -1) return b.by_location?.[li];
+    return {
+      [L.total]: b.location_total, [L.loose]: b.loose_ml, [L.final]: b.final_total_qty,
+      [L.firstSystem]: b.system_qty, [L.firstSystem + 2]: b.physical_value,
+      [L.firstSystem + 3]: b.variance, [L.firstSystem + 4]: b.variance_value,
+    }[c];
+  };
+  const totalFor = figure(totals);
   for (const c of sumCols) {
-    const L = colLetter(c);
-    liveRow[c - 1] = cell(`SUBTOTAL(9,${L}${FIRST_DATA_ROW}:${L}1048576)`, totalFor(c));
+    const CL = colLetter(c);
+    liveRow[c - 1] = cell(`SUBTOTAL(9,${CL}${FIRST_DATA_ROW}:${CL}1048576)`, totalFor(c));
   }
   for (let i = 0; i < lastCol; i++) if (liveRow[i] === undefined) liveRow[i] = null;
   push(liveRow);
@@ -122,13 +149,16 @@ export function buildAuditWorkbook({
   // A data row's two computed cells reference only its own row, so inserting
   // subtotal rows between blocks cannot disturb them.
   const dataRow = (d, r) => {
+    const G = colLetter(L.size);
+    const T = colLetter(L.total);
+    const K = colLetter(L.loose);
     const base = [
       d.s_no, d.loc, d.super_category, d.category, d.name, d.unit,
       d.bottle_unit_size,
-      blank(d.store_room_qty), blank(d.outlet_qty),
-      cell(`H${r}+I${r}`, d.store_outlet_total),
+      ...locations.map((_, i) => blank(d.by_location?.[i])),
+      cell(`SUM(${locRange(r)})`, d.location_total),
       blank(d.loose_ml),
-      cell(`IF(G${r}="",H${r}+I${r},(H${r}+I${r})*G${r}+K${r})`, d.final_total_qty),
+      cell(`IF(${G}${r}="",${T}${r},${T}${r}*${G}${r}+${K}${r})`, d.final_total_qty),
       // NOT COUNTED rides alongside the measurement basis rather than
       // replacing it, so neither piece of information is lost.
       d.not_counted ? `${d.remarks} · NOT COUNTED` : d.remarks,
@@ -144,16 +174,11 @@ export function buildAuditWorkbook({
   const subtotal = (label, bucket, from, to, labelCol) => {
     const r = [];
     r[labelCol - 1] = label;
-    r[C.remarks - 1] = `${bucket.items} items`;
-    const val = (c) => ({
-      [C.storeRoom]: bucket.store_room_qty, [C.outlet]: bucket.outlet_qty,
-      [C.total]: bucket.store_outlet_total, [C.loose]: bucket.loose_ml,
-      [C.final]: bucket.final_total_qty, 14: bucket.system_qty,
-      16: bucket.physical_value, 17: bucket.variance, 18: bucket.variance_value,
-    }[c]);
+    r[L.remarks - 1] = `${bucket.items} items`;
+    const val = figure(bucket);
     for (const c of sumCols) {
-      const L = colLetter(c);
-      r[c - 1] = cell(`SUBTOTAL(9,${L}${from}:${L}${to})`, val(c));
+      const CL = colLetter(c);
+      r[c - 1] = cell(`SUBTOTAL(9,${CL}${from}:${CL}${to})`, val(c));
     }
     for (let i = 0; i < lastCol; i++) if (r[i] === undefined) r[i] = null;
     return r;
@@ -189,9 +214,10 @@ export function buildAuditWorkbook({
   }
 
   // ── Summary sheet ────────────────────────────────────────────────────────
-  const SUM_COLS = ['Super Category', 'Category', 'Store Room Qty (Physical)',
-                    'Outlet Qty (Physical)', 'Store+Outlet Total (native unit)',
-                    'ML / Loose Qty (Open Bottle, ml)',
+  // The summary carries the SAME location columns as the detail sheet, so a
+  // category total can be checked against the rows that produced it.
+  const SUM_COLS = ['Super Category', 'Category', ...locNames,
+                    'Total (native unit)', 'ML / Loose Qty (Open Bottle, ml)',
                     'Final Total Qty (ML / GM / KG / Count)'];
   const h = summary.header;
   const b = h.buckets;
@@ -214,18 +240,19 @@ export function buildAuditWorkbook({
   for (const g of summary.superCategories) {
     let first = true;
     for (const c of summary.categories.filter((x) => x.super_category === g.super_category)) {
-      sum.push([first ? c.super_category : null, c.category, blank(c.store_room_qty),
-                blank(c.outlet_qty), blank(c.store_outlet_total), blank(c.loose_ml),
-                blank(c.final_total_qty)]);
+      sum.push([first ? c.super_category : null, c.category,
+                ...locations.map((_, i) => blank(c.by_location?.[i])),
+                blank(c.location_total), blank(c.loose_ml), blank(c.final_total_qty)]);
       first = false;
     }
   }
   const gt = summary.grand;
-  sum.push(['Grand Total', null, blank(gt.store_room_qty), blank(gt.outlet_qty),
-            blank(gt.store_outlet_total), blank(gt.loose_ml), blank(gt.final_total_qty)]);
+  sum.push(['Grand Total', null,
+            ...locations.map((_, i) => blank(gt.by_location?.[i])),
+            blank(gt.location_total), blank(gt.loose_ml), blank(gt.final_total_qty)]);
   sum.push([]);
   sum.push(['Notes / Methodology:']);
-  NOTES.forEach((t) => sum.push([t]));
+  notes(locNames).forEach((t) => sum.push([t]));
 
   return [
     { name: 'Summary report', aoa: sum },
