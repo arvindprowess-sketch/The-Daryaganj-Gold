@@ -846,9 +846,16 @@ Two migrations close that off:
   count is a decision, not a default.
 
   A deactivated stray leaves the auditor's dropdown at once, so nothing new can
-  be counted there, while its report column survives as long as the delivered
-  audit references it and the figures still reconcile. Clear or reassign those
-  entries and the next deploy removes it.
+  be counted there, while its report column survives as long as the report is
+  **actually reading data from it** — which means the submitted rows in
+  snapshot mode, and the live entries while the count is in progress. A
+  retired location whose entries nobody has submitted gets no column, because
+  the report is not reading it.
+
+  To be rid of one for good, use **Move entries to…** on Admin → Settings →
+  Locations. It moves both the live and the submitted rows to a real location
+  — quantities untouched, only where they are recorded, and logged — after
+  which the stray holds nothing and the next deploy deletes it.
 
 It also drops the now-obsolete `location_zones` table from migration 008.
 

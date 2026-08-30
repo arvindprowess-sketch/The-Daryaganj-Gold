@@ -29,24 +29,37 @@ export async function allLocations() {
 }
 
 // The columns a report shows: every ACTIVE location, plus any INACTIVE one
-// this audit actually has quantity in.
+// that the report is ACTUALLY READING data from.
 //
 // A deactivated location must not erase history. If an auditor counted 40 kg
 // in "Dry Store" and the admin later retires it, the report still has to show
 // those 40 kg or the total stops reconciling — so the column stays for as long
 // as the data does, and disappears on its own once nothing references it.
+//
+// "The data" means the data THIS REPORT READS, which is the whole point:
+//
+//   snapshot mode — the submitted rows, and nothing else. A retired location
+//                   with live entries nobody has submitted is not in the
+//                   report, so it must not have a column either.
+//   live mode     — the live entries.
+//
+// Consulting count_entries in snapshot mode was a bug: it printed a column
+// for a location whose quantity the report was not reading, so the column
+// came out empty on every single row.
 export async function reportLocations(auditId, submissionIds = null) {
+  const snapshot = Array.isArray(submissionIds);
   const { rows } = await query(
     `SELECT l.id, l.name, l.sort_order, l.is_active
        FROM locations l
       WHERE l.is_active
-         OR EXISTS (SELECT 1 FROM count_entries ce
-                     WHERE ce.location_id = l.id AND ce.audit_id = $1)
          OR ($2::int[] IS NOT NULL AND EXISTS (
                SELECT 1 FROM submission_entries se
                 WHERE se.location_id = l.id AND se.submission_id = ANY($2::int[])))
+         OR (NOT $3::boolean AND EXISTS (
+               SELECT 1 FROM count_entries ce
+                WHERE ce.location_id = l.id AND ce.audit_id = $1 AND ce.status = 'active'))
       ORDER BY l.sort_order, l.id`,
-    [auditId, submissionIds && submissionIds.length ? submissionIds : null]
+    [auditId, snapshot && submissionIds.length ? submissionIds : null, snapshot]
   );
   return rows;
 }

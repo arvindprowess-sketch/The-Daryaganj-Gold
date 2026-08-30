@@ -57,6 +57,9 @@ export default function Settings() {
 // Not per-store on purpose. The same five places exist in every outlet, and
 // five copies of the list would mean reports that cannot be compared.
 // ═══════════════════════════════════════════════════════════════════════════
+// The five the report is built around. Anything else is a leftover.
+const STANDARD = ['Kitchen', 'FOH/Bar', 'Store', 'L-4', 'L-17'];
+
 function Locations() {
   const [rows, setRows] = useState(null);
   const [adding, setAdding] = useState('');
@@ -90,6 +93,24 @@ function Locations() {
     await api.put(`/meta/locations/${b.id}`, { sort_order: a.sort_order });
     await load();
   }
+  // A stray that still holds counts cannot be deleted and keeps its report
+  // column. Moving its entries to a real location is what actually resolves
+  // it — after which the next deploy's cleanup removes it.
+  async function reassign(l, toId) {
+    if (!toId) return;
+    const to = rows.find((x) => String(x.id) === String(toId));
+    if (!confirm(`Move all ${l.entry_count} entries from "${l.name}" to "${to.name}"?\n\n`
+      + 'Quantities are unchanged — only where they are recorded. This also updates '
+      + 'submitted data, so the reports stop showing a column for '
+      + `"${l.name}".`)) return;
+    setErr('');
+    try {
+      const r = await api.post(`/meta/locations/${l.id}/reassign`, { to_location_id: to.id });
+      await load();
+      toast(`Moved ${r.live + r.submitted} entries to ${to.name}`);
+    } catch (e) { setErr(e.message); }
+  }
+
   async function remove(l) {
     const msg = l.entry_count > 0
       ? `"${l.name}" has ${l.entry_count} count entries. It will be DEACTIVATED — it stops being offered when counting, and its report column stays for as long as the data does. Continue?`
@@ -115,6 +136,17 @@ function Locations() {
         cannot type a location.
       </p>
 
+      {rows.some((l) => !STANDARD.includes(l.name)) && (
+        <div className="mb-3 rounded-lg border-2 border-amber-400 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+          <span className="font-bold">
+            {rows.filter((l) => !STANDARD.includes(l.name)).length} location(s) outside the standard five
+          </span>{' '}
+          — each one the reports still hold data for adds a column. Use
+          <em> Move entries to…</em> to put those counts in a real location; once a stray
+          holds nothing, the next deploy removes it.
+        </div>
+      )}
+
       <div className="divide-y rounded-xl border mb-3">
         {ordered.map((l, i) => (
           <div key={l.id} className={`flex flex-wrap items-center gap-2 px-3 py-2 ${l.is_active ? '' : 'bg-slate-50'}`}>
@@ -130,7 +162,17 @@ function Locations() {
               {l.entry_count} {l.entry_count === 1 ? 'entry' : 'entries'}
             </span>
             {!l.is_active && <span className="chip bg-slate-200 text-slate-600 border-slate-300">inactive</span>}
-            <div className="ml-auto flex gap-3">
+            <div className="ml-auto flex flex-wrap items-center gap-3">
+              {/* Only offered where it is the answer: a location that is not
+                  one of the five and still holds entries. */}
+              {l.entry_count > 0 && !STANDARD.includes(l.name) && (
+                <select className="field py-1 px-2 text-sm w-44" defaultValue=""
+                        onChange={(e) => { reassign(l, e.target.value); e.target.value = ''; }}>
+                  <option value="">Move entries to…</option>
+                  {ordered.filter((x) => x.is_active && x.id !== l.id)
+                    .map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}
+                </select>
+              )}
               <button className="text-brand font-medium text-sm"
                       onClick={() => save(l, { is_active: !l.is_active })}>
                 {l.is_active ? 'Deactivate' : 'Reactivate'}

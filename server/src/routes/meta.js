@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { query } from '../db.js';
+import { query, withTransaction } from '../db.js';
 import { requireAuth, requireRole } from '../middleware/auth.js';
 import { requireIntParams } from '../lib/asyncRoutes.js';
 import { logActivity } from '../lib/activityLog.js';
@@ -166,6 +166,51 @@ router.put('/locations/:id', requireRole('admin'), requireIntParams('id'), async
     throw err;
   }
 });
+
+// ── Move a location's entries somewhere real ───────────────────────────────
+// A location that still holds counts cannot be deleted, and its column stays
+// on the report for as long as the data does. That is the correct default —
+// but it left an admin with no way out except editing the database by hand.
+//
+// This is the way out: move the entries to a location that IS one of the five,
+// after which the stray holds nothing and the next cleanup removes it.
+//
+// The quantity is not touched — only where it is recorded. `location_text`
+// keeps the original words, so the audit trail still shows what was first
+// entered, and the move itself is logged with the counts.
+router.post('/locations/:id/reassign', requireRole('admin'), requireIntParams('id'),
+  async (req, res) => {
+    const from = Number(req.params.id);
+    const to = Number(req.body?.to_location_id);
+    if (!Number.isInteger(to)) return res.status(400).json({ error: 'to_location_id required' });
+    if (to === from) return res.status(400).json({ error: 'Choose a different location' });
+
+    const { rows: locs } = await query(
+      'SELECT id, name, is_active FROM locations WHERE id = ANY($1::int[])', [[from, to]]);
+    const src = locs.find((l) => l.id === from);
+    const dst = locs.find((l) => l.id === to);
+    if (!src || !dst) return res.status(404).json({ error: 'Location not found' });
+    if (!dst.is_active) {
+      return res.status(400).json({ error: `"${dst.name}" is not in use — pick a live location` });
+    }
+
+    const moved = await withTransaction(async (c) => {
+      const live = (await c.query(
+        'UPDATE count_entries SET location_id=$2 WHERE location_id=$1', [from, to])).rowCount;
+      // Submitted rows move too, or the reports would keep the old column.
+      const submitted = (await c.query(
+        'UPDATE submission_entries SET location_id=$2 WHERE location_id=$1', [from, to])).rowCount;
+      await logActivity({
+        entityType: 'location', entityId: from, action: 'reassign_entries',
+        recordCount: live + submitted,
+        detail: { from: src.name, to: dst.name, count_entries: live, submission_entries: submitted },
+        userId: req.user.id,
+      }, c);
+      return { live, submitted };
+    });
+
+    res.json({ ok: true, from: src.name, to: dst.name, ...moved });
+  });
 
 // Hard delete only when nothing was ever counted there. Anything with history
 // is deactivated instead, so no entry is left pointing at a location that no
