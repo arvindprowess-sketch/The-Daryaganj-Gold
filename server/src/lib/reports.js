@@ -188,6 +188,21 @@ export function standardRow(i) {
   };
 }
 
+// ── What belongs on a report ───────────────────────────────────────────────
+// A row earns its place by having been COUNTED — an entry against it, or an
+// explicit Not Applicable. An item nobody touched has nothing to report: it
+// prints a line of zeroes that says only "we did not look here", and hundreds
+// of them bury the findings.
+//
+// An uncounted item is not ignored, it is just reported where it means
+// something: R4 flags it NOT COUNTED when system stock says it should be
+// there, and R6 lists it. R1, R2 and R3 show what was found.
+//
+// One predicate, shared, because this is exactly the kind of rule three
+// reports each implement slightly differently until they disagree — which is
+// what happened: R3 was still listing every liquor item in the master.
+export const wasCounted = (r) => r.entry_count > 0 || r.not_applicable;
+
 // Every item on this audit, as standard rows, with the report's columns.
 // `loc` is the store code, part of the standard format.
 export async function standardRows(auditId, source = null) {
@@ -210,7 +225,7 @@ export async function physicalSummary(auditId) {
   const { rows, locations, audit } = await standardRows(auditId);
   // Only what was actually counted. An item nobody counted has nothing to
   // summarise, and listing hundreds of zero rows buries the real figures.
-  const counted = rows.filter((r) => r.entry_count > 0 || r.not_applicable);
+  const counted = rows.filter(wasCounted);
 
   const bucket = (extra) => ({
     ...extra, items: 0,
@@ -278,7 +293,7 @@ export async function itemDetailTotals(auditId) {
   // admin count screen and never appears in a report given to the client.
   return {
     audit, locations,
-    rows: rows.filter((r) => r.entry_count > 0 || r.not_applicable),
+    rows: rows.filter(wasCounted),
   };
 }
 
@@ -327,7 +342,9 @@ export async function liquorReport(auditId) {
   // exactly as it does on every other report.
   return {
     audit, locations,
-    rows: rows.filter((r) => r.is_liquor),
+    // Liquor that was actually counted. R3 used to list every liquor item in
+    // the master, so 63 of its 64 rows were zeroes.
+    rows: rows.filter((r) => r.is_liquor && wasCounted(r)),
     footnote: LIQUOR_ESTIMATION_NOTE,
   };
 }

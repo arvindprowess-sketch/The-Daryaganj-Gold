@@ -537,6 +537,22 @@ Super Category | Category | Item Name | Unit | ... figures ...
   multiple entries, zero-quantity entries, items counted without a photo, items
   with no system figure, and **items with system stock that were never counted**
 
+### What earns a place on a report
+
+A row belongs on R1, R2 or R3 because it was **counted** — an entry against it,
+or an explicit Not Applicable. An item nobody touched has nothing to report: it
+prints a line of zeroes that says only "we did not look here", and hundreds of
+them bury the findings.
+
+An uncounted item is not ignored, it is reported where it means something —
+**R4** flags it `NOT COUNTED` when system stock says it should be there, and
+**R6** lists it.
+
+One predicate, `wasCounted`, shared by all three. This is exactly the kind of
+rule three reports each implement slightly differently until they disagree,
+which is what happened: R3 was still listing every liquor item in the master,
+so 63 of its 64 rows were zeroes.
+
 ### One column definition, shared
 
 R1, R2, R3 and R4 each used to build their own columns, and they drifted: R4
