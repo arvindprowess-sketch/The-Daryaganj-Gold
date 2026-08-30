@@ -113,11 +113,17 @@ async function deleteImpact(id) {
             -- Other history that also carries a NOT NULL reference to this user.
             (SELECT count(*)::int FROM audit_na WHERE marked_by = $1) AS na_marks,
             (SELECT count(*)::int FROM photo_reviews WHERE submitted_by = $1) AS photo_reviews,
-            (SELECT count(*)::int FROM user_stores WHERE user_id = $1) AS store_links`,
+            (SELECT count(*)::int FROM user_stores WHERE user_id = $1) AS store_links,
+            -- A submission and its rows also carry a permanent reference. An
+            -- auditor whose live entries were cleared but who has submitted
+            -- would otherwise reach the hard-delete branch and fail on a
+            -- foreign key.
+            (SELECT count(*)::int FROM audit_submissions WHERE submitted_by = $1) AS submissions,
+            (SELECT count(*)::int FROM submission_entries WHERE counted_by = $1) AS submitted_rows`,
     [id]
   );
   const r = rows[0];
-  const history = r.entries + r.na_marks + r.photo_reviews;
+  const history = r.entries + r.na_marks + r.photo_reviews + r.submissions + r.submitted_rows;
   return {
     ...r,
     // Anything that references the account permanently makes this a soft delete;
@@ -127,6 +133,7 @@ async function deleteImpact(id) {
       ? `${r.entries.toLocaleString()} count entries across ${r.audits} audit(s)`
       : r.na_marks > 0 ? `${r.na_marks} not-applicable mark(s)`
       : r.photo_reviews > 0 ? `${r.photo_reviews} photo submission(s)`
+      : r.submissions > 0 ? `${r.submissions} submitted count(s)`
       : null,
   };
 }

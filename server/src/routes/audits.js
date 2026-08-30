@@ -232,31 +232,51 @@ router.get('/:id/submission', async (req, res) => {
 //   Chandan   103 items    Still counting
 async function auditorPanel(auditId) {
   const { rows } = await query(
-    `SELECT u.id AS user_id, u.name, u.username,
+    `WITH participants AS (
+       -- Everyone MAPPED to the store, so somebody who has not started still
+       -- shows as "still counting" rather than being invisible...
+       SELECT u.id, u.name, u.username, u.role, TRUE AS assigned
+         FROM audits a
+         JOIN user_stores us ON us.store_id = a.store_id
+         JOIN users u ON u.id = us.user_id AND u.role = 'auditor' AND u.is_active
+        WHERE a.id = $1
+       UNION
+       -- ...plus anyone who has actually COUNTED on this audit, whoever they
+       -- are. An admin entering counts on the desktop grid belongs here: their
+       -- entries reach no report until they are submitted, and leaving them
+       -- off this panel is what made that invisible.
+       SELECT u.id, u.name, u.username, u.role, FALSE
+         FROM count_entries ce
+         JOIN users u ON u.id = ce.counted_by
+        WHERE ce.audit_id = $1 AND ce.status = 'active'
+     )
+     SELECT p.id AS user_id, p.name, p.username, p.role, bool_or(p.assigned) AS assigned,
             sub.id AS submission_id, sub.submitted_at, sub.entry_count, sub.item_count,
             (SELECT count(*)::int FROM count_entries ce
-              WHERE ce.audit_id = a.id AND ce.counted_by = u.id AND ce.status='active') AS live_entries,
+              WHERE ce.audit_id = $1 AND ce.counted_by = p.id AND ce.status='active') AS live_entries,
             (SELECT count(DISTINCT ce.item_id)::int FROM count_entries ce
-              WHERE ce.audit_id = a.id AND ce.counted_by = u.id AND ce.status='active') AS live_items,
+              WHERE ce.audit_id = $1 AND ce.counted_by = p.id AND ce.status='active') AS live_items,
             cl.cleared_at, cu.name AS cleared_by_name
-       FROM audits a
-       JOIN user_stores us ON us.store_id = a.store_id
-       JOIN users u ON u.id = us.user_id AND u.role = 'auditor' AND u.is_active
+       FROM participants p
        LEFT JOIN audit_submissions sub
-              ON sub.audit_id = a.id AND sub.submitted_by = u.id AND sub.status = 'active'
+              ON sub.audit_id = $1 AND sub.submitted_by = p.id AND sub.status = 'active'
        LEFT JOIN LATERAL (
          SELECT * FROM audit_submissions x
-          WHERE x.audit_id = a.id AND x.submitted_by = u.id AND x.status = 'cleared'
+          WHERE x.audit_id = $1 AND x.submitted_by = p.id AND x.status = 'cleared'
           ORDER BY x.cleared_at DESC LIMIT 1
        ) cl ON sub.id IS NULL
        LEFT JOIN users cu ON cu.id = cl.cleared_by
-      WHERE a.id = $1
-      ORDER BY u.name`,
+      GROUP BY p.id, p.name, p.username, p.role, sub.id, sub.submitted_at,
+               sub.entry_count, sub.item_count, cl.cleared_at, cu.name
+      ORDER BY p.name`,
     [auditId]
   );
   return rows.map((r) => ({
     ...r,
     state: r.submission_id ? 'submitted' : r.cleared_at ? 'cleared' : 'counting',
+    // The figure that matters: counted, but in no standing submission, so in
+    // no report. Silent data loss unless somebody is told.
+    unsubmitted: r.submission_id ? 0 : Number(r.live_entries || 0),
   }));
 }
 

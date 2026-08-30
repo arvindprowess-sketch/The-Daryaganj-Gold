@@ -69,6 +69,15 @@ export default function AuditSessions() {
       setClearing(null); await load();
     } catch (e) { setClearErr(e.message); } finally { setBusy(false); }
   }
+  // An admin's own counts reach no report until they are submitted, exactly
+  // like an auditor's. Without this the entries just sat there.
+  async function submitMine(a) {
+    if (!confirm('Submit your own count entries for this store?\n\n'
+      + 'They will appear in the reports alongside whoever else has submitted.')) return;
+    setErr('');
+    try { await api.post(`/audits/${a.id}/submit`); await load(); }
+    catch (e) { setErr(e.message); }
+  }
   async function close(a) {
     if (!confirm(`Close audit for ${a.store_name}? Auditors can no longer add entries.`)) return;
     await api.post(`/audits/${a.id}/close`); load();
@@ -159,7 +168,10 @@ export default function AuditSessions() {
                     )}
                     {(panels[a.id] || []).map((p) => (
                       <div key={p.user_id} className="flex flex-wrap items-center gap-x-4 gap-y-1 px-3 py-2 text-sm">
-                        <span className="font-medium w-40">{p.name}</span>
+                        <span className="font-medium w-40">
+                          {p.name}
+                          {p.role === 'admin' && <span className="text-slate-400 font-normal"> (admin)</span>}
+                        </span>
                         <span className="text-slate-600 w-24 tabular-nums">
                           {p.state === 'submitted' ? p.item_count : p.live_items} items
                         </span>
@@ -169,10 +181,24 @@ export default function AuditSessions() {
                             : p.state === 'cleared' ? `Cleared ${fmtDateTime(p.cleared_at)}${p.cleared_by_name ? ` by ${p.cleared_by_name}` : ''} — can submit again`
                             : 'Still counting'}
                         </span>
-                        {p.state === 'submitted' && (
-                          <button className="text-red-600 font-medium ml-auto"
-                                  onClick={() => askClear(a, p.user_id)}>Clear</button>
+                        {/* Counted, but in no standing submission — so in no
+                            report. Say so plainly rather than letting the
+                            entries sit there unreported. */}
+                        {p.unsubmitted > 0 && (
+                          <span className="text-orange-700">
+                            {p.unsubmitted} entr{p.unsubmitted === 1 ? 'y is' : 'ies are'} not in any report yet
+                          </span>
                         )}
+                        <span className="ml-auto flex gap-3">
+                          {p.role === 'admin' && p.unsubmitted > 0 && (
+                            <button className="text-brand font-medium"
+                                    onClick={() => submitMine(a)}>Submit mine</button>
+                          )}
+                          {p.state === 'submitted' && (
+                            <button className="text-red-600 font-medium"
+                                    onClick={() => askClear(a, p.user_id)}>Clear</button>
+                          )}
+                        </span>
                       </div>
                     ))}
                   </div>

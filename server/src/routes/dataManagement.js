@@ -375,7 +375,17 @@ router.get('/readiness', async (req, res) => {
             -- An entry with no location at all is left out of every location
             -- column, so its quantity would go unreported.
             (SELECT count(*)::int FROM count_entries
-              WHERE status='active' AND location_id IS NULL) AS entries_no_location`
+              WHERE status='active' AND location_id IS NULL) AS entries_no_location,
+            -- Counted, but in no standing submission, so in no report. Reports
+            -- read submissions; an entry nobody submitted is invisible, and an
+            -- audit product must not lose a count quietly.
+            (SELECT count(*)::int FROM count_entries ce
+               JOIN audits a ON a.id = ce.audit_id AND a.status <> 'closed'
+              WHERE ce.status = 'active'
+                AND NOT EXISTS (SELECT 1 FROM audit_submissions s
+                                 WHERE s.audit_id = ce.audit_id
+                                   AND s.submitted_by = ce.counted_by
+                                   AND s.status = 'active')) AS entries_unsubmitted`
   );
   const s = stats[0];
 
@@ -414,6 +424,11 @@ router.get('/readiness', async (req, res) => {
       detail: s.entries_no_location === 0
         ? 'Every entry has a location'
         : `${s.entries_no_location} entr(ies) carry no location and are left out of the location columns, so their quantity is not reported.` },
+    { key: 'entries_unsubmitted', label: 'Counted but not submitted',
+      ok: s.entries_unsubmitted === 0,
+      detail: s.entries_unsubmitted === 0
+        ? 'Every count entry is in a submission'
+        : `${s.entries_unsubmitted} count entr(ies) are in no submission, so they are in no report. The person who entered them has to submit — see the per-auditor panel on Audit sessions.` },
     { key: 'demo_data', label: 'Demo data present', ok: !demo.present,
       detail: demo.present
         ? `${demo.users} users, ${demo.stores} stores, ${demo.items} items, ${demo.audits} audits, ${demo.entries} entries`

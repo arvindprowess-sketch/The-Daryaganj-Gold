@@ -1,6 +1,6 @@
 import { query } from '../db.js';
 import { measurementBasis, finalTotals, BASES } from './measure.js';
-import { auditSource, submissionIds, SNAPSHOT, CLEARED } from './submissions.js';
+import { auditSource, submissionIds, clearedNotice, SNAPSHOT, CLEARED } from './submissions.js';
 import { reportLocations } from './locations.js';
 
 export const LIQUOR_ESTIMATION_NOTE =
@@ -771,6 +771,25 @@ export async function consolidated(auditIds) {
   for (const id of auditIds) {
     const audit = await getAudit(id);
     if (!audit) continue;
+
+    // A store whose submitted data was cleared has NOTHING to consolidate.
+    // Left alone it reported every item at zero value, which reads as "counted
+    // and found empty" — the same false finding the single-store reports
+    // refuse to print. R5 has no :auditId, so it never passed through that
+    // guard; it makes the same call here instead.
+    const src = await auditSource(id);
+    if (src.mode === CLEARED) {
+      stores.push({
+        audit_id: id, store_name: audit.store_name, audit_date: audit.audit_date,
+        status: audit.status, cleared: clearedNotice(src.cleared),
+        items: null, physical_value: null, total_variance_qty: null,
+        total_variance_value: null, critical_items: null, no_system_data: null,
+        has_system_stock: false, system_source: null, provisional: false,
+        uncounted: null, counted: null,
+      });
+      continue;
+    }
+
     const { rows, groups, provisional, progress, totals, hasSystemStock, provenance } =
       await varianceReport(id);
     // `value` became `physical_value` when R4 split it into physical / system /

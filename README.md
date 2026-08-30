@@ -413,6 +413,24 @@ Sunil Verma     287 items    Submitted 23:52    [Clear]
 Chandan         103 items    Still counting
 ```
 
+### A count that reaches no report
+
+Reports read submissions, so a count entry in **no** standing submission is in
+no report. That is correct — but it must never be silent, and it was: an admin
+entering counts on the desktop grid produced entries that saved, appeared on
+the admin screen, and never reached a single report.
+
+Three things now make it impossible to miss:
+
+- the per-auditor panel lists **anyone who has counted**, not only the auditors
+  mapped to the store, so an admin's own entries appear there
+- each line states `N entries are not in any report yet`
+- **System Readiness** carries a *Counted but not submitted* check across every
+  open audit
+
+An admin with unsubmitted entries gets a **Submit mine** action: their count is
+their own submission, exactly like an auditor's.
+
 ### Overlap — the cost of the separation
 
 Auditors can no longer see each other's work, so two of them may count the same

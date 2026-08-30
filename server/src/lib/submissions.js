@@ -152,7 +152,12 @@ export async function refreshAuditStatus(client, auditId) {
             count(*) FILTER (WHERE sub.id IS NOT NULL)::int AS submitted
        FROM audits a
        JOIN user_stores us ON us.store_id = a.store_id
-       JOIN users u ON u.id = us.user_id AND u.role = 'auditor' AND u.is_active
+       -- Demo data is its own world: a demo audit is completed by its demo
+       -- auditors, a real one by real people. Matching on the flag stops a
+       -- stray demo account holding a live store open forever, without
+       -- breaking a demo database where every auditor is seeded.
+       JOIN users u ON u.id = us.user_id AND u.role = 'auditor'
+                   AND u.is_active AND u.is_demo = a.is_demo
        LEFT JOIN audit_submissions sub
               ON sub.audit_id = a.id AND sub.submitted_by = u.id AND sub.status = 'active'
       WHERE a.id = $1`,
