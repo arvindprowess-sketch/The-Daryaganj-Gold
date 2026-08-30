@@ -51,8 +51,14 @@ router.post('/', async (req, res) => {
   try {
     const user = await withTransaction(async (c) => {
       const { rows } = await c.query(
-        `INSERT INTO users (username, name, password_hash, role, is_active)
-         VALUES ($1, $2, $3, $4, $5)
+        // must_change_password: an admin choosing a password means the admin
+        // KNOWS it — it was typed here and passed on by message. The account
+        // is not the auditor's own until they have set their own password, and
+        // an audit trail that says "Rakesh counted this" has to mean Rakesh.
+        // The create:admin CLI already works this way; this is the same rule.
+        `INSERT INTO users (username, name, password_hash, role, is_active,
+                            must_change_password)
+         VALUES ($1, $2, $3, $4, $5, TRUE)
          RETURNING id, username, name, role, is_active, created_at`,
         [username, name, hash, role, is_active]
       );
@@ -81,7 +87,11 @@ router.put('/:id', requireIntParams('id'), async (req, res) => {
          name = COALESCE($2, name),
          role = COALESCE($3, role),
          is_active = COALESCE($4, is_active),
-         password_hash = COALESCE($5, password_hash)
+         password_hash = COALESCE($5, password_hash),
+         -- A password RESET by an admin is the same situation: they know it,
+         -- so the user changes it at their next login.
+         must_change_password = CASE WHEN $5::text IS NULL
+                                     THEN must_change_password ELSE TRUE END
        WHERE id = $1
        RETURNING id, username, name, role, is_active, created_at`,
       [req.params.id, name, role, is_active, passwordHash]
