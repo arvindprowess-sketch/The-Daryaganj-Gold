@@ -761,17 +761,26 @@ Two migrations close that off:
   place, are both worse than stopping.
 - **011 removes the strays.** It prints how many count entries and snapshot
   rows point at each one *before* changing anything, then deletes them — and
-  **aborts** if any stray holds entries from an audit that was ever delivered
-  (submitted, closed, or carrying a snapshot). Test data on an open,
-  never-submitted audit is safe to drop; a delivered count is a decision, not
-  a default.
+  **skips** any stray holding entries from an audit that was ever delivered
+  (submitted, closed, or carrying a snapshot), **deactivating** it instead.
+  Test data on an open, never-submitted audit is safe to drop; a delivered
+  count is a decision, not a default.
+
+  A deactivated stray leaves the auditor's dropdown at once, so nothing new can
+  be counted there, while its report column survives as long as the delivered
+  audit references it and the figures still reconcile. Clear or reassign those
+  entries and the next deploy removes it.
 
 It also drops the now-obsolete `location_zones` table from migration 008.
 
-> Migrations run on start, so an abort **stops the deploy**. That is
-> deliberate: it is the loudest way to say "a real count is pointing at a
-> location you asked me to delete". The report reaches the deploy log — the
-> runner listens for `NOTICE`, which node-postgres otherwise swallows.
+> **A data problem must never stop a deploy.** Migrations run on start, so
+> raising here would take the whole application down over a question about a
+> handful of rows — far worse than a location lingering one release longer.
+> Both migrations therefore *report* rather than abort: the deploy log gets the
+> detail (the runner listens for `NOTICE`, which node-postgres otherwise
+> swallows), and **Admin → System Readiness** carries two standing checks —
+> *Locations outside the standard five* and *Count entries with no location* —
+> so nothing can be quietly left behind.
 
 ## Two-box entry for weights and volumes
 

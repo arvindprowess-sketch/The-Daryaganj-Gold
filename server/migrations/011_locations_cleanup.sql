@@ -9,15 +9,17 @@
 -- report. This removes it.
 --
 -- It removes COUNT DATA, so it will not do so blindly. Before deleting
--- anything it prints what it found, and it ABORTS if a stray location holds
+-- anything it prints what it found, and it SKIPS any stray location holding
 -- entries from an audit that was ever delivered — submitted, closed, or
 -- carrying a submission snapshot. Test data on an open, never-submitted audit
--- is safe to drop; a delivered audit is not, and the right answer there is a
--- decision, not a default.
+-- is safe to drop; a delivered count is a decision, not a default.
 --
--- NOTE: migrations run on start, so an abort here stops the deploy. That is
--- deliberate. It is the loudest possible way to say "a real count is pointing
--- at a location you asked me to delete".
+-- Skipping, not aborting. Migrations run on start, so raising here would take
+-- the whole deployment down over a DATA question — an app that cannot boot is
+-- a far worse outcome than a location left in the list one release longer.
+-- What is protected is reported in the deploy log and flagged on Admin →
+-- System Readiness, so it is impossible to miss and can be resolved without a
+-- migration.
 -- ═══════════════════════════════════════════════════════════════════════════
 
 DO $$
@@ -28,6 +30,7 @@ DECLARE
   n_entries int := 0;
   n_snap    int := 0;
   n_locs    int := 0;
+  n_removed int := 0;
 BEGIN
   -- ── Report first ─────────────────────────────────────────────────────────
   FOR r IN
@@ -52,9 +55,11 @@ BEGIN
   RAISE NOTICE 'Total: % stray location(s), % count entries, % snapshot rows',
     n_locs, n_entries, n_snap;
 
-  -- ── Refuse to delete a delivered count ───────────────────────────────────
-  SELECT string_agg(DISTINCT format('"%s" (audit %s, %s)', l.name, a.id, a.status), '; ')
-    INTO protected
+  -- ── Which strays are off limits ──────────────────────────────────────────
+  -- A location holding entries from a DELIVERED audit is left exactly as it
+  -- is. Nobody should quietly delete a count that has already been sent.
+  CREATE TEMP TABLE _protected_locations ON COMMIT DROP AS
+  SELECT DISTINCT l.id, l.name
     FROM count_entries ce
     JOIN locations l ON l.id = ce.location_id
     JOIN audits a ON a.id = ce.audit_id
@@ -63,28 +68,43 @@ BEGIN
           OR EXISTS (SELECT 1 FROM audit_submissions s
                       WHERE s.audit_id = a.id AND s.status IN ('active', 'replaced')));
 
+  SELECT string_agg(format('"%s"', name), ', ') INTO protected FROM _protected_locations;
+
   IF protected IS NOT NULL THEN
-    RAISE EXCEPTION
-      'Refusing to delete: these stray locations hold entries from delivered audits — %. %',
+    -- Kept, but DEACTIVATED: it leaves the auditor's dropdown immediately, so
+    -- nothing new can be counted there, while its report column survives for
+    -- as long as the delivered audit references it and the figures still
+    -- reconcile.
+    UPDATE locations SET is_active = FALSE
+     WHERE id IN (SELECT id FROM _protected_locations) AND is_active;
+
+    RAISE NOTICE 'KEEPING % — they hold entries from a delivered audit, and are now DEACTIVATED. %',
       protected,
-      'Reassign or clear them by hand, then re-run. No data has been changed.';
+      'Reassign or clear those entries and this cleanup removes them on the next deploy. Admin -> System Readiness lists them.';
   END IF;
 
-  -- ── Safe to remove ───────────────────────────────────────────────────────
+  -- ── Remove what is safe ──────────────────────────────────────────────────
   -- Snapshot rows go first: they are a copy of a count, not the count itself,
   -- and audit_submissions cascades to them anyway.
   DELETE FROM submission_entries se
    USING locations l
-   WHERE l.id = se.location_id AND lower(btrim(l.name)) <> ALL (keep);
+   WHERE l.id = se.location_id
+     AND lower(btrim(l.name)) <> ALL (keep)
+     AND l.id NOT IN (SELECT id FROM _protected_locations);
 
   DELETE FROM count_entries ce
    USING locations l
-   WHERE l.id = ce.location_id AND lower(btrim(l.name)) <> ALL (keep);
+   WHERE l.id = ce.location_id
+     AND lower(btrim(l.name)) <> ALL (keep)
+     AND l.id NOT IN (SELECT id FROM _protected_locations);
 
-  DELETE FROM locations WHERE lower(btrim(name)) <> ALL (keep);
+  DELETE FROM locations
+   WHERE lower(btrim(name)) <> ALL (keep)
+     AND id NOT IN (SELECT id FROM _protected_locations);
 
-  RAISE NOTICE 'Removed % stray location(s) and the % entries pointing at them.',
-    n_locs, n_entries;
+  GET DIAGNOSTICS n_removed = ROW_COUNT;
+  RAISE NOTICE 'Removed % stray location(s). % kept for now.',
+    n_removed, n_locs - n_removed;
 END $$;
 
 -- ── The five, exactly ──────────────────────────────────────────────────────

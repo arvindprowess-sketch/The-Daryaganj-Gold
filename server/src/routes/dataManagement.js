@@ -365,7 +365,17 @@ router.get('/readiness', async (req, res) => {
             (SELECT count(*)::int FROM items WHERE is_active AND rate IS NULL) AS no_rate,
             (SELECT count(*)::int FROM users WHERE must_change_password AND is_active) AS default_pw,
             (SELECT count(*)::int FROM audits WHERE status = 'open') AS open_audits,
-            (SELECT count(*)::int FROM audits WHERE status='open' AND audit_date < CURRENT_DATE) AS stale_audits`
+            (SELECT count(*)::int FROM audits WHERE status='open' AND audit_date < CURRENT_DATE) AS stale_audits,
+            -- The report has one column per location, so anything outside the
+            -- five shows up as an extra column. The cleanup migration leaves a
+            -- stray alone when it holds a delivered count; this is where that
+            -- shows up so it can be resolved without another migration.
+            (SELECT count(*)::int FROM locations
+              WHERE lower(btrim(name)) NOT IN ('kitchen','foh/bar','store','l-4','l-17')) AS stray_locations,
+            -- An entry with no location at all is left out of every location
+            -- column, so its quantity would go unreported.
+            (SELECT count(*)::int FROM count_entries
+              WHERE status='active' AND location_id IS NULL) AS entries_no_location`
   );
   const s = stats[0];
 
@@ -394,6 +404,16 @@ router.get('/readiness', async (req, res) => {
       key: c.key, label: c.label, ok: c.ok, blocking: c.blocking, advisory: c.advisory,
       detail: c.ok || !c.advisory ? c.detail : `${c.detail} Required before deploying to production.`,
     })),
+    { key: 'stray_locations', label: 'Locations outside the standard five',
+      ok: s.stray_locations === 0,
+      detail: s.stray_locations === 0
+        ? 'Kitchen, FOH/Bar, Store, L-4, L-17'
+        : `${s.stray_locations} extra location(s) still exist — each one adds a column to every report. They are kept because a delivered audit still references them; reassign or clear those entries and the next deploy removes them.` },
+    { key: 'entries_no_location', label: 'Count entries with no location',
+      ok: s.entries_no_location === 0,
+      detail: s.entries_no_location === 0
+        ? 'Every entry has a location'
+        : `${s.entries_no_location} entr(ies) carry no location and are left out of the location columns, so their quantity is not reported.` },
     { key: 'demo_data', label: 'Demo data present', ok: !demo.present,
       detail: demo.present
         ? `${demo.users} users, ${demo.stores} stores, ${demo.items} items, ${demo.audits} audits, ${demo.entries} entries`

@@ -48,9 +48,10 @@ CREATE INDEX IF NOT EXISTS idx_submission_entries_location ON submission_entries
 -- vocabulary in the auditor's dropdown and as columns on every report.
 --
 -- The list is now fixed at five, so an unrecognised value is REPORTED, never
--- added. On a database with legacy text this aborts and names the values, so
--- somebody decides where they belong — silently dropping the location off a
--- recorded count, or inventing a sixth place, are both worse than stopping.
+-- added. It is not an abort: migrations run on start, and taking the whole
+-- deployment down over a DATA question is a far worse outcome than a handful
+-- of entries needing a decision. The values are named in the deploy log and
+-- counted on Admin -> System Readiness, so they cannot be missed.
 UPDATE count_entries ce
    SET location_id = l.id
   FROM locations l
@@ -78,9 +79,9 @@ BEGIN
    WHERE location_id IS NULL AND COALESCE(btrim(location_text), '') = '';
 
   IF unmatched IS NOT NULL OR blanks > 0 THEN
-    RAISE EXCEPTION
+    RAISE WARNING
       'Count entries reference locations that are not in the list: %. % entries have no location at all. %',
       COALESCE(unmatched, '(none)'), blanks,
-      'Rename them to one of Kitchen / FOH/Bar / Store / L-4 / L-17, or clear those entries, then re-run. Nothing has been created.';
+      'Nothing has been created. Reassign them to one of Kitchen / FOH/Bar / Store / L-4 / L-17 — until then they carry no location and are left out of the location columns. Admin -> System Readiness counts them.';
   END IF;
 END $$;
