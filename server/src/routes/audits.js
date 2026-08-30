@@ -4,11 +4,25 @@ import { requireAuth, requireRole, assertStoreAccess, loadAuditForUser } from '.
 import { forRole } from '../lib/blindCount.js';
 import { itemEntriesForAdmin } from '../lib/reports.js';
 import { auditSource, createSubmission, clearSubmission, clearedNotice,
-         SNAPSHOT, CLEARED } from '../lib/submissions.js';
+         refreshAuditStatus, SNAPSHOT, CLEARED } from '../lib/submissions.js';
 import { logActivity } from '../lib/activityLog.js';
 
 const router = Router();
 router.use(requireAuth);
+
+// ── Whose count is this? ────────────────────────────────────────────────────
+// An AUDITOR sees only their own entries: their own ticks, their own totals,
+// their own progress. Three auditors in one store each start from a blank
+// sheet and never see each other's work — combination happens in the admin
+// portal after submission, never in an auditor's own view.
+//
+// An ADMIN sees everything, because verifying how a total was arrived at is
+// the whole job of the admin screens.
+//
+// This is enforced HERE, in the query, not by filtering in the client: a
+// client-side filter is a display choice, and this is an access rule.
+const ownerFilter = (user, alias = 'ce') =>
+  (user.role === 'admin' ? '' : ` AND ${alias}.counted_by = ${Number(user.id)}`);
 
 // ── List audits ──────────────────────────────────────────────────────────────
 // Admin: all (optionally by store). Auditor: only audits for assigned stores.
@@ -38,15 +52,27 @@ router.get('/', async (req, res) => {
             -- What the auditor has in hand right now. A clear never touches
             -- this, so the auditor's screen can say "nothing was lost".
             (SELECT count(*)::int FROM count_entries ce
-              WHERE ce.audit_id = a.id AND ce.status = 'active') AS live_entries,
+              WHERE ce.audit_id = a.id AND ce.status = 'active'
+                    ${ownerFilter(req.user)}) AS live_entries,
             CASE WHEN sub.status = 'active' THEN 'submitted'
                  WHEN sub.status = 'cleared' THEN 'cleared'
-                 ELSE 'counting' END AS session_state
+                 ELSE 'counting' END AS session_state,
+            -- The per-auditor panel: how many are mapped to this store and how
+            -- many have something standing.
+            (SELECT count(*)::int FROM user_stores us
+               JOIN users u ON u.id = us.user_id AND u.role='auditor' AND u.is_active
+              WHERE us.store_id = a.store_id) AS auditor_count,
+            (SELECT count(*)::int FROM audit_submissions x
+              WHERE x.audit_id = a.id AND x.status = 'active') AS submitted_count
        FROM audits a
        JOIN stores s ON s.id = a.store_id
+       -- An AUDITOR's state is their OWN submission — whether a colleague has
+       -- submitted says nothing about whether they still have work to send.
+       -- An admin sees the audit's latest, whoever it belongs to.
        LEFT JOIN LATERAL (
          SELECT * FROM audit_submissions x
           WHERE x.audit_id = a.id
+            ${req.user.role === 'admin' ? '' : `AND x.submitted_by = ${Number(req.user.id)}`}
           ORDER BY (x.status = 'active') DESC, x.submitted_at DESC, x.id DESC
           LIMIT 1
        ) sub ON TRUE
@@ -74,14 +100,17 @@ router.post('/', requireRole('admin'), async (req, res) => {
 // The three figures the confirmation dialog states before an auditor commits.
 // `counted` means the item has at least one active count entry — nothing else
 // counts as counted.
-async function submitSummary(auditId) {
+async function submitSummary(auditId, userId) {
+  // The auditor's OWN figures. What they are about to send is their own
+  // count, so the confirmation dialog must state their own numbers.
   const { rows } = await query(
     `SELECT (SELECT count(*)::int FROM items WHERE is_active) AS total,
             (SELECT count(DISTINCT ce.item_id)::int
                FROM count_entries ce JOIN items i ON i.id = ce.item_id
-              WHERE ce.audit_id = $1 AND ce.status = 'active' AND i.is_active) AS counted,
+              WHERE ce.audit_id = $1 AND ce.status = 'active' AND i.is_active
+                AND ($2::int IS NULL OR ce.counted_by = $2)) AS counted,
             (SELECT count(*)::int FROM audit_na WHERE audit_id = $1) AS not_applicable`,
-    [auditId]
+    [auditId, userId ?? null]
   );
   const r = rows[0];
   return { ...r, uncounted: r.total - r.counted };
@@ -91,7 +120,7 @@ router.get('/:id/submit-summary', async (req, res) => {
   const { audit, allowed } = await loadAuditForUser(req.user, req.params.id);
   if (!audit) return res.status(404).json({ error: 'Not found' });
   if (!allowed) return res.status(403).json({ error: 'Forbidden' });
-  res.json(await submitSummary(req.params.id));
+  res.json(await submitSummary(req.params.id, req.user.role === 'admin' ? null : req.user.id));
 });
 
 // Auditor submits the count. Variance stops being provisional at this point.
@@ -110,32 +139,37 @@ router.post('/:id/submit', async (req, res) => {
   const { audit, allowed } = await loadAuditForUser(req.user, req.params.id);
   if (!audit) return res.status(404).json({ error: 'Not found' });
   if (!allowed) return res.status(403).json({ error: 'Forbidden' });
-  if (audit.status !== 'open') return res.status(409).json({ error: `Audit is already ${audit.status}` });
+  if (audit.status === 'closed') return res.status(409).json({ error: 'Audit is closed' });
+  // Re-submitting is allowed and REPLACES this auditor's previous submission.
+  // A colleague having submitted is irrelevant either way — their standing
+  // submission is untouched.
 
-  const summary = await submitSummary(req.params.id);
+  const summary = await submitSummary(req.params.id, req.user.id);
 
   // Submitting takes a SNAPSHOT. count_entries is copied, never moved: the
   // auditor keeps their working record and the reports get a frozen set of
   // numbers the admin can clear without destroying anyone's work.
   const result = await withTransaction(async (c) => {
     const submission = await createSubmission(c, req.params.id, req.user.id);
-    const { rows } = await c.query(
-      `UPDATE audits SET status='submitted', submitted_at=now() WHERE id=$1 RETURNING *`,
-      [req.params.id]
-    );
+    // The audit becomes `submitted` only when EVERY auditor mapped to the
+    // store has one standing. One person finishing does not close the store.
+    const progress = await refreshAuditStatus(c, req.params.id);
+    const { rows } = await c.query('SELECT * FROM audits WHERE id=$1', [req.params.id]);
     await logActivity({
-      auditId: Number(req.params.id), entityType: 'audit', entityId: Number(req.params.id),
+      auditId: Number(req.params.id), entityType: 'audit_submission', entityId: submission.id,
       action: 'submit', recordCount: submission.entry_count,
       detail: { submission_id: submission.id, entries: submission.entry_count,
-                items: submission.item_count },
+                items: submission.item_count,
+                auditors_submitted: progress.submitted, auditors_total: progress.auditors },
       userId: req.user.id,
     }, c);
-    return { audit: rows[0], submission };
+    return { audit: rows[0], submission, progress };
   });
 
   // The numbers as they stood at submission, so the auditor's confirmation
   // screen reports what was actually sent.
-  res.json({ ...result.audit, summary, submission: result.submission });
+  res.json({ ...result.audit, summary, submission: result.submission,
+             progress: result.progress });
 });
 
 // ── Submission state ────────────────────────────────────────────────────────
@@ -151,55 +185,123 @@ router.get('/:id/submission', async (req, res) => {
   if (!allowed) return res.status(403).json({ error: 'Forbidden' });
 
   const src = await auditSource(req.params.id);
-  const state = src.mode === SNAPSHOT ? 'submitted'
-    : src.mode === CLEARED ? 'cleared' : 'not_submitted';
-  // What is sitting in the auditor's working record right now, which is what a
-  // re-submit would send. Unaffected by any clear.
+  const isAdmin = req.user.role === 'admin';
+  // An auditor's state is their OWN submission. A colleague having submitted
+  // says nothing about whether this auditor still has work to send.
+  const mine = src.submissions.find((x) => String(x.submitted_by) === String(req.user.id)) || null;
+  const myCleared = mine ? null
+    : (src.history || []).find((h) => h.status === 'cleared'
+        && String(h.submitted_by) === String(req.user.id)) || null;
+  const state = mine ? 'submitted' : myCleared ? 'cleared' : 'not_submitted';
+
+  // What is sitting in this auditor's working record right now, which is what
+  // a re-submit would send. Unaffected by any clear.
   const { rows: live } = await query(
     `SELECT count(*)::int AS entries, count(DISTINCT item_id)::int AS items
-       FROM count_entries WHERE audit_id = $1 AND status = 'active'`,
-    [req.params.id]
+       FROM count_entries
+      WHERE audit_id = $1 AND status = 'active'
+        AND ($2::int IS NULL OR counted_by = $2)`,
+    [req.params.id, isAdmin ? null : req.user.id]
   );
 
   res.json({
     state,
-    submission: src.submission || null,
-    cleared: clearedNotice(src.cleared),
+    submission: mine,
+    cleared: clearedNotice(myCleared),
     live: live[0],
-    // A re-submit is possible whenever the auditor has anything to send.
     can_submit: live[0].entries > 0 && state !== 'submitted',
+    // Everyone on this store and where they have got to. The admin panel
+    // renders it; an auditor sees it too, because knowing a colleague has
+    // finished is not the same as seeing their numbers.
+    auditors: await auditorPanel(req.params.id),
     history: (src.history || []).map((h) => ({
       id: h.id, status: h.status, submitted_at: h.submitted_at,
-      submitted_by_name: h.submitted_by_name, entry_count: h.entry_count,
-      item_count: h.item_count, cleared_at: h.cleared_at,
-      cleared_by_name: h.cleared_by_name,
+      submitted_by: h.submitted_by, submitted_by_name: h.submitted_by_name,
+      entry_count: h.entry_count, item_count: h.item_count,
+      cleared_at: h.cleared_at, cleared_by_name: h.cleared_by_name,
     })),
   });
 });
+
+// ── Who is on this store, and where each of them has got to ─────────────────
+// One row per auditor mapped to the store, whether or not they have started.
+// This is the panel on the audit session screen:
+//
+//   Rakesh    412 items    Submitted 11:40 PM   [Clear]
+//   Sunil     287 items    Submitted 11:52 PM   [Clear]
+//   Chandan   103 items    Still counting
+async function auditorPanel(auditId) {
+  const { rows } = await query(
+    `SELECT u.id AS user_id, u.name, u.username,
+            sub.id AS submission_id, sub.submitted_at, sub.entry_count, sub.item_count,
+            (SELECT count(*)::int FROM count_entries ce
+              WHERE ce.audit_id = a.id AND ce.counted_by = u.id AND ce.status='active') AS live_entries,
+            (SELECT count(DISTINCT ce.item_id)::int FROM count_entries ce
+              WHERE ce.audit_id = a.id AND ce.counted_by = u.id AND ce.status='active') AS live_items,
+            cl.cleared_at, cu.name AS cleared_by_name
+       FROM audits a
+       JOIN user_stores us ON us.store_id = a.store_id
+       JOIN users u ON u.id = us.user_id AND u.role = 'auditor' AND u.is_active
+       LEFT JOIN audit_submissions sub
+              ON sub.audit_id = a.id AND sub.submitted_by = u.id AND sub.status = 'active'
+       LEFT JOIN LATERAL (
+         SELECT * FROM audit_submissions x
+          WHERE x.audit_id = a.id AND x.submitted_by = u.id AND x.status = 'cleared'
+          ORDER BY x.cleared_at DESC LIMIT 1
+       ) cl ON sub.id IS NULL
+       LEFT JOIN users cu ON cu.id = cl.cleared_by
+      WHERE a.id = $1
+      ORDER BY u.name`,
+    [auditId]
+  );
+  return rows.map((r) => ({
+    ...r,
+    state: r.submission_id ? 'submitted' : r.cleared_at ? 'cleared' : 'counting',
+  }));
+}
 
 // ── Clear submitted data — ADMIN ONLY ───────────────────────────────────────
 // Removes what was SENT, not what was counted. The auditor's entries, the
 // photos behind them, the item master and system stock are all untouched, and
 // the audit reopens so the count can be submitted again.
 const CLEAR_SUBMITTED = 'CLEAR SUBMITTED DATA';
+const CLEAR_ALL = 'CLEAR ALL SUBMITTED DATA';
 
+const when = (t) => new Date(t).toLocaleString('en-GB',
+  { day: 'numeric', month: 'short', year: 'numeric', hour: 'numeric', minute: '2-digit' });
+
+// Clearing is PER AUDITOR. The admin picks whose submission goes, and only
+// that auditor's rows leave the reports — everyone else's stays exactly as it
+// is, and the reports recalculate from what remains on the next read.
 router.get('/:id/clear-submission/preview', requireRole('admin'), async (req, res) => {
   const src = await auditSource(req.params.id);
   if (!src.audit) return res.status(404).json({ error: 'Not found' });
-  if (src.mode !== SNAPSHOT) {
-    return res.status(409).json({ error: 'There is no submitted data to clear for this audit' });
+  const userId = req.query.user_id;
+  const target = userId
+    ? src.submissions.find((x) => String(x.submitted_by) === String(userId))
+    : src.submissions[0];
+  if (!target) {
+    return res.status(409).json({ error: 'There is no submitted data to clear for this auditor' });
   }
-  const s = src.submission;
-  const when = new Date(s.submitted_at).toLocaleString('en-GB',
-    { day: 'numeric', month: 'short', year: 'numeric', hour: 'numeric', minute: '2-digit' });
+  // Naming who is NOT affected is the point: the admin has to be able to see
+  // that clearing one auditor leaves the others alone.
+  const others = src.submissions.filter((x) => x.id !== target.id);
+  const whose = target.submitted_by_name || 'This auditor';
+  const untouched = others.length
+    ? ` ${others.map((o) => o.submitted_by_name).filter(Boolean).join(' and ')}'s submitted data is not affected.`
+    : '';
   res.json({
     confirm_phrase: CLEAR_SUBMITTED,
+    submission_id: target.id,
+    user_id: target.submitted_by,
+    auditor_name: target.submitted_by_name,
     store_name: src.audit.store_name,
-    item_count: s.item_count, entry_count: s.entry_count, submitted_at: s.submitted_at,
-    submitted_by_name: s.submitted_by_name || null,
-    message: `This removes the submitted data for ${src.audit.store_name} — `
-      + `${s.item_count} items, submitted ${when}. `
-      + "The auditor's count entries are not affected and can be submitted again.",
+    item_count: target.item_count, entry_count: target.entry_count,
+    submitted_at: target.submitted_at,
+    others: others.map((o) => ({ user_id: o.submitted_by, name: o.submitted_by_name })),
+    message: `This removes ${whose}'s submitted data for ${src.audit.store_name} — `
+      + `${target.item_count} items, submitted ${when(target.submitted_at)}.${untouched}`
+      + ` ${whose}'s own count entries remain and can be submitted again.`,
   });
 });
 
@@ -209,24 +311,82 @@ router.post('/:id/clear-submission', requireRole('admin'), async (req, res) => {
   }
   const src = await auditSource(req.params.id);
   if (!src.audit) return res.status(404).json({ error: 'Not found' });
-  if (src.mode !== SNAPSHOT) {
-    return res.status(409).json({ error: 'There is no submitted data to clear for this audit' });
+  const userId = req.body?.user_id;
+  const target = userId
+    ? src.submissions.find((x) => String(x.submitted_by) === String(userId))
+    : src.submissions[0];
+  if (!target) {
+    return res.status(409).json({ error: 'There is no submitted data to clear for this auditor' });
   }
 
   const removed = await withTransaction(async (c) => {
-    const n = await clearSubmission(c, src.submission, req.user.id);
+    const n = await clearSubmission(c, target, req.user.id);
+    await refreshAuditStatus(c, req.params.id);
     await logActivity({
       auditId: Number(req.params.id), entityType: 'audit_submission',
-      entityId: src.submission.id, action: 'clear_submission', recordCount: n,
-      detail: { store: src.audit.store_name, rows: n,
-                items: src.submission.item_count,
-                submitted_at: src.submission.submitted_at },
+      entityId: target.id, action: 'clear_submission', recordCount: n,
+      detail: { store: src.audit.store_name, rows: n, items: target.item_count,
+                auditor: target.submitted_by_name, auditor_id: target.submitted_by,
+                submitted_at: target.submitted_at },
       userId: req.user.id,
     }, c);
     return n;
   });
 
-  res.json({ ok: true, removed, audit_status: 'open' });
+  res.json({ ok: true, removed, auditor: target.submitted_by_name,
+             remaining: src.submissions.length - 1 });
+});
+
+// ── Clear EVERY auditor's submitted data ────────────────────────────────────
+// A separate action with its own phrase, for resetting the whole store. It is
+// deliberately not the default: clearing one auditor is the common case, and
+// wiping every auditor's work should take a different sentence to type.
+router.get('/:id/clear-all-submissions/preview', requireRole('admin'), async (req, res) => {
+  const src = await auditSource(req.params.id);
+  if (!src.audit) return res.status(404).json({ error: 'Not found' });
+  if (!src.submissions.length) {
+    return res.status(409).json({ error: 'There is no submitted data to clear for this audit' });
+  }
+  const names = src.submissions.map((x) => x.submitted_by_name).filter(Boolean);
+  const items = src.submissions.reduce((t, x) => t + Number(x.item_count || 0), 0);
+  res.json({
+    confirm_phrase: CLEAR_ALL,
+    store_name: src.audit.store_name,
+    auditors: src.submissions.map((x) => ({
+      user_id: x.submitted_by, name: x.submitted_by_name,
+      item_count: x.item_count, submitted_at: x.submitted_at,
+    })),
+    message: `This removes the submitted data of ALL ${src.submissions.length} auditor(s) for `
+      + `${src.audit.store_name} — ${names.join(', ')}, ${items} items in total. `
+      + 'Every auditor\'s own count entries remain and can be submitted again.',
+  });
+});
+
+router.post('/:id/clear-all-submissions', requireRole('admin'), async (req, res) => {
+  if ((req.body?.confirm || '').trim().toUpperCase() !== CLEAR_ALL) {
+    return res.status(400).json({ error: `Type "${CLEAR_ALL}" to confirm` });
+  }
+  const src = await auditSource(req.params.id);
+  if (!src.audit) return res.status(404).json({ error: 'Not found' });
+  if (!src.submissions.length) {
+    return res.status(409).json({ error: 'There is no submitted data to clear for this audit' });
+  }
+
+  const removed = await withTransaction(async (c) => {
+    let n = 0;
+    for (const sub of src.submissions) n += await clearSubmission(c, sub, req.user.id);
+    await refreshAuditStatus(c, req.params.id);
+    await logActivity({
+      auditId: Number(req.params.id), entityType: 'audit', entityId: Number(req.params.id),
+      action: 'clear_all_submissions', recordCount: n,
+      detail: { store: src.audit.store_name, rows: n,
+                auditors: src.submissions.map((x) => x.submitted_by_name) },
+      userId: req.user.id,
+    }, c);
+    return n;
+  });
+
+  res.json({ ok: true, removed, auditors: src.submissions.length });
 });
 
 // Admin working view: every individual entry per item, voided ones included.
@@ -270,7 +430,8 @@ router.get('/:id/super-categories', async (req, res) => {
             COUNT(i.id)::int AS total,
             COUNT(i.id) FILTER (
               WHERE EXISTS (SELECT 1 FROM count_entries ce
-                             WHERE ce.item_id = i.id AND ce.audit_id = $1 AND ce.status = 'active')
+                             WHERE ce.item_id = i.id AND ce.audit_id = $1 AND ce.status = 'active'
+                                   ${ownerFilter(req.user)})
                  OR EXISTS (SELECT 1 FROM audit_na na
                              WHERE na.item_id = i.id AND na.audit_id = $1)
             )::int AS counted
@@ -295,7 +456,8 @@ router.get('/:id/categories', async (req, res) => {
             COUNT(i.id)::int AS total,
             COUNT(i.id) FILTER (
               WHERE EXISTS (SELECT 1 FROM count_entries ce
-                             WHERE ce.item_id = i.id AND ce.audit_id = $1 AND ce.status = 'active')
+                             WHERE ce.item_id = i.id AND ce.audit_id = $1 AND ce.status = 'active'
+                                   ${ownerFilter(req.user)})
                  OR EXISTS (SELECT 1 FROM audit_na na
                              WHERE na.item_id = i.id AND na.audit_id = $1)
             )::int AS counted
@@ -343,6 +505,7 @@ router.get('/:id/items', async (req, res) => {
                 SUM(open_ml) AS total_open_ml
            FROM count_entries ce
           WHERE ce.item_id = i.id AND ce.audit_id = $1 AND ce.status = 'active'
+                ${ownerFilter(req.user)}
        ) agg ON TRUE
        LEFT JOIN audit_na na ON na.item_id = i.id AND na.audit_id = $1
       WHERE ${conds.join(' AND ')}
@@ -371,7 +534,8 @@ router.get('/:id/uncounted', async (req, res) => {
     `SELECT i.id, i.name, i.unit, i.super_category_id
        FROM items i
       WHERE i.is_active = TRUE
-        AND NOT EXISTS (SELECT 1 FROM count_entries ce WHERE ce.item_id=i.id AND ce.audit_id=$1 AND ce.status='active')
+        AND NOT EXISTS (SELECT 1 FROM count_entries ce WHERE ce.item_id=i.id AND ce.audit_id=$1 AND ce.status='active'
+                                ${ownerFilter(req.user)})
         AND NOT EXISTS (SELECT 1 FROM audit_na na WHERE na.item_id=i.id AND na.audit_id=$1)
       ORDER BY i.name`,
     [req.params.id]

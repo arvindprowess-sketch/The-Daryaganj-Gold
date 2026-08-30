@@ -35,18 +35,18 @@ export async function allLocations() {
 // in "Dry Store" and the admin later retires it, the report still has to show
 // those 40 kg or the total stops reconciling — so the column stays for as long
 // as the data does, and disappears on its own once nothing references it.
-export async function reportLocations(auditId, submissionId = null) {
+export async function reportLocations(auditId, submissionIds = null) {
   const { rows } = await query(
     `SELECT l.id, l.name, l.sort_order, l.is_active
        FROM locations l
       WHERE l.is_active
          OR EXISTS (SELECT 1 FROM count_entries ce
                      WHERE ce.location_id = l.id AND ce.audit_id = $1)
-         OR ($2::int IS NOT NULL AND EXISTS (
+         OR ($2::int[] IS NOT NULL AND EXISTS (
                SELECT 1 FROM submission_entries se
-                WHERE se.location_id = l.id AND se.submission_id = $2))
+                WHERE se.location_id = l.id AND se.submission_id = ANY($2::int[])))
       ORDER BY l.sort_order, l.id`,
-    [auditId, submissionId]
+    [auditId, submissionIds && submissionIds.length ? submissionIds : null]
   );
   return rows;
 }

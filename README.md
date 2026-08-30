@@ -350,6 +350,85 @@ to drop:
 - Master photo URLs carry a `photo_version` cache-buster so a new image shows
   immediately instead of serving a stale cached file.
 
+## One count per auditor
+
+Three auditors in a store used to share one sheet: they saw each other's ticks,
+each other's totals and each other's progress. Each now works from a blank
+sheet, and the admin portal combines what they send.
+
+**The auditor's view is scoped by user, in the query.** Item totals and ticks,
+the counted / not-counted filters, super category and category progress,
+"Already counted" on the entry sheet, the Review & Submit counts, and the
+duplicate-entry prompt all read `AND ce.counted_by = <the logged-in user>`.
+Voiding is restricted the same way. This is an access rule, not a display
+choice, so it is enforced server-side and there is no client filter to bypass.
+
+The **admin** count screen is unaffected and still shows every entry from
+everyone — verifying how a total was arrived at is its whole job — and it now
+names the auditor on each row.
+
+### Submission is per auditor
+
+`audit_submissions` is one row per `(audit_id, submitted_by)`. Each auditor
+submits their own count; submitting copies **only that auditor's** active
+entries, and re-submitting replaces **only their own** previous submission,
+marking it `replaced`. One person submitting cannot touch another's work or
+view.
+
+The audit as a whole turns `submitted` only when **every** auditor mapped to
+the store has one standing — or when the admin closes it. Until then it stays
+open, and the reports keep their PROVISIONAL stamp because somebody is still
+counting.
+
+### The admin portal combines, automatically
+
+Reports read the **union of every active submission**. There is no merge step,
+no approval, nothing to refresh:
+
+- the moment an auditor submits, their entries are in the reports
+- two auditors' quantities for the same item and location land in the same
+  location column and are summed
+- a second auditor submitting simply adds to what is already there
+- run R4 at any point and it reflects exactly who has submitted so far
+
+### Clearing is per auditor
+
+The admin picks whose submission goes, and only that auditor's rows leave the
+reports:
+
+> This removes Rakesh Kumar's submitted data for M3M — 412 items, submitted
+> 5 Aug 2026, 23:40. Sunil Verma's submitted data is not affected. Rakesh
+> Kumar's own count entries remain and can be submitted again.
+
+Naming who is *not* affected is the point. **Clear all submitted data** is a
+separate action with its own phrase (`CLEAR ALL SUBMITTED DATA`), because
+wiping every auditor's work should not be one click away from clearing one.
+Neither touches `count_entries`, photos, the item master or system stock.
+
+The audit session screen carries a line per auditor:
+
+```
+Rakesh Kumar    412 items    Submitted 23:40    [Clear]
+Sunil Verma     287 items    Submitted 23:52    [Clear]
+Chandan         103 items    Still counting
+```
+
+### Overlap — the cost of the separation
+
+Auditors can no longer see each other's work, so two of them may count the same
+shelf. Those quantities are **summed**, which is a double count, and nothing in
+the numbers reveals it.
+
+So it is surfaced and never resolved automatically — merging or discarding on
+the app's judgement would silently change a recorded count. R6 gains an
+**Overlap** section listing the item, the location and each auditor's figure,
+and the audit session screen carries a banner:
+
+> 3 items were counted at the same location by more than one auditor — review
+> before issuing the report.
+
+The admin decides.
+
 ## Two records: the count, and the submission
 
 There are two records of a count and they are deliberately not the same thing.

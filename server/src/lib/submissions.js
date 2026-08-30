@@ -12,6 +12,11 @@
 //
 // So an admin can clear what was submitted, the auditor's work survives
 // untouched, and they can submit again.
+//
+// A submission belongs to ONE AUDITOR. Three auditors in a store each submit
+// their own count, and the reports read the UNION of whatever is standing —
+// so a second auditor submitting simply adds to what is already there, with
+// nothing to merge, approve or refresh.
 // ═══════════════════════════════════════════════════════════════════════════
 import { query } from '../db.js';
 
@@ -35,10 +40,11 @@ export async function auditSource(auditId) {
     [auditId]
   );
   const audit = auditRows[0] || null;
-  if (!audit) return { mode: LIVE, audit: null, submission: null, cleared: null };
+  if (!audit) return { mode: LIVE, audit: null, submissions: [], cleared: null, history: [] };
 
   const { rows } = await query(
-    `SELECT sub.*, su.name AS submitted_by_name, cu.name AS cleared_by_name
+    `SELECT sub.*, su.name AS submitted_by_name, su.username AS submitted_by_username,
+            cu.name AS cleared_by_name
        FROM audit_submissions sub
        LEFT JOIN users su ON su.id = sub.submitted_by
        LEFT JOIN users cu ON cu.id = sub.cleared_by
@@ -46,21 +52,34 @@ export async function auditSource(auditId) {
       ORDER BY sub.submitted_at DESC, sub.id DESC`,
     [auditId]
   );
-  const active = rows.find((r) => r.status === 'active') || null;
-  if (active) return { mode: SNAPSHOT, audit, submission: active, cleared: null, history: rows };
 
-  const latest = rows[0] || null;
-  if (latest && latest.status === 'cleared') {
-    return { mode: CLEARED, audit, submission: null, cleared: latest, history: rows };
+  // EVERY standing submission, not just one. This is what combines the
+  // auditors: the reports read the union, so whoever has submitted so far is
+  // exactly what the report shows, with no merge step anywhere.
+  const active = rows.filter((r) => r.status === 'active');
+  if (active.length) {
+    return { mode: SNAPSHOT, audit, submissions: active, cleared: null, history: rows };
   }
-  return { mode: LIVE, audit, submission: null, cleared: null, history: rows };
+
+  // Nothing standing. If the last thing that happened was a clear, say so
+  // rather than falling back to the live entries as though it never happened.
+  const cleared = rows.filter((r) => r.status === 'cleared');
+  if (cleared.length) {
+    return { mode: CLEARED, audit, submissions: [], cleared: cleared[0],
+             clearedAll: cleared, history: rows };
+  }
+  return { mode: LIVE, audit, submissions: [], cleared: null, history: rows };
 }
+
+// The ids the report reads from, for a SQL `IN`.
+export const submissionIds = (src) => (src.submissions || []).map((s) => s.id);
 
 // The sentence a report prints instead of a table when the data was cleared.
 // Never an empty table: every item would read as a 100% shortage, which is a
 // finding, not a blank.
 export function clearedNotice(cleared) {
   if (!cleared) return null;
+  const whose = cleared.submitted_by_name ? `${cleared.submitted_by_name}'s ` : '';
   const when = cleared.cleared_at
     ? new Date(cleared.cleared_at).toLocaleDateString('en-GB',
         { day: 'numeric', month: 'short', year: 'numeric' })
@@ -72,7 +91,8 @@ export function clearedNotice(cleared) {
     submitted_at: cleared.submitted_at,
     entry_count: cleared.entry_count,
     item_count: cleared.item_count,
-    message: `Submitted data was cleared on ${when}${who}. `
+    submitted_by: cleared.submitted_by_name || null,
+    message: `${whose || 'Submitted '}data was cleared on ${when}${who}. `
       + "The auditor's count is still available and can be submitted again.",
   };
 }
@@ -85,10 +105,13 @@ export function clearedNotice(cleared) {
 // INSERT ... SELECT. Re-submitting marks the previous submission `replaced`
 // rather than deleting it, so a re-submit stays visible in the history.
 export async function createSubmission(client, auditId, userId) {
+  // Only THIS auditor's previous submission is replaced. Another auditor's
+  // standing submission is untouched — one person submitting must never
+  // disturb what a colleague has already sent.
   await client.query(
     `UPDATE audit_submissions SET status='replaced'
-      WHERE audit_id = $1 AND status = 'active'`,
-    [auditId]
+      WHERE audit_id = $1 AND submitted_by = $2 AND status = 'active'`,
+    [auditId, userId]
   );
 
   const { rows } = await client.query(
@@ -96,9 +119,9 @@ export async function createSubmission(client, auditId, userId) {
        (audit_id, submitted_by, entry_count, item_count, status, is_demo)
      SELECT $1, $2,
             (SELECT count(*) FROM count_entries ce
-              WHERE ce.audit_id = $1 AND ce.status = 'active'),
+              WHERE ce.audit_id = $1 AND ce.counted_by = $2 AND ce.status = 'active'),
             (SELECT count(DISTINCT ce.item_id) FROM count_entries ce
-              WHERE ce.audit_id = $1 AND ce.status = 'active'),
+              WHERE ce.audit_id = $1 AND ce.counted_by = $2 AND ce.status = 'active'),
             'active',
             (SELECT is_demo FROM audits WHERE id = $1)
      RETURNING *`,
@@ -106,17 +129,45 @@ export async function createSubmission(client, auditId, userId) {
   );
   const submission = rows[0];
 
+  // ...and only this auditor's entries are copied.
   await client.query(
     `INSERT INTO submission_entries
        (submission_id, item_id, qty, bottles, open_ml, location_id, location_text,
         remarks, photo_url, counted_by, counted_at)
-     SELECT $2, ce.item_id, ce.qty, ce.bottles, ce.open_ml, ce.location_id,
+     SELECT $3, ce.item_id, ce.qty, ce.bottles, ce.open_ml, ce.location_id,
             ce.location_text, ce.remarks, ce.photo_url, ce.counted_by, ce.counted_at
        FROM count_entries ce
-      WHERE ce.audit_id = $1 AND ce.status = 'active'`,
-    [auditId, submission.id]
+      WHERE ce.audit_id = $1 AND ce.counted_by = $2 AND ce.status = 'active'`,
+    [auditId, userId, submission.id]
   );
   return submission;
+}
+
+// The audit as a whole is submitted only when EVERY auditor mapped to the
+// store has one standing. Until then it stays open, because somebody is still
+// counting — and the reports say so with the PROVISIONAL stamp.
+export async function refreshAuditStatus(client, auditId) {
+  const { rows } = await client.query(
+    `SELECT count(*)::int AS auditors,
+            count(*) FILTER (WHERE sub.id IS NOT NULL)::int AS submitted
+       FROM audits a
+       JOIN user_stores us ON us.store_id = a.store_id
+       JOIN users u ON u.id = us.user_id AND u.role = 'auditor' AND u.is_active
+       LEFT JOIN audit_submissions sub
+              ON sub.audit_id = a.id AND sub.submitted_by = u.id AND sub.status = 'active'
+      WHERE a.id = $1`,
+    [auditId]
+  );
+  const { auditors, submitted } = rows[0] || { auditors: 0, submitted: 0 };
+  const complete = auditors > 0 && submitted === auditors;
+  await client.query(
+    `UPDATE audits
+        SET status = CASE WHEN $2 THEN 'submitted' ELSE 'open' END,
+            submitted_at = CASE WHEN $2 THEN COALESCE(submitted_at, now()) ELSE NULL END
+      WHERE id = $1 AND status <> 'closed'`,
+    [auditId, complete]
+  );
+  return { auditors, submitted, complete };
 }
 
 // ── Clearing it ────────────────────────────────────────────────────────────
@@ -133,10 +184,14 @@ export async function clearSubmission(client, submission, userId) {
       WHERE id = $1`,
     [submission.id, userId]
   );
-  // Back to open so the auditor can submit again. Reports do NOT fall back to
-  // the live entries — auditSource keys off the cleared submission, not this.
+  // ONE auditor's rows leave the reports. Everyone else's standing submission
+  // is untouched, and the reports recalculate from what remains on the next
+  // read — there is nothing to refresh.
+  //
+  // The audit reopens because this auditor now has nothing standing, which is
+  // what lets them submit again.
   await client.query(
-    `UPDATE audits SET status='open', submitted_at=NULL, closed_at=NULL WHERE id=$1`,
+    `UPDATE audits SET status='open', submitted_at=NULL WHERE id=$1 AND status='submitted'`,
     [submission.audit_id]
   );
   return rowCount;

@@ -235,7 +235,10 @@ export default function CountEntry() {
                           <thead className="text-slate-500 text-left">
                             <tr>
                               <th className="py-1">Quantity</th><th className="py-1">Location</th>
-                              <th className="py-1">Counted by</th><th className="py-1">When</th>
+                              {/* Auditors now work from separate sheets, so who
+                                  recorded a row is how the admin tells two
+                                  counts of the same item apart. */}
+                              <th className="py-1">Auditor</th><th className="py-1">When</th>
                               <th className="py-1">Status</th><th className="py-1"></th>
                             </tr>
                           </thead>

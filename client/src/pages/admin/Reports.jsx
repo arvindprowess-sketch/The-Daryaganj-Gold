@@ -613,6 +613,31 @@ function ReportView({ report, data, grouped }) {
   if (report === 'exceptions') {
     return (
       <div className="space-y-5 text-sm">
+        {/* Auditors count from separate sheets and cannot see each other's
+            work, so the same shelf can be counted twice and the quantities
+            are SUMMED into the report. Nothing in the numbers reveals it —
+            so it is surfaced here, and the admin decides. Never merged
+            automatically: that would silently change a recorded count. */}
+        {data.overlaps?.length > 0 && (
+          <div className="rounded-xl border-2 border-amber-400 bg-amber-50 p-4">
+            <h3 className="font-bold text-amber-900 mb-1">
+              Overlap — {data.overlaps.length} item{data.overlaps.length === 1 ? '' : 's'} counted
+              at the same location by more than one auditor
+            </h3>
+            <p className="text-sm text-amber-800 mb-3">
+              Their quantities are added together in the report. Review before issuing it —
+              nothing has been merged or discarded.
+            </p>
+            <Table cols={['Super Category', 'Category', 'Item Name', 'Unit', 'Location', 'Auditor', 'Quantity']}
+                   align={['', '', '', '', '', '', 'right']}
+                   rows={data.overlaps.flatMap((o) => o.auditors.map((a, i) => [
+                     i === 0 ? o.super_category : '', i === 0 ? o.category : '',
+                     i === 0 ? o.item : '', i === 0 ? o.unit : '', i === 0 ? o.location : '',
+                     a.auditor, a.open_ml ? `${a.qty} · ${a.open_ml} ml` : a.qty,
+                   ]))} />
+          </div>
+        )}
+
         <Section title="Voided entries" cols={['Super Category', 'Category', 'Item Name', 'Reason', 'Counted by', 'Voided by']}
                  rows={data.voided.map((v) => [v.super_category, v.category, v.name, v.void_reason, v.counted_by_name, v.voided_by_name])} />
         <Section title="Not applicable" cols={['Super Category', 'Category', 'Item Name', 'Reason', 'Marked by']}

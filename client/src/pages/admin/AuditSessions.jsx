@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, Fragment } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../../lib/api.js';
 import { Spinner } from '../../components/ui.jsx';
@@ -13,11 +13,25 @@ export default function AuditSessions() {
   const [f, setF] = useState({ store_id: '', audit_date: new Date().toISOString().slice(0, 10), cutoff_time: '6:00 PM' });
   const [err, setErr] = useState('');
   // "Clear submitted data" — removes the SNAPSHOT, never the count entries.
-  const [clearing, setClearing] = useState(null);   // { audit, preview }
+  const [clearing, setClearing] = useState(null);   // { audit, preview, all }
+  const [panels, setPanels] = useState({});         // auditId -> per-auditor rows
+  const [overlaps, setOverlaps] = useState({});     // auditId -> overlap count
   const [clearErr, setClearErr] = useState('');
   const [busy, setBusy] = useState(false);
 
-  const load = useCallback(() => api.get('/audits').then(setAudits), []);
+  // The per-auditor panel and the overlap warning are per audit, so they are
+  // fetched alongside the list rather than folded into it — one extra request
+  // each, and the list stays a simple query.
+  const load = useCallback(async () => {
+    const rows = await api.get('/audits');
+    setAudits(rows);
+    const p = {}; const o = {};
+    await Promise.all(rows.map(async (a) => {
+      try { p[a.id] = (await api.get(`/audits/${a.id}/submission`)).auditors || []; } catch { p[a.id] = []; }
+      try { o[a.id] = (await api.get(`/reports/exceptions/${a.id}`)).overlaps || []; } catch { o[a.id] = []; }
+    }));
+    setPanels(p); setOverlaps(o);
+  }, []);
   useEffect(() => { load(); api.get('/stores').then(setStores); }, [load]);
 
   async function create() {
@@ -25,19 +39,34 @@ export default function AuditSessions() {
     if (!f.store_id) { setErr('Choose a store'); return; }
     try { await api.post('/audits', f); load(); } catch (e) { setErr(e.message); }
   }
-  async function askClear(a) {
+  // Clearing names the auditor. Only their rows leave the reports.
+  async function askClear(a, userId) {
     setClearErr('');
     try {
-      const preview = await api.get(`/audits/${a.id}/clear-submission/preview`);
-      setClearing({ audit: a, preview });
+      const preview = await api.get(`/audits/${a.id}/clear-submission/preview?user_id=${userId}`);
+      setClearing({ audit: a, preview, userId, all: false });
+    } catch (e) { setErr(e.message); }
+  }
+  // Resetting the whole store is a separate action with its own phrase —
+  // wiping every auditor's work should not be one click away from clearing one.
+  async function askClearAll(a) {
+    setClearErr('');
+    try {
+      const preview = await api.get(`/audits/${a.id}/clear-all-submissions/preview`);
+      setClearing({ audit: a, preview, all: true });
     } catch (e) { setErr(e.message); }
   }
   async function doClear() {
     setBusy(true); setClearErr('');
     try {
-      await api.post(`/audits/${clearing.audit.id}/clear-submission`,
-        { confirm: 'CLEAR SUBMITTED DATA' });
-      setClearing(null); load();
+      if (clearing.all) {
+        await api.post(`/audits/${clearing.audit.id}/clear-all-submissions`,
+          { confirm: 'CLEAR ALL SUBMITTED DATA' });
+      } else {
+        await api.post(`/audits/${clearing.audit.id}/clear-submission`,
+          { confirm: 'CLEAR SUBMITTED DATA', user_id: clearing.userId });
+      }
+      setClearing(null); await load();
     } catch (e) { setClearErr(e.message); } finally { setBusy(false); }
   }
   async function close(a) {
@@ -70,7 +99,8 @@ export default function AuditSessions() {
             <th className="px-4 py-3">Actions</th></tr></thead>
           <tbody className="divide-y">
             {audits.map((a) => (
-              <tr key={a.id}>
+              <Fragment key={a.id}>
+              <tr>
                 <td className="px-4 py-2 font-medium">{a.store_name}</td>
                 <td className="px-4 py-2">{fmtDate(a.audit_date)}</td>
                 <td className="px-4 py-2">{a.cutoff_time || '—'}</td>
@@ -98,15 +128,57 @@ export default function AuditSessions() {
                   <div className="flex flex-wrap gap-3">
                     <Link className="text-brand font-medium" to={`/admin/audits/${a.id}/count`}>Count entry</Link>
                     <Link className="text-brand font-medium" to={`/admin/audits/${a.id}/system-stock`}>System stock</Link>
-                    {a.session_state === 'submitted' && (
-                      <button className="text-red-600 font-medium" onClick={() => askClear(a)}>
-                        Clear submitted data
+                    {a.submitted_count > 1 && (
+                      <button className="text-red-600 font-medium" onClick={() => askClearAll(a)}>
+                        Clear all submitted data
                       </button>
                     )}
                     {a.status !== 'closed' && <button className="text-red-600 font-medium" onClick={() => close(a)}>Close</button>}
                   </div>
                 </td>
               </tr>
+
+              {/* ── Who is counting this store, and where each has got to ──
+                  Each auditor works from their own sheet, so the store's state
+                  is not one thing any more — it is one line per person. */}
+              <tr>
+                <td colSpan={5} className="px-4 pb-3 pt-0">
+                  {overlaps[a.id]?.length > 0 && (
+                    <div className="mb-2 rounded-lg border-2 border-amber-400 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+                      <span className="font-bold">
+                        {overlaps[a.id].length} item{overlaps[a.id].length === 1 ? ' was' : 's were'} counted
+                        at the same location by more than one auditor
+                      </span>
+                      {' '}— review before issuing the report. Their quantities are added together.{' '}
+                      <Link className="underline font-medium" to="/admin/reports">See the Overlap section in R6</Link>
+                    </div>
+                  )}
+                  <div className="rounded-lg border divide-y bg-white">
+                    {(panels[a.id] || []).length === 0 && (
+                      <div className="px-3 py-2 text-sm text-slate-400">No auditors assigned to this store.</div>
+                    )}
+                    {(panels[a.id] || []).map((p) => (
+                      <div key={p.user_id} className="flex flex-wrap items-center gap-x-4 gap-y-1 px-3 py-2 text-sm">
+                        <span className="font-medium w-40">{p.name}</span>
+                        <span className="text-slate-600 w-24 tabular-nums">
+                          {p.state === 'submitted' ? p.item_count : p.live_items} items
+                        </span>
+                        <span className={p.state === 'submitted' ? 'text-blue-700 font-medium'
+                          : p.state === 'cleared' ? 'text-orange-700 font-medium' : 'text-amber-700'}>
+                          {p.state === 'submitted' ? `Submitted ${fmtDateTime(p.submitted_at)}`
+                            : p.state === 'cleared' ? `Cleared ${fmtDateTime(p.cleared_at)}${p.cleared_by_name ? ` by ${p.cleared_by_name}` : ''} — can submit again`
+                            : 'Still counting'}
+                        </span>
+                        {p.state === 'submitted' && (
+                          <button className="text-red-600 font-medium ml-auto"
+                                  onClick={() => askClear(a, p.user_id)}>Clear</button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </td>
+              </tr>
+              </Fragment>
             ))}
           </tbody>
         </table>

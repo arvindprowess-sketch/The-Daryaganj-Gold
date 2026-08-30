@@ -1,6 +1,6 @@
 import { query } from '../db.js';
 import { measurementBasis, finalTotals, BASES } from './measure.js';
-import { auditSource, SNAPSHOT, CLEARED } from './submissions.js';
+import { auditSource, submissionIds, SNAPSHOT, CLEARED } from './submissions.js';
 import { reportLocations } from './locations.js';
 
 export const LIQUOR_ESTIMATION_NOTE =
@@ -38,10 +38,14 @@ export async function auditItemAggregates(auditId, source = null) {
   // exactly one clause. Everything downstream — zone split, native quantity,
   // photo coverage — is identical, so the two stay impossible to drift apart.
   const fromSnapshot = src.mode === SNAPSHOT;
+  // With a snapshot the source is EVERY standing submission, not one. That is
+  // how the auditors are combined: two auditors' quantities for the same item
+  // and location land in the same location column and are summed, with no
+  // merge step and nothing for the admin to click.
   const entrySource = fromSnapshot
     ? `SELECT e.qty, e.bottles, e.open_ml, e.photo_url, e.location_id
          FROM submission_entries e
-        WHERE e.item_id = i.id AND e.submission_id = $2`
+        WHERE e.item_id = i.id AND e.submission_id = ANY($2::int[])`
     : `SELECT e.qty, e.bottles, e.open_ml, e.photo_url, e.location_id
          FROM count_entries e
         WHERE e.item_id = i.id AND e.audit_id = $1 AND e.status = 'active'`;
@@ -50,9 +54,9 @@ export async function auditItemAggregates(auditId, source = null) {
   const noRows = src.mode === CLEARED;
   // The report's columns. Read from the locations table, never hardcoded, so
   // renaming a place or adding a sixth changes the report with no code change.
-  const locations = await reportLocations(auditId, fromSnapshot ? src.submission.id : null);
+  const locations = await reportLocations(auditId, fromSnapshot ? submissionIds(src) : null);
   const params = [auditId];
-  if (fromSnapshot) params.push(src.submission.id);
+  if (fromSnapshot) params.push(submissionIds(src));
 
   const { rows } = await query(
     `SELECT i.id, i.name, i.unit, i.is_liquor, i.bottle_size_ml, i.bottle_unit_size, i.rate,
@@ -129,7 +133,7 @@ export async function auditItemAggregates(auditId, source = null) {
 // returned without querying again.
 export async function auditLocations(auditId, source = null) {
   const src = source || await auditSource(auditId);
-  return reportLocations(auditId, src.mode === SNAPSHOT ? src.submission.id : null);
+  return reportLocations(auditId, src.mode === SNAPSHOT ? submissionIds(src) : null);
 }
 
 export async function getAudit(auditId) {
@@ -287,7 +291,10 @@ export async function itemEntriesForAdmin(auditId, itemId = null) {
   const { rows } = await query(
     `SELECT ce.id, ce.item_id, i.name, i.unit, i.is_liquor,
             ce.qty, ce.bottles, ce.open_ml, ce.location_text, ce.remarks, ce.photo_url,
-            ce.status, ce.void_reason, ce.counted_at, u.name AS counted_by_name
+            ce.status, ce.void_reason, ce.counted_at,
+            -- WHO counted it. With per-auditor sheets this is no longer a
+            -- detail: it is how the admin tells two auditors' rows apart.
+            ce.counted_by, u.name AS counted_by_name, u.username AS counted_by_username
        FROM count_entries ce
        JOIN items i ON i.id = ce.item_id
        JOIN users u ON u.id = ce.counted_by
@@ -780,6 +787,77 @@ export async function consolidated(auditIds) {
 }
 
 // R6 — exceptions
+// ── Overlap: the same item and location counted by two auditors ────────────
+// Auditors can no longer see each other's work, so two of them may count the
+// same shelf. Their quantities are SUMMED into the report, which is a double
+// count — and nothing in the numbers themselves reveals it.
+//
+// So it is surfaced, never resolved automatically. Merging or discarding on
+// the app's judgement would silently change a recorded count; the admin
+// decides, having seen both figures and who entered them.
+//
+// Read from the same source the report reads: the standing submissions once
+// anyone has submitted, the live entries while the count is in progress.
+export async function overlaps(auditId, source = null) {
+  const src = source || await auditSource(auditId);
+  const fromSnapshot = src.mode === SNAPSHOT;
+  if (src.mode === CLEARED) return [];
+
+  const sql = fromSnapshot
+    ? `SELECT e.item_id, e.location_id, e.counted_by,
+              SUM(COALESCE(CASE WHEN i.is_liquor THEN e.bottles ELSE e.qty END, 0)) AS qty,
+              SUM(COALESCE(e.open_ml, 0)) AS open_ml
+         FROM submission_entries e JOIN items i ON i.id = e.item_id
+        WHERE e.submission_id = ANY($1::int[])
+        GROUP BY e.item_id, e.location_id, e.counted_by`
+    : `SELECT e.item_id, e.location_id, e.counted_by,
+              SUM(COALESCE(CASE WHEN i.is_liquor THEN e.bottles ELSE e.qty END, 0)) AS qty,
+              SUM(COALESCE(e.open_ml, 0)) AS open_ml
+         FROM count_entries e JOIN items i ON i.id = e.item_id
+        WHERE e.audit_id = $1 AND e.status = 'active'
+        GROUP BY e.item_id, e.location_id, e.counted_by`;
+
+  const { rows } = await query(
+    `WITH per_auditor AS (${sql})
+     SELECT i.name AS item, i.unit,
+            COALESCE(sc.name, '—') AS super_category,
+            COALESCE(c.name, '—') AS category,
+            COALESCE(l.name, '(no location)') AS location,
+            u.name AS auditor, u.username,
+            p.qty, p.open_ml
+       FROM per_auditor p
+       JOIN items i ON i.id = p.item_id
+       LEFT JOIN super_categories sc ON sc.id = i.super_category_id
+       LEFT JOIN categories c ON c.id = i.category_id
+       LEFT JOIN locations l ON l.id = p.location_id
+       LEFT JOIN users u ON u.id = p.counted_by
+      WHERE (p.item_id, p.location_id) IN (
+        SELECT item_id, location_id FROM per_auditor
+         GROUP BY item_id, location_id HAVING count(DISTINCT counted_by) > 1
+      )
+      ORDER BY i.name, l.sort_order, u.name`,
+    [fromSnapshot ? submissionIds(src) : auditId]
+  );
+
+  // One row per (item, location) carrying every auditor's figure, so the admin
+  // sees the two numbers side by side rather than two rows to correlate.
+  const byKey = new Map();
+  for (const r of rows) {
+    const key = `${r.item}|||${r.location}`;
+    if (!byKey.has(key)) {
+      byKey.set(key, {
+        item: r.item, unit: r.unit, super_category: r.super_category,
+        category: r.category, location: r.location, auditors: [],
+      });
+    }
+    byKey.get(key).auditors.push({
+      auditor: r.auditor, username: r.username,
+      qty: Number(r.qty), open_ml: Number(r.open_ml),
+    });
+  }
+  return [...byKey.values()];
+}
+
 export async function exceptionReport(auditId) {
   // Section and category are joined in here too, so every exception line can be
   // traced back to where the item lives (same join that R2/R4 carry).
@@ -862,5 +940,8 @@ export async function exceptionReport(auditId) {
   const notStockedCount = agg.filter((it) => varianceCase(it) === 'not_stocked').length;
 
   return { voided, notApplicable, multiEntry, zeroQty, noPhoto, noSystemData,
-           notCounted, notStockedCount };
+           notCounted, notStockedCount,
+           // The same shelf counted twice, by two people who could not see
+           // each other. Reported, never resolved automatically.
+           overlaps: await overlaps(auditId) };
 }

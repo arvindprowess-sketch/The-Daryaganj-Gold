@@ -13,14 +13,20 @@ router.get('/audits/:auditId/items/:itemId/entries', async (req, res) => {
   const { audit, allowed } = await loadAuditForUser(req.user, req.params.auditId);
   if (!audit) return res.status(404).json({ error: 'Not found' });
   if (!allowed) return res.status(403).json({ error: 'Forbidden' });
+  // "Already counted" on the entry sheet is the AUDITOR'S OWN entries. They
+  // never see a colleague's count of the same item — that is the point of the
+  // per-auditor model, and it is enforced in the query rather than hidden in
+  // the client. An admin sees every entry, which is how a total is verified.
   const { rows } = await query(
     `SELECT ce.*, u.name AS counted_by_name, vu.name AS voided_by_name
        FROM count_entries ce
        JOIN users u ON u.id = ce.counted_by
        LEFT JOIN users vu ON vu.id = ce.voided_by
       WHERE ce.audit_id = $1 AND ce.item_id = $2
+        AND ($3::int IS NULL OR ce.counted_by = $3)
       ORDER BY ce.counted_at ASC`,
-    [req.params.auditId, req.params.itemId]
+    [req.params.auditId, req.params.itemId,
+     req.user.role === 'admin' ? null : req.user.id]
   );
   res.json(forRole(req.user.role, rows));
 });
