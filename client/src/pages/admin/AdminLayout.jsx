@@ -98,7 +98,8 @@ export default function AdminLayout() {
         confirmLabel="Log out"
         danger
         onCancel={() => setConfirm(false)}
-        onConfirm={() => { logout(); navigate('/login'); }}
+        // Awaited: logout sends anything still queued before the token goes.
+        onConfirm={async () => { await logout(); navigate('/login'); }}
       />
     </div>
   );

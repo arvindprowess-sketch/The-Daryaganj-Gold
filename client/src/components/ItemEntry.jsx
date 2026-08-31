@@ -8,6 +8,7 @@ import { saveDraft, loadDraft, clearDraft, queueEntry } from '../lib/queue.js';
 import { fmtTime } from '../lib/datetime.js';
 import { subUnitFor, combine, preview } from '../lib/measuredUnit.js';
 import LocationSelect, { useStickyLocation } from './LocationSelect.jsx';
+import { useAuth } from '../lib/auth.jsx';
 
 // M6 — Item entry bottom sheet. Non-liquor and liquor layouts.
 // M7 — Duplicate prompt when adding a second entry (warn, never block).
@@ -27,6 +28,7 @@ export default function ItemEntry({ auditId, item, onClose, onSaved, uploadOnly 
   const [error, setError] = useState('');
   const [dupPrompt, setDupPrompt] = useState(false);
   const toast = useToast();
+  const { user } = useAuth();
 
   const activeEntries = (entries || []).filter((e) => e.status === 'active');
 
@@ -103,7 +105,9 @@ export default function ItemEntry({ auditId, item, onClose, onSaved, uploadOnly 
     } catch (err) {
       if (err.isNetwork) {
         // Offline — queue and keep the form intact. NEVER clear on failure.
-        queueEntry(auditId, payload);
+        // Stamped with who counted it, so the retry cannot file it under
+        // another auditor if the session changes before it goes.
+        queueEntry(auditId, payload, user?.id);
         setError('No connection — entry queued and will retry automatically.');
         toast('Queued — will sync when back online', 'warn');
         await onSaved?.();
@@ -124,13 +128,23 @@ export default function ItemEntry({ auditId, item, onClose, onSaved, uploadOnly 
     else doSave();
   }
 
+  // A void that fails must SAY so. This had no error handling at all: on a
+  // dropped connection the promise rejected, no toast appeared, and the entry
+  // stayed active — the auditor walked away believing they had withdrawn it.
   async function voidEntry(entry) {
     const reason = window.prompt('Reason for voiding this entry?');
     if (!reason || !reason.trim()) return;
-    await api.post(`/entries/${entry.id}/void`, { reason: reason.trim() });
-    await loadEntries();
-    toast('Entry voided');
-    await onSaved?.();
+    try {
+      await api.post(`/entries/${entry.id}/void`, { reason: reason.trim() });
+      await loadEntries();
+      toast('Entry voided');
+      await onSaved?.();
+    } catch (err) {
+      setError(err.isNetwork
+        ? 'No connection — the entry was NOT voided. Try again when you are back online.'
+        : `Could not void: ${err.message}`);
+      toast('Not voided — see the message above', 'error', 4000);
+    }
   }
 
   const firstActive = activeEntries[0];

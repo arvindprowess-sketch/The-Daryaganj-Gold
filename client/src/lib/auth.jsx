@@ -3,6 +3,7 @@ import {
   api, getToken, setToken, getRefreshToken, setRefreshToken, clearTokens,
   setAuthFailureHandler,
 } from './api.js';
+import { setQueueUser, flushQueue, pendingCount } from './queue.js';
 
 const AuthCtx = createContext(null);
 
@@ -35,6 +36,10 @@ export function AuthProvider({ children }) {
   useEffect(() => {
     setAuthFailureHandler(() => endSession());
   }, [endSession]);
+
+  // The retry queue files entries as the auditor who counted them, not as
+  // whoever is signed in when the network comes back.
+  useEffect(() => { setQueueUser(user?.id ?? null); }, [user]);
 
   // Validate the session in the background. A network failure leaves the
   // cached session intact — the user keeps working and we retry later.
@@ -114,7 +119,14 @@ export function AuthProvider({ children }) {
 
   // Explicit user-initiated logout only. Drafts in localStorage are left
   // untouched so nothing typed is lost.
-  function logout() {
+  //
+  // Anything still queued is SENT FIRST, while the token is still valid. Signing
+  // out with entries pending used to strand them on the login screen, where the
+  // retry timer posted them without a token and the 401 destroyed them.
+  async function logout() {
+    if (pendingCount() > 0) {
+      try { await flushQueue(); } catch { /* keep them queued; never block a logout */ }
+    }
     endSession();
   }
 

@@ -39,7 +39,8 @@ export default function MobileHeader({ title, subtitle, back }) {
         confirmLabel="Log out"
         danger
         onCancel={() => setConfirm(false)}
-        onConfirm={() => { logout(); nav('/login'); }}
+        // Awaited: logout sends anything still queued before the token goes.
+        onConfirm={async () => { await logout(); nav('/login'); }}
       />
     </>
   );
