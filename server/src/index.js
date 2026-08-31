@@ -74,7 +74,17 @@ app.use(express.json({ limit: '2mb' }));
 // Serve locally-stored uploads in dev (S3/R2 serves its own URLs in prod).
 app.use('/uploads', express.static(path.join(rootDir, config.uploadDir)));
 
-app.get('/api/health', (_req, res) => res.json({ ok: true }));
+// Which build is actually running.
+//
+// "The fix is not working" and "the deploy has not landed yet" look identical
+// from a browser, and we have spent real time on that ambiguity. This answers
+// it in one request: the commit serving this response, and when it started.
+const BUILD = {
+  commit: process.env.RAILWAY_GIT_COMMIT_SHA || process.env.SOURCE_COMMIT
+       || process.env.GIT_COMMIT || null,
+  startedAt: new Date().toISOString(),
+};
+app.get('/api/health', (_req, res) => res.json({ ok: true, ...BUILD }));
 
 app.use('/api/auth', authRoutes);
 app.use('/api/stores', storeRoutes);
@@ -103,13 +113,28 @@ const clientDist = process.env.CLIENT_DIST
 if (fs.existsSync(path.join(clientDist, 'index.html'))) {
   // Hashed asset filenames are immutable; index.html must never be cached or a
   // redeploy leaves browsers loading a bundle that no longer exists.
-  app.use(express.static(clientDist, { index: false, maxAge: '1y' }));
+  //
+  // The maxAge applied to EVERY file, index.html included — the code did the
+  // opposite of what the line above it says. The SPA fallback below happens to
+  // serve "/" through sendFile, which revalidates, so this bit us only for a
+  // direct /index.html request; it is still a year-long cache on the one file
+  // that must never have one.
+  app.use(express.static(clientDist, {
+    index: false,
+    maxAge: '1y',
+    setHeaders(res, filePath) {
+      if (filePath.endsWith('index.html')) {
+        res.setHeader('Cache-Control', 'no-cache, must-revalidate');
+      }
+    },
+  }));
 
   // SPA fallback: a hard refresh on /admin/reports must return index.html.
   // Scoped to GET/HEAD and excluding the API and upload prefixes, so an unknown
   // /api/* path still returns its JSON 404 instead of a page of HTML.
   app.get(/^(?!\/api\/|\/uploads\/).*/, (req, res, next) => {
     if (req.method !== 'GET' && req.method !== 'HEAD') return next();
+    res.setHeader('Cache-Control', 'no-cache, must-revalidate');
     res.sendFile(path.join(clientDist, 'index.html'));
   });
   console.log(`Serving built client from ${clientDist}`);
