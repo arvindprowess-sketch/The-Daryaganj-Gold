@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import { api, bustCache, downloadReport } from '../../lib/api.js';
 import { Spinner, PhotoThumb } from '../../components/ui.jsx';
 import PhotoInput from '../../components/PhotoInput.jsx';
@@ -311,11 +311,21 @@ function CsvImport({ onClose, onImported }) {
   const [preview, setPreview] = useState(null);
   const [decisions, setDecisions] = useState({}); // row -> 'create' | 'skip'
   const [mode, setMode] = useState('add');        // add | upsert | replace
+  // With a thousand rows, "1 invalid" is useless unless you can find the one.
+  const [onlyInvalid, setOnlyInvalid] = useState(false);
+  const resultRef = useRef(null);
   const [typed, setTyped] = useState('');         // replace confirmation
   const [busy, setBusy] = useState(null);         // null | 'reading' | 'importing'
   // Persistent outcome banner. Set on success AND on failure; cleared only by
   // starting another import or by the admin dismissing it. Never on a timer.
   const [result, setResult] = useState(null);
+  // Scroll the outcome into view. It renders ABOVE the preview table and the
+  // button that triggers it sits below one, so with a thousand rows between
+  // them the result landed far off-screen and the import looked as though
+  // nothing had happened at all.
+  useEffect(() => {
+    if (result) resultRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }, [result]);
   const [showSkipped, setShowSkipped] = useState(false);
 
   async function doPreview(f = file) {
@@ -377,6 +387,7 @@ function CsvImport({ onClose, onImported }) {
   }
 
   const unmatchedRows = preview ? preview.rows.filter((r) => !r.matched && !r.errors.length) : [];
+  const invalidRows = preview ? preview.rows.filter((r) => r.errors.length) : [];
   const createCount = Object.values(decisions).filter((v) => v === 'create').length;
 
   return (
@@ -425,7 +436,7 @@ function CsvImport({ onClose, onImported }) {
         </div>
       )}
       {result && !busy && (
-        <div className="mb-3">
+        <div className="mb-3" ref={resultRef}>
           <ImportResult
             tone={result.tone} title={result.title} lines={result.lines}
             onDismiss={() => { setResult(null); setShowSkipped(false); }}
@@ -517,7 +528,7 @@ function CsvImport({ onClose, onImported }) {
         })()}
       </div>
 
-      {preview && (
+      {preview && !(result && result.tone === 'success') && (
         <>
           {/* matched / unmatched only means something when the existing master
               survives the import. Replace deletes it, so every valid row is
@@ -545,6 +556,41 @@ function CsvImport({ onClose, onImported }) {
             {' '}· <span className="text-red-600">{preview.invalid} invalid</span>
             {preview.invalid > 0 && ' — fix errors before committing.'}
           </p>
+
+          {/* "1 invalid" in a 1054-row file is not a finding, it is a search
+              task. Name the row, quote the value, say what is wrong with it,
+              and offer to show only those rows. */}
+          {invalidRows.length > 0 && (
+            <div className="mb-4 rounded-xl border-2 border-red-300 bg-red-50 p-3">
+              <div className="flex flex-wrap items-center gap-2 mb-2">
+                <p className="text-sm font-semibold text-red-800">
+                  {invalidRows.length} row{invalidRows.length === 1 ? '' : 's'} cannot be imported —
+                  fix {invalidRows.length === 1 ? 'it' : 'them'} in the file and upload again
+                </p>
+                <button className={`chip-${onlyInvalid ? 'on' : 'off'} ml-auto`}
+                        onClick={() => setOnlyInvalid((v) => !v)}>
+                  {onlyInvalid ? 'Show all rows' : 'Show only these rows'}
+                </button>
+              </div>
+              <div className="max-h-40 overflow-y-auto text-sm divide-y divide-red-200">
+                {invalidRows.slice(0, 50).map((r) => (
+                  <div key={r.row} className="py-1.5">
+                    <span className="font-mono font-bold text-red-800">Row {r.row}</span>
+                    <span className="text-slate-700"> · {r.data.name || <em>(no name)</em>}</span>
+                    <span className="text-red-700"> — {r.errors.join('; ')}</span>
+                  </div>
+                ))}
+                {invalidRows.length > 50 && (
+                  <div className="py-1.5 text-red-700">
+                    …and {invalidRows.length - 50} more. Use <em>Show only these rows</em> for the full list.
+                  </div>
+                )}
+              </div>
+              <p className="text-xs text-red-700 mt-2">
+                Row numbers match the line numbers in your CSV, counting the header as row 1.
+              </p>
+            </div>
+          )}
 
           {mode === 'replace' && preview.unmatched > 0 && (
             <p className="text-sm mb-3 text-slate-600">
@@ -616,8 +662,8 @@ function CsvImport({ onClose, onImported }) {
                 <th className="px-2 py-2 text-left">Errors</th>
               </tr></thead>
               <tbody className="divide-y">
-                {preview.rows.map((r) => (
-                  <tr key={r.row} className={r.errors.length ? 'bg-red-50' : ''}>
+                {(onlyInvalid ? invalidRows : preview.rows).map((r) => (
+                  <tr key={r.row} className={r.errors.length ? 'bg-red-100 outline outline-1 outline-red-300' : ''}>
                     <td className="px-2 py-1.5">{r.row}</td>
                     <td className="px-2 py-1.5">
                       {r.data.super_category_name || '—'}
@@ -631,7 +677,7 @@ function CsvImport({ onClose, onImported }) {
                     <td className="px-2 py-1.5 font-mono">{r.data.unit}</td>
                     <td className="px-2 py-1.5 text-right tabular-nums">{r.data.bottle_unit_size}</td>
                     <td className="px-2 py-1.5">
-                      {r.errors.length ? 'invalid'
+                      {r.errors.length ? <span className="font-semibold text-red-700">invalid</span>
                         : r.matched ? <span className="text-green-600">update existing</span>
                         : mode === 'replace' ? <span className="text-green-600">imported</span>
                         : mode === 'upsert' ? <span className="text-green-600">created</span>
