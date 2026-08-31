@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useState, useCallback, useMemo } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { api, bustCache } from '../../lib/api.js';
-import { Spinner, PhotoThumb } from '../../components/ui.jsx';
+import { Spinner, PhotoThumb, VoidMark } from '../../components/ui.jsx';
 import ItemEntry from '../../components/ItemEntry.jsx';
 import { useToast } from '../../components/Toast.jsx';
 import useDebounced, { normalizeName } from '../../lib/useDebounced.js';
@@ -168,6 +168,9 @@ export default function CountEntry() {
                             {i.is_liquor ? liquorBadge(i.total_bottles, i.total_open_ml) : Number(i.total_qty ?? 0)}
                           </span>
                         : <span className="text-slate-300">—</span>}
+                      {/* Marks an item whose count was corrected. Expanding the
+                          row shows what was withdrawn and why. */}
+                      <span className="ml-1.5 align-middle"><VoidMark count={i.void_count} /></span>
                       {detail && detail.entries.length > 0 && (
                         <button className="ml-2 text-xs text-brand underline"
                                 onClick={() => setExpanded((e) => ({ ...e, [i.id]: !isOpen }))}>

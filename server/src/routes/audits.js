@@ -537,18 +537,26 @@ router.get('/:id/items', async (req, res) => {
             agg.total_qty,
             agg.total_bottles,
             agg.total_open_ml,
+            -- An item somebody had to correct is worth a second look, and
+            -- finding it meant opening items one at a time. Carried on the row
+            -- so the list can mark it.
+            COALESCE(agg.void_count, 0)::int AS void_count,
             (na.id IS NOT NULL) AS not_applicable,
             na.reason AS na_reason
        FROM items i
        LEFT JOIN super_categories sc ON sc.id = i.super_category_id
        LEFT JOIN categories c ON c.id = i.category_id
        LEFT JOIN LATERAL (
-         SELECT COUNT(*) AS entry_count,
-                SUM(qty) AS total_qty,
-                SUM(bottles) AS total_bottles,
-                SUM(open_ml) AS total_open_ml
+         -- One pass over the item's entries. The totals count only what still
+         -- stands; the void tally counts what was withdrawn, and must never
+         -- reach the totals.
+         SELECT COUNT(*) FILTER (WHERE ce.status = 'active') AS entry_count,
+                SUM(qty)     FILTER (WHERE ce.status = 'active') AS total_qty,
+                SUM(bottles) FILTER (WHERE ce.status = 'active') AS total_bottles,
+                SUM(open_ml) FILTER (WHERE ce.status = 'active') AS total_open_ml,
+                COUNT(*) FILTER (WHERE ce.status = 'void') AS void_count
            FROM count_entries ce
-          WHERE ce.item_id = i.id AND ce.audit_id = $1 AND ce.status = 'active'
+          WHERE ce.item_id = i.id AND ce.audit_id = $1
                 ${ownerFilter(req.user)}
        ) agg ON TRUE
        LEFT JOIN audit_na na ON na.item_id = i.id AND na.audit_id = $1

@@ -38,3 +38,25 @@ export function PhotoThumb({ src, size = 64 }) {
     </div>
   );
 }
+
+// An item somebody had to correct: at least one of its entries was voided.
+//
+// Voiding is normal — it is how a miscount is withdrawn — but it is also the
+// one thing a checker wants to go back over, and finding those items meant
+// opening them one at a time. The mark is small and sits beside the count so
+// it reads as a footnote on the number, not as an error on the item.
+export function VoidMark({ count }) {
+  if (!count) return null;
+  const label = `${count} voided ${count === 1 ? 'entry' : 'entries'} — open to see what was withdrawn`;
+  return (
+    <span title={label} aria-label={label}
+          className="shrink-0 inline-flex items-center gap-0.5 rounded-md border border-red-200
+                     bg-red-50 px-1 py-0.5 text-[11px] font-semibold text-red-600 leading-none">
+      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           strokeWidth="2.5" strokeLinecap="round" aria-hidden="true">
+        <circle cx="12" cy="12" r="9" /><path d="M6 18L18 6" />
+      </svg>
+      {count > 1 && count}
+    </span>
+  );
+}

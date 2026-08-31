@@ -3,7 +3,7 @@ import { useParams } from 'react-router-dom';
 import { api, bustCache } from '../../lib/api.js';
 import MobileHeader from '../../components/MobileHeader.jsx';
 import { liquorBadge } from '../../lib/liquor.js';
-import { Spinner, PhotoThumb } from '../../components/ui.jsx';
+import { Spinner, PhotoThumb, VoidMark } from '../../components/ui.jsx';
 import ItemEntry from '../../components/ItemEntry.jsx';
 import VirtualList from '../../components/VirtualList.jsx';
 import useDebounced, { normalizeName } from '../../lib/useDebounced.js';
@@ -79,6 +79,7 @@ export default function ItemList() {
         <div className="text-sm text-slate-500 truncate">{i.unit}</div>
         {i.not_applicable && <div className="text-xs text-amber-600">Not applicable</div>}
       </div>
+      <VoidMark count={i.void_count} />
       <div className="text-right shrink-0">
         {i.counted ? (
           <div className="flex items-center gap-1 justify-end">
