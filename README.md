@@ -18,6 +18,36 @@ sessions, enter system stock, and generate reports.
 > every comparison (CSV import, photo matching, system stock) trims whitespace,
 > collapses internal double spaces, and ignores case.
 
+## Importing the item master
+
+Three modes, and the difference decides what the screen asks you:
+
+| Mode | Existing master | An unrecognised name |
+| --- | --- | --- |
+| **Add new items only** | untouched | **you choose** — create it, or leave it out |
+| **Add new and update existing** | matched rows updated | created |
+| **Replace entire master** | **deleted first** | created — the file *is* the new master |
+
+The per-row *create / skip* picker belongs to **Add** alone. That is the only
+mode where the question means anything: the existing master survives, so a name
+it does not recognise is a real decision.
+
+In **Replace** the master is wiped and the file imported whole, and in
+**Upsert** every unrecognised row is created by definition — the server ignores
+those decisions in both. Showing the picker anyway turned a 1054-row file into
+436 questions whose answers were never read, and implied rows might be skipped
+when every one of them was going to be imported.
+
+Replace states its own arithmetic instead:
+
+```
+1054 rows · 1054 will be imported · 618 existing items deleted first · 0 invalid
+The whole file is imported as the new master — nothing to choose row by row.
+```
+
+Replace is still guarded: it is **blocked outright** while real count entries
+exist against the master, and needs `REPLACE ITEM MASTER` typed to confirm.
+
 ## Item hierarchy
 
 The app mirrors the client's own inventory master, because our reports have to

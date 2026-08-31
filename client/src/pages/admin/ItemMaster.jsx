@@ -519,12 +519,38 @@ function CsvImport({ onClose, onImported }) {
 
       {preview && (
         <>
+          {/* matched / unmatched only means something when the existing master
+              survives the import. Replace deletes it, so every valid row is
+              simply imported and the split is noise. */}
           <p className="text-sm mb-3">
-            {preview.total} rows · <span className="text-green-600">{preview.matched} matched</span> ·{' '}
-            <span className="text-amber-600">{preview.unmatched} unmatched</span> ·{' '}
-            <span className="text-red-600">{preview.invalid} invalid</span>
+            {preview.total} rows ·{' '}
+            {mode === 'replace' ? (
+              <>
+                <span className="text-green-600">
+                  {preview.modes?.replace?.created ?? 0} will be imported
+                </span>{' '}
+                · <span className="text-red-600">
+                  {preview.modes?.replace?.deleted ?? 0} existing items deleted first
+                </span>
+              </>
+            ) : (
+              <>
+                <span className="text-green-600">{preview.matched} matched</span> ·{' '}
+                <span className="text-amber-600">
+                  {preview.unmatched} unmatched
+                  {mode === 'upsert' ? ' (all created)' : ''}
+                </span>
+              </>
+            )}
+            {' '}· <span className="text-red-600">{preview.invalid} invalid</span>
             {preview.invalid > 0 && ' — fix errors before committing.'}
           </p>
+
+          {mode === 'replace' && preview.unmatched > 0 && (
+            <p className="text-sm mb-3 text-slate-600">
+              The whole file is imported as the new master — nothing to choose row by row.
+            </p>
+          )}
 
           {/* Hierarchy levels the file introduces — created on commit, never
               a reason to fail the import. */}
@@ -542,7 +568,15 @@ function CsvImport({ onClose, onImported }) {
             </div>
           )}
 
-          {unmatchedRows.length > 0 && (
+          {/* Per-row create / skip belongs to ADD mode alone.
+              `add` leaves the existing master untouched, so a name it does not
+              recognise is a real decision: create it, or leave it out.
+              `upsert` creates every unmatched row by definition, and `replace`
+              wipes the master and imports the file whole — the server ignores
+              these decisions in both. Asking anyway invented 436 questions
+              whose answers were never read, and implied rows might be skipped
+              when every one of them was going to be imported. */}
+          {mode === 'add' && unmatchedRows.length > 0 && (
             <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 p-3">
               <p className="text-sm font-semibold text-amber-800 mb-2">
                 {unmatchedRows.length} name(s) don't match any existing item — choose what to do with each:
@@ -599,6 +633,8 @@ function CsvImport({ onClose, onImported }) {
                     <td className="px-2 py-1.5">
                       {r.errors.length ? 'invalid'
                         : r.matched ? <span className="text-green-600">update existing</span>
+                        : mode === 'replace' ? <span className="text-green-600">imported</span>
+                        : mode === 'upsert' ? <span className="text-green-600">created</span>
                         : <span className="text-amber-600">unmatched → {decisions[r.row] || 'skip'}</span>}
                     </td>
                     <td className="px-2 py-1.5 text-red-600">{r.errors.join('; ')}</td>
