@@ -335,9 +335,18 @@ function CsvImport({ onClose, onImported }) {
       const fd = new FormData(); fd.append('file', f);
       const p = await api.upload('/items/import/preview', fd);
       setPreview(p);
-      // Default unmatched rows to 'skip' — nothing is created without a choice.
+      // Unmatched rows default to CREATE.
+      //
+      // They used to default to 'skip', so "Add new items only" imported
+      // nothing at all until every new row had been ticked by hand — while the
+      // summary directly above the button promised "149 created". Uploading a
+      // file of 149 new items and getting 0 was the result, twice.
+      //
+      // Adding the new items is what the mode is called and what the summary
+      // says it will do, so that is the default. Skip stays as a per-row
+      // opt-OUT, which is the rare case.
       const d = {};
-      p.rows.filter((r) => !r.matched && !r.errors.length).forEach((r) => { d[r.row] = 'skip'; });
+      p.rows.filter((r) => !r.matched && !r.errors.length).forEach((r) => { d[r.row] = 'create'; });
       setDecisions(d);
     } catch (e) {
       // The server states the actual reason (wrong file type, missing column,
@@ -504,6 +513,10 @@ function CsvImport({ onClose, onImported }) {
           // Disabled while an import runs, so it cannot be submitted twice.
           disabled={
             !preview || preview.invalid > 0 || !!busy ||
+            // An import that would apply nothing is not an import. Pressing it
+            // used to run, report "0 imported", and leave the admin to work out
+            // why — so it is refused with a reason instead.
+            (mode === 'add' && unmatchedRows.length > 0 && createCount === 0) ||
             (mode === 'replace' && (preview.modes?.replace?.blocked ||
                                     typed.trim().toUpperCase() !== 'REPLACE ITEM MASTER'))
           }
@@ -521,6 +534,8 @@ function CsvImport({ onClose, onImported }) {
           // The banner above already states why the file was rejected.
           else if (!preview) why = result?.tone === 'error' ? '' : 'Reading the file…';
           else if (preview.invalid > 0) why = `${preview.invalid} invalid row(s) — fix them first.`;
+          else if (mode === 'add' && unmatchedRows.length > 0 && createCount === 0)
+            why = `All ${unmatchedRows.length} new item(s) are set to Skip, so this would import nothing. Use "Create all" above.`;
           else if (mode === 'replace' && preview.modes?.replace?.blocked) why = preview.modes.replace.blockedReason;
           else if (mode === 'replace' && typed.trim().toUpperCase() !== 'REPLACE ITEM MASTER')
             why = 'Type REPLACE ITEM MASTER above to enable this.';
@@ -624,9 +639,18 @@ function CsvImport({ onClose, onImported }) {
               when every one of them was going to be imported. */}
           {mode === 'add' && unmatchedRows.length > 0 && (
             <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 p-3">
-              <p className="text-sm font-semibold text-amber-800 mb-2">
-                {unmatchedRows.length} name(s) don't match any existing item — choose what to do with each:
-              </p>
+              <div className="flex flex-wrap items-center gap-2 mb-2">
+                <p className="text-sm font-semibold text-amber-800">
+                  {unmatchedRows.length} new item{unmatchedRows.length === 1 ? '' : 's'} will be
+                  created. Skip any you do not want.
+                </p>
+                <button className="chip-off ml-auto"
+                        onClick={() => setDecisions(Object.fromEntries(
+                          unmatchedRows.map((r) => [r.row,
+                            createCount === unmatchedRows.length ? 'skip' : 'create'])))}>
+                  {createCount === unmatchedRows.length ? 'Skip all' : 'Create all'}
+                </button>
+              </div>
               <div className="max-h-56 overflow-y-auto divide-y divide-amber-200">
                 {unmatchedRows.map((r) => (
                   <div key={r.row} className="flex items-center justify-between py-2 gap-3">
