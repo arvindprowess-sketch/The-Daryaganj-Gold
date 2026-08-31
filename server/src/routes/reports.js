@@ -214,7 +214,7 @@ router.get('/variance/:auditId', async (req, res) => {
   // puts the nil-stock rows back on the table.
   const includeNilStock = req.query.include_nil === '1' || req.query.include_nil === 'true';
   const { rows, groups, grand, summary, provisional, progress, totals, hasSystemStock,
-          provenance, notStocked, nilStock, locations } =
+          provenance, notStocked, nilStock, locations, unsentChanges } =
     await varianceReport(req.params.auditId,
       { countedOnly, countFilter, categoryId, superCategoryId, systemData, rateFilter,
         includeNilStock });
@@ -258,6 +258,13 @@ router.get('/variance/:auditId', async (req, res) => {
       : null,
     nilStock.count > 0
       ? `${nilStock.count} item(s) counted at nil with no system figure — excluded on the "physical stock only" basis`
+      : null,
+    // The report reads what was submitted. An auditor who corrected a count
+    // afterwards has not sent it, so these figures are the ones they replaced —
+    // said on the export too, because that is what leaves the building.
+    unsentChanges.length
+      ? `UNSENT CHANGES — ${unsentChanges.map((u) => `${u.auditor} (${u.added} new, ${u.removed} voided)`).join('; ')}`
+        + '. These counts are not in the figures below. Ask them to submit again and re-run this report.'
       : null,
   ].filter(Boolean);
 
@@ -341,7 +348,7 @@ router.get('/variance/:auditId', async (req, res) => {
 
   res.json({ audit, rows, groups, grand, summary, columns: cols, withSystem,
              provisional, progress, totals, hasSystemStock, provenance, notStocked,
-             nilStock, locations });
+             nilStock, locations, unsentChanges });
 });
 
 // ── R5 Consolidated (all stores) ─────────────────────────────────────────────

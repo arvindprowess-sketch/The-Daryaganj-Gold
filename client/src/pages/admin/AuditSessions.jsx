@@ -129,6 +129,12 @@ export default function AuditSessions() {
                       {a.cleared_by_name ? ` by ${a.cleared_by_name}` : ''} — count intact
                     </div>
                   )}
+                  {a.session_state === 'changed' && (
+                    <div className="text-[11px] text-red-700 font-medium mt-0.5">
+                      {a.changed_since_submit} change{a.changed_since_submit === 1 ? '' : 's'} since
+                      {' '}{fmtDateTime(a.submission_at)} — not in the reports
+                    </div>
+                  )}
                   {a.session_state === 'counting' && (
                     <div className="text-[11px] text-amber-600 mt-0.5">variance provisional</div>
                   )}
@@ -173,28 +179,37 @@ export default function AuditSessions() {
                           {p.role === 'admin' && <span className="text-slate-400 font-normal"> (admin)</span>}
                         </span>
                         <span className="text-slate-600 w-24 tabular-nums">
-                          {p.state === 'submitted' ? p.item_count : p.live_items} items
+                          {p.state === 'submitted' || p.state === 'changed'
+                            ? p.item_count : p.live_items} items
                         </span>
                         <span className={p.state === 'submitted' ? 'text-blue-700 font-medium'
+                          : p.state === 'changed' ? 'text-red-700 font-semibold'
                           : p.state === 'cleared' ? 'text-orange-700 font-medium' : 'text-amber-700'}>
                           {p.state === 'submitted' ? `Submitted ${fmtDateTime(p.submitted_at)}`
+                            : p.state === 'changed' ? `Submitted ${fmtDateTime(p.submitted_at)} — changed since`
                             : p.state === 'cleared' ? `Cleared ${fmtDateTime(p.cleared_at)}${p.cleared_by_name ? ` by ${p.cleared_by_name}` : ''} — can submit again`
                             : 'Still counting'}
                         </span>
                         {/* Counted, but in no standing submission — so in no
-                            report. Say so plainly rather than letting the
-                            entries sit there unreported. */}
+                            report. Either they never submitted, or they carried
+                            on afterwards and their submission is now out of
+                            date. Both mean the same thing to the reader: these
+                            entries are not in the figures. */}
                         {p.unsubmitted > 0 && (
-                          <span className="text-orange-700">
-                            {p.unsubmitted} entr{p.unsubmitted === 1 ? 'y is' : 'ies are'} not in any report yet
+                          <span className={p.state === 'changed' ? 'text-red-700 font-medium' : 'text-orange-700'}>
+                            {p.changed_since_submit
+                              ? `${p.changed_since_submit.added} new, ${p.changed_since_submit.removed} voided since submitting — not in any report`
+                              : `${p.unsubmitted} entr${p.unsubmitted === 1 ? 'y is' : 'ies are'} not in any report yet`}
                           </span>
                         )}
                         <span className="ml-auto flex gap-3">
                           {p.role === 'admin' && p.unsubmitted > 0 && (
                             <button className="text-brand font-medium"
-                                    onClick={() => submitMine(a)}>Submit mine</button>
+                                    onClick={() => submitMine(a)}>
+                              {p.state === 'changed' ? 'Re-submit mine' : 'Submit mine'}
+                            </button>
                           )}
-                          {p.state === 'submitted' && (
+                          {(p.state === 'submitted' || p.state === 'changed') && (
                             <button className="text-red-600 font-medium"
                                     onClick={() => askClear(a, p.user_id)}>Clear</button>
                           )}

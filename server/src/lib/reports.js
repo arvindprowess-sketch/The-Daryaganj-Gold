@@ -1,6 +1,7 @@
 import { query } from '../db.js';
 import { measurementBasis, finalTotals, BASES } from './measure.js';
-import { auditSource, submissionIds, clearedNotice, SNAPSHOT, CLEARED } from './submissions.js';
+import { auditSource, submissionIds, clearedNotice, submissionDrift,
+         SNAPSHOT, CLEARED } from './submissions.js';
 import { reportLocations } from './locations.js';
 
 export const LIQUOR_ESTIMATION_NOTE =
@@ -134,6 +135,23 @@ export async function auditItemAggregates(auditId, source = null) {
 export async function auditLocations(auditId, source = null) {
   const src = source || await auditSource(auditId);
   return reportLocations(auditId, src.mode === SNAPSHOT ? submissionIds(src) : null);
+}
+
+// Auditors whose submitted snapshot no longer matches their count.
+//
+// Only meaningful when the report is READING a snapshot: a live report already
+// shows the current entries, so there is nothing out of date to warn about.
+export async function unsentChangeList(auditId, source = null) {
+  const src = source || await auditSource(auditId);
+  if (src.mode !== SNAPSHOT) return [];
+  const drift = await submissionDrift(auditId);
+  return (src.submissions || [])
+    .map((s) => ({ sub: s, d: drift.get(s.submitted_by) }))
+    .filter((x) => x.d && x.d.stale)
+    .map(({ sub, d }) => ({
+      auditor: sub.submitted_by_name || sub.submitted_by_username || 'Unknown',
+      added: d.added, removed: d.removed,
+    }));
 }
 
 export async function getAudit(auditId) {
@@ -496,6 +514,11 @@ export async function varianceReport(
   const audit = await getAudit(auditId);
   const provisional = !audit || audit.status === 'open';
   const provenance = await systemStockSource(auditId);
+  // Whose numbers below are already out of date: an auditor who submitted and
+  // then corrected a count is not in this report, and the figure they
+  // corrected still is.
+  const unsentChanges = await unsentChangeList(auditId, src);
+
 
   // Case (d) leaves the table before any user filter is applied — it is a
   // structural exclusion, not something the admin toggles. Counted separately
@@ -646,6 +669,10 @@ export async function varianceReport(
     // from this rather than assuming what the places are called.
     locations,
     provisional,
+    // Corrections made after submitting are in no snapshot, so this report is
+    // reading numbers an auditor has already replaced. Named here so the
+    // header can say whose, rather than the reader trusting a stale figure.
+    unsentChanges,
     progress: { total, counted, uncounted: total - counted },
     // True only when nothing at all has been imported or entered.
     hasSystemStock: provenance.with_system > 0,

@@ -4,7 +4,8 @@ import { requireAuth, requireRole, assertStoreAccess, loadAuditForUser } from '.
 import { forRole } from '../lib/blindCount.js';
 import { itemEntriesForAdmin } from '../lib/reports.js';
 import { auditSource, createSubmission, clearSubmission, clearedNotice,
-         refreshAuditStatus, SNAPSHOT, CLEARED } from '../lib/submissions.js';
+         refreshAuditStatus, submissionDrift, driftMessage, driftCountSql,
+         SNAPSHOT, CLEARED } from '../lib/submissions.js';
 import { logActivity } from '../lib/activityLog.js';
 
 const router = Router();
@@ -54,7 +55,15 @@ router.get('/', async (req, res) => {
             (SELECT count(*)::int FROM count_entries ce
               WHERE ce.audit_id = a.id AND ce.status = 'active'
                     ${ownerFilter(req.user)}) AS live_entries,
-            CASE WHEN sub.status = 'active' THEN 'submitted'
+            -- Entries counted or voided SINCE submitting. A submission is a
+            -- frozen copy, so these are in no report until it is sent again —
+            -- and saying "submitted" while they sit there is what made a
+            -- correction look as though it had been saved and then removed.
+            CASE WHEN sub.status = 'active'
+                 THEN ${driftCountSql('a', 'sub')} ELSE 0 END AS changed_since_submit,
+            CASE WHEN sub.status = 'active'
+                   THEN CASE WHEN ${driftCountSql('a', 'sub')} > 0
+                             THEN 'changed' ELSE 'submitted' END
                  WHEN sub.status = 'cleared' THEN 'cleared'
                  ELSE 'counting' END AS session_state,
             -- The per-auditor panel: how many are mapped to this store and how
@@ -271,13 +280,28 @@ async function auditorPanel(auditId) {
       ORDER BY p.name`,
     [auditId]
   );
-  return rows.map((r) => ({
-    ...r,
-    state: r.submission_id ? 'submitted' : r.cleared_at ? 'cleared' : 'counting',
-    // The figure that matters: counted, but in no standing submission, so in
-    // no report. Silent data loss unless somebody is told.
-    unsubmitted: r.submission_id ? 0 : Number(r.live_entries || 0),
-  }));
+  // Having a submission is not the same as having sent everything: an auditor
+  // who submits and then corrects a number has a standing submission that no
+  // longer matches their count. Treating the two as the same is what let a
+  // correction disappear silently.
+  const drift = await submissionDrift(auditId);
+
+  return rows.map((r) => {
+    const d = r.submission_id ? drift.get(r.user_id) : null;
+    return {
+      ...r,
+      state: r.submission_id
+        ? (d && d.stale ? 'changed' : 'submitted')
+        : r.cleared_at ? 'cleared' : 'counting',
+      // The figure that matters: counted, but in no report. That is either
+      // never having submitted, or having changed the count since.
+      unsubmitted: r.submission_id
+        ? (d ? d.added + d.removed : 0)
+        : Number(r.live_entries || 0),
+      changed_since_submit: d && d.stale ? { added: d.added, removed: d.removed } : null,
+      drift_message: driftMessage(d),
+    };
+  });
 }
 
 // ── Clear submitted data — ADMIN ONLY ───────────────────────────────────────

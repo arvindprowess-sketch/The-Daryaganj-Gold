@@ -46,11 +46,14 @@ export default function AuditSession() {
                 submittedAt={a.submission_at}
                 cleared={{ cleared_at: a.cleared_at, cleared_by: a.cleared_by_name }}
                 entries={a.live_entries}
+                changed={a.changed_since_submit}
               />
             </div>
             {a.status === 'open' ? (
               <button className="btn-primary w-full mt-3" onClick={() => nav(`/a/audit/${a.id}`)}>
-                {a.session_state === 'cleared' ? 'Continue — submit again' : 'Continue Counting'}
+                {a.session_state === 'cleared' ? 'Continue — submit again'
+                  : a.session_state === 'changed' ? 'Submit again — changes not sent'
+                  : 'Continue Counting'}
               </button>
             ) : (
               <button className="btn-ghost w-full mt-3" disabled>

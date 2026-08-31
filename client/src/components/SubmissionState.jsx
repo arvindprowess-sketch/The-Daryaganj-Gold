@@ -12,12 +12,14 @@ import { fmtDateTime } from '../lib/datetime.js';
 export const STATE_LABEL = {
   counting: 'Counting',
   submitted: 'Submitted',
+  changed: 'Changed since submitting',
   cleared: 'Cleared — resubmit pending',
 };
 
 const CHIP = {
   counting: 'bg-amber-100 text-amber-800 border-amber-200',
   submitted: 'bg-blue-100 text-blue-700 border-blue-200',
+  changed: 'bg-red-100 text-red-800 border-red-300',
   cleared: 'bg-orange-100 text-orange-800 border-orange-300',
 };
 
@@ -28,7 +30,25 @@ export function StateChip({ state }) {
 
 // The auditor's wording. They do not need to know what a snapshot is — only
 // whether their work went in, and whether they need to send it again.
-export function AuditorStatus({ state, submittedAt, cleared, entries }) {
+export function AuditorStatus({ state, submittedAt, cleared, entries, changed }) {
+  // Submitting freezes a copy; counting carries on afterwards. Anything
+  // entered or voided since is on the phone and in no report, and saying
+  // "Submitted" over the top of it is what made a correction look as though
+  // it saved and then disappeared.
+  if (state === 'changed') {
+    return (
+      <div className="rounded-xl border-2 border-red-300 bg-red-50 px-4 py-3">
+        <p className="font-semibold text-red-900">
+          {changed ? `${changed} change${changed === 1 ? '' : 's'}` : 'Changes'} not sent yet
+        </p>
+        <p className="text-sm text-red-800 mt-0.5">
+          You submitted {fmtDateTime(submittedAt)}. Anything you have counted or
+          voided since is still only on this phone — the reports do not have it.
+          Submit again to send it.
+        </p>
+      </div>
+    );
+  }
   if (state === 'submitted') {
     return (
       <div className="rounded-xl border border-blue-200 bg-blue-50 px-4 py-3">

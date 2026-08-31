@@ -97,6 +97,102 @@ export function clearedNotice(cleared) {
   };
 }
 
+// ── Has the count changed since it was submitted? ──────────────────────────
+// A submission is a FROZEN COPY, and nothing stops an auditor carrying on
+// afterwards: the audit stays open until everybody has sent theirs, so voiding
+// an entry and re-counting it is still allowed — and still the right thing to
+// do when a number was wrong.
+//
+// What was missing is that it went nowhere. Their screen reads count_entries
+// and shows the correction; every report reads the snapshot and shows the
+// figure they corrected. The new entry is invisible and the voided one is
+// still being counted, with nothing on either screen saying so.
+//
+// Counting rows cannot detect this. Voiding one entry and adding one leaves
+// the total identical — six before, six after — which is exactly what the
+// admin panel was comparing, and exactly why it reported everything as sent.
+//
+// So the comparison is on CONTENT: what each entry would contribute to a
+// report. Re-entering the same numbers after a void therefore counts as no
+// change, which is correct — the report already says that.
+const ENTRY_SIG = (t) =>
+  `format('%s:%s:%s:%s:%s', ${t}.item_id, coalesce(${t}.location_id, 0),
+          coalesce(${t}.qty::text, ''), coalesce(${t}.bottles::text, ''),
+          coalesce(${t}.open_ml::text, ''))`;
+
+// Per auditor with a STANDING submission: how many entries the reports are
+// missing, and how many they are still carrying that the auditor has since
+// withdrawn. Either being non-zero means their submission no longer describes
+// their count.
+export async function submissionDrift(auditId) {
+  const { rows } = await query(
+    `WITH live AS (
+       SELECT ce.counted_by AS user_id, ${ENTRY_SIG('ce')} AS sig
+         FROM count_entries ce
+        WHERE ce.audit_id = $1 AND ce.status = 'active'
+     ), snap AS (
+       SELECT sub.submitted_by AS user_id, ${ENTRY_SIG('se')} AS sig
+         FROM audit_submissions sub
+         JOIN submission_entries se ON se.submission_id = sub.id
+        WHERE sub.audit_id = $1 AND sub.status = 'active'
+     ), people AS (
+       SELECT submitted_by AS user_id FROM audit_submissions
+        WHERE audit_id = $1 AND status = 'active' AND submitted_by IS NOT NULL
+     )
+     SELECT p.user_id,
+            -- counted since submitting, so in no report
+            (SELECT count(*)::int FROM (
+               SELECT sig FROM live WHERE user_id = p.user_id
+               EXCEPT ALL
+               SELECT sig FROM snap WHERE user_id = p.user_id) a) AS added,
+            -- withdrawn since submitting, but the reports still count it
+            (SELECT count(*)::int FROM (
+               SELECT sig FROM snap WHERE user_id = p.user_id
+               EXCEPT ALL
+               SELECT sig FROM live WHERE user_id = p.user_id) b) AS removed
+       FROM people p`,
+    [auditId]
+  );
+  const byUser = new Map();
+  for (const r of rows) {
+    byUser.set(r.user_id, { added: r.added, removed: r.removed,
+                            stale: r.added > 0 || r.removed > 0 });
+  }
+  return byUser;
+}
+
+// The same comparison as a scalar subquery, for ONE submission, so a list
+// query can carry it without a second round trip. Returns how many entries
+// differ in either direction.
+export const driftCountSql = (auditAlias, subAlias) => `
+  (SELECT count(*)::int FROM (
+     (SELECT ${ENTRY_SIG('ce')} AS sig FROM count_entries ce
+       WHERE ce.audit_id = ${auditAlias}.id AND ce.status = 'active'
+         AND ce.counted_by = ${subAlias}.submitted_by
+      EXCEPT ALL
+      SELECT ${ENTRY_SIG('se')} AS sig FROM submission_entries se
+       WHERE se.submission_id = ${subAlias}.id)
+     UNION ALL
+     (SELECT ${ENTRY_SIG('se')} AS sig FROM submission_entries se
+       WHERE se.submission_id = ${subAlias}.id
+      EXCEPT ALL
+      SELECT ${ENTRY_SIG('ce')} AS sig FROM count_entries ce
+       WHERE ce.audit_id = ${auditAlias}.id AND ce.status = 'active'
+         AND ce.counted_by = ${subAlias}.submitted_by)
+   ) x)`;
+
+// The sentence shown to whoever needs to act on it. Written for the auditor,
+// who has never heard of a snapshot and only needs to know their correction
+// has not left the phone.
+export function driftMessage(d) {
+  if (!d || !d.stale) return null;
+  const bits = [];
+  if (d.added) bits.push(`${d.added} new ${d.added === 1 ? 'entry' : 'entries'}`);
+  if (d.removed) bits.push(`${d.removed} voided ${d.removed === 1 ? 'entry' : 'entries'}`);
+  return `${bits.join(' and ')} since you submitted ${d.added + d.removed === 1 ? 'is' : 'are'} `
+       + 'not in the reports yet. Submit again to send the change.';
+}
+
 // ── Taking the snapshot ────────────────────────────────────────────────────
 // Called inside the submit transaction. Copies the ACTIVE entries only —
 // a voided entry was withdrawn by the auditor and was never part of the count.
@@ -160,6 +256,10 @@ export async function refreshAuditStatus(client, auditId) {
                    AND u.is_active AND u.is_demo = a.is_demo
        LEFT JOIN audit_submissions sub
               ON sub.audit_id = a.id AND sub.submitted_by = u.id AND sub.status = 'active'
+                 -- A submission the auditor has since counted past does not
+                 -- count as sent. Closing the audit on it would lock them out
+                 -- with a correction still sitting on the phone.
+                 AND ${driftCountSql('a', 'sub')} = 0
       WHERE a.id = $1`,
     [auditId]
   );

@@ -125,6 +125,31 @@ export default function Reports() {
         </div>
       )}
 
+      {/* Reports read what was SUBMITTED. An auditor who corrected a count
+          afterwards has not sent it, so the figures below are the ones they
+          replaced — and the entry they voided is still being counted. This is
+          the loudest banner on the screen because the numbers are wrong until
+          it clears. */}
+      {data?.unsentChanges?.length > 0 && (
+        <div className="mb-4 rounded-xl border-2 border-red-400 bg-red-50 px-4 py-3">
+          <div className="font-bold text-red-800">
+            Counts changed after they were submitted — this report does not have them.
+          </div>
+          <ul className="text-red-800 text-sm mt-1 space-y-0.5">
+            {data.unsentChanges.map((u) => (
+              <li key={u.auditor}>
+                <span className="font-semibold">{u.auditor}</span> — {u.added} new
+                {' '}{u.added === 1 ? 'entry' : 'entries'}, {u.removed} voided
+                {' '}{u.removed === 1 ? 'entry' : 'entries'} not sent
+              </li>
+            ))}
+          </ul>
+          <div className="text-red-800 text-sm mt-1">
+            Ask them to press Submit again, then re-run this report.
+          </div>
+        </div>
+      )}
+
       {/* Value figures are only as complete as the rates behind them. Say so up
           front rather than letting a reader assume the totals are the whole
           picture. */}
