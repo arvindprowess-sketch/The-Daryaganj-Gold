@@ -65,9 +65,22 @@ export default function SuperCategoryList() {
       </div>
 
       <div className="fixed bottom-0 inset-x-0 p-3 bg-gradient-to-t from-slate-100 to-transparent">
-        <button className="btn-primary w-full" onClick={() => nav(`/a/audit/${auditId}/submit`)}>
-          Review &amp; Submit
-        </button>
+        {/* Warehouse reports are live: a saved entry is with the admin at
+            once, so there is nothing to submit — only a review of one's own. */}
+        {audit?.inventory_mode === 'warehouse' ? (
+          <>
+            <p className="text-center text-xs text-green-800 mb-1.5">
+              ✓ Every saved entry reaches the admin straight away — no need to submit.
+            </p>
+            <button className="btn-ghost w-full bg-white" onClick={() => nav(`/a/audit/${auditId}/submit`)}>
+              Review my entries
+            </button>
+          </>
+        ) : (
+          <button className="btn-primary w-full" onClick={() => nav(`/a/audit/${auditId}/submit`)}>
+            Review &amp; Submit
+          </button>
+        )}
       </div>
     </div>
   );
