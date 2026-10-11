@@ -195,6 +195,23 @@ as suggestions. Reports for a warehouse audit carry one *Physical Count*
 column (typed places cannot be columns); where each quantity was found is on
 the batch report's Locations column. Cafe stores keep the fixed list.
 
+**Reports for a warehouse store.** Choosing a warehouse audit on Reports
+replaces the cafe's R1–R6 with two reports, each with an Excel download, both
+reading what was submitted (every auditor combined):
+
+- *Physical Compile Sheet* — exactly what was entered, **location-wise**: one
+  line per material + batch + location (two auditors at the same batch and
+  place are added together; "Kitchen" and "kitchen" are one place).
+  Columns: Super category, Brand, Material, Material Description, Batch,
+  Stock, Physical Qty, Difference, Locations, Remarks. A batch counted in
+  several places has one line per place, with its Stock and Difference on the
+  first line only, so the columns add up. Batches nobody counted are not
+  lines here.
+- *Material-wise Variance* — no batch column: one line per material, the
+  stock of all its batches against everything counted across them, so a batch
+  nobody counted shows as shortage here. Remarks name new batches and
+  materials not counted at all.
+
 **Searching on the phone** matches the material description (what counters
 type) and the material. Typing a whole material and pressing Enter opens its
 batches directly. *Add & update* creates
