@@ -129,7 +129,10 @@ export async function auditItemAggregates(auditId, source = null) {
           WHERE b.origin = 'counted' AND ${noRows ? 'FALSE' : 'TRUE'}
        ) nb ON TRUE
        LEFT JOIN audit_na na ON na.item_id = i.id AND na.audit_id = $1
-      WHERE i.is_active = TRUE AND i.inventory_mode = ${AUDIT_MODE()}
+      -- An item taken off the master/stock list after it was counted is still
+      -- reported: its count happened and must not drop out of the totals.
+      WHERE (i.is_active = TRUE OR COALESCE(agg.entry_count, 0) > 0)
+        AND i.inventory_mode = ${AUDIT_MODE()}
       ORDER BY sc.sort_order NULLS LAST, sc.name, c.name, i.name`,
     params
   );

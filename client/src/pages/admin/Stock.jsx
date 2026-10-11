@@ -494,7 +494,8 @@ function StockImport({ onDone }) {
   async function run() {
     if (!file) return;
     if (mode === 'replace' && !window.confirm(
-      'Replace: every stock-list batch that is NOT in this file will be deactivated. '
+      'Replace: this file becomes the whole stock list. Materials and batches NOT in it are removed. '
+      + 'Any that were already counted in an audit are hidden instead (kept so that audit\'s report stays correct). '
       + 'Batches created during counting are kept. Continue?')) return;
     setBusy(true); setResult(null);
     const fd = new FormData();
@@ -513,8 +514,14 @@ function StockImport({ onDone }) {
             : null,
           `Articles: ${r.articles_created} created, ${r.articles_updated} updated`
             + (r.categories_created ? ` · ${r.categories_created} new categor${r.categories_created === 1 ? 'y' : 'ies'}.` : '.'),
-          `Batches: ${r.batches_created} created, ${r.batches_updated} updated`
-            + (r.mode === 'replace' ? `, ${r.batches_deactivated} not in the file deactivated.` : '.'),
+          `Batches: ${r.batches_created} created, ${r.batches_updated} updated.`,
+          r.articles_reactivated ? `${r.articles_reactivated} material(s) that had been removed are back in stock.` : null,
+          r.mode === 'replace'
+            ? `Not in the file: ${r.articles_deleted} material(s) and ${r.batches_deleted} batch(es) removed`
+              + (r.articles_hidden || r.batches_hidden
+                ? `; ${r.articles_hidden} material(s) and ${r.batches_hidden} batch(es) already counted in an audit — hidden, kept for that audit's report.`
+                : '.')
+            : null,
         ],
       });
       setFile(null);

@@ -244,6 +244,15 @@ Stock added (10 + 20 + 5 → 35). Importing the same file again sets 35 again �
 it never adds to what is already there. Only the same batch in a different
 unit is refused, since those cannot be added.
 
+**Replace removes what is not in the file.** A *Replace* stock import makes
+the file the whole stock list. Materials and batches not in it are
+**deleted** — unless they were already counted in an audit, in which case they
+are kept in the database but **hidden** (inactive) so that audit's reports
+stay correct; they show only under the Stock page's *Inactive* filter. A
+material that comes back in a later file is shown again. Batches created
+during counting are never removed by an import. Counted items that were
+later removed still appear on every report with their count.
+
 **Searching on the phone** matches the material description (what counters
 type) and the material. Typing a whole material and pressing Enter opens its
 batches directly. *Add & update* creates
