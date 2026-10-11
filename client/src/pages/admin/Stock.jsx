@@ -569,13 +569,18 @@ function BatchCount() {
     api.get(`/stock/count?audit_id=${auditId}`).then(setData).catch((e) => setError(e.message));
   }, [auditId]);
 
-  const rows = (data?.rows || []).filter((r) => {
-    if (filter === 'counted') return r.counted;
-    if (filter === 'notcounted') return !r.counted;
-    if (filter === 'diff') return r.counted && r.difference !== 0;
-    if (filter === 'new') return r.is_new;
+  // One line per batch AND location — a batch found in three places is three
+  // lines, never "G2 · F2 · C3" in one cell. A filter keeps or drops whole
+  // batches, so a batch's lines always stay together.
+  const lines = data?.lines || [];
+  const keepBatch = new Set(lines.filter((l) => {
+    if (filter === 'counted') return l.counted;
+    if (filter === 'notcounted') return !l.counted;
+    if (filter === 'diff') return l.first_of_batch && l.difference != null && l.difference !== 0;
+    if (filter === 'new') return l.is_new;
     return true;
-  });
+  }).map((l) => `${l.item_id}:${l.batch_id ?? '-'}`));
+  const rows = lines.filter((l) => keepBatch.has(`${l.item_id}:${l.batch_id ?? '-'}`));
   const audit = audits.find((a) => String(a.id) === auditId);
 
   return (
@@ -623,41 +628,37 @@ function BatchCount() {
                 <th className="px-3 py-3">Batch</th><th className="px-3 py-3">Unit</th>
                 <th className="px-3 py-3 text-right">System</th><th className="px-3 py-3 text-right">Physical</th>
                 <th className="px-3 py-3 text-right">Difference</th>
-                <th className="px-3 py-3">Locations</th>
+                <th className="px-3 py-3">Location</th>
                 <th className="px-3 py-3">Remarks</th>
               </tr>
             </thead>
             <tbody className="divide-y">
               {rows.map((r, idx) => (
-                <Fragment key={`${r.item_id}-${r.batch_id ?? 'none'}`}>
-                <tr className={r.is_new ? 'bg-teal-50/40' : ''}>
-                  <td className="px-3 py-2 font-medium">{r.article}</td>
+                <Fragment key={`${r.item_id}-${r.batch_id ?? 'none'}-${idx}`}>
+                <tr className={`${r.is_new ? 'bg-teal-50/40' : ''} ${r.first_of_batch ? '' : 'border-t-0'}`}>
+                  <td className="px-3 py-2 font-medium">{r.material}</td>
                   <td className="px-3 py-2 text-slate-600">{r.description || '—'}</td>
                   <td className="px-3 py-2">
-                    {r.batch_no || <span className="text-amber-600">(no batch)</span>}
-                    {r.batch_id && !r.batch_active && <span className="text-xs text-slate-400"> · inactive</span>}
-                    {r.is_new && (
-                      <span className="ml-1.5 rounded bg-teal-100 px-1 py-0.5 text-[10px] font-semibold text-teal-800"
-                            title={`Created during counting${r.batch_created_by ? ` by ${r.batch_created_by}` : ''}`}>NEW</span>
+                    {r.batch}
+                    {r.is_new && r.first_of_batch && (
+                      <span className="ml-1.5 rounded bg-teal-100 px-1 py-0.5 text-[10px] font-semibold text-teal-800">NEW</span>
                     )}
                   </td>
                   <td className="px-3 py-2 text-slate-500">{r.unit}</td>
-                  <td className="px-3 py-2 text-right tabular-nums">{r.stock_qty == null ? '—' : fmtQty(r.stock_qty)}</td>
+                  <td className="px-3 py-2 text-right tabular-nums">{r.stock == null ? (r.first_of_batch ? '—' : '') : fmtQty(r.stock)}</td>
                   <td className="px-3 py-2 text-right tabular-nums">
-                    {r.counted ? fmtQty(r.physical_qty) : <span className="text-slate-300">not counted</span>}
-                    {r.is_liquor && r.counted_open_ml ? <span className="text-xs text-slate-500"> + {r.counted_open_ml} ml</span> : null}
+                    {r.counted ? fmtQty(r.physical) : <span className="text-slate-300">not counted</span>}
+                    {r.is_liquor && r.open_ml ? <span className="text-xs text-slate-500"> + {r.open_ml} ml</span> : null}
                   </td>
                   <td className={`px-3 py-2 text-right tabular-nums font-semibold ${
                     r.difference == null ? 'text-slate-300' : r.difference < 0 ? 'text-red-600'
                       : r.difference > 0 ? 'text-amber-600' : 'text-green-600'}`}>
-                    {r.difference == null ? '—' : r.difference > 0 ? `+${fmtQty(r.difference)}` : fmtQty(r.difference)}
+                    {r.difference == null ? (r.first_of_batch ? '—' : '') : r.difference > 0 ? `+${fmtQty(r.difference)}` : fmtQty(r.difference)}
                   </td>
-                  <td className="px-3 py-2 text-xs text-slate-600">
-                    {r.locations.length ? r.locations.map((l) => `${l.name} ${fmtQty(l.qty)}`).join(' · ') : '—'}
-                  </td>
+                  <td className="px-3 py-2 text-sm">{r.location || '—'}</td>
                   <td className={`px-3 py-2 text-xs ${r.is_new ? 'font-semibold text-teal-800' : 'text-slate-500'}`}>{r.remarks || ''}</td>
                 </tr>
-                {/* The article as a whole, after its last batch: every batch
+                {/* The material as a whole, after its last line: every batch
                     merged — book stock against everything counted. Shown on
                     the unfiltered list only, where all its batches are there. */}
                 {filter === 'all' && rows[idx + 1]?.item_id !== r.item_id
@@ -665,7 +666,7 @@ function BatchCount() {
                     const t = data.totals[r.item_id];
                     return (
                       <tr className="bg-slate-100 font-semibold">
-                        <td className="px-3 py-2" colSpan={3}>{r.article} — total</td>
+                        <td className="px-3 py-2" colSpan={3}>{r.material} — total</td>
                         <td className="px-3 py-2 text-slate-500">{t.mixed_units ? 'mixed' : t.unit}</td>
                         <td className="px-3 py-2 text-right tabular-nums">
                           {t.mixed_units || t.system_qty == null ? '—' : fmtQty(t.system_qty)}

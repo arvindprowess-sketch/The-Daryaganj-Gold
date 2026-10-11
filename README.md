@@ -195,6 +195,13 @@ as suggestions. Reports for a warehouse audit carry one *Physical Count*
 column (typed places cannot be columns); where each quantity was found is on
 the batch report's Locations column. Cafe stores keep the fixed list.
 
+**A batch found in several places is several lines.** Every batch-level view
+— the Stock page's batch-wise count, the Batch Summary sheet, the Physical
+Compile Sheet — has one line per batch **and location** (G2, F2 and C3 are
+three lines, never "G2 · F2 · C3" in one cell). The batch's Stock, Difference
+and Status are on its first line. Only the Material-wise Variance, which is
+one line per material by definition, lists its places in one cell.
+
 **Reports for a warehouse store.** Choosing a warehouse audit on Reports
 replaces the cafe's R1–R6 with two reports, each with an Excel download, both
 reading what was submitted (every auditor combined):

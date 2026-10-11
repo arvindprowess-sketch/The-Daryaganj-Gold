@@ -193,12 +193,13 @@ const when = (t) => (t ? new Date(t).toISOString().replace('T', ' ').slice(0, 16
 const cell = (v) => (v == null ? null : v);
 
 export const SUMMARY_HEADERS = ['Material', 'Material Description', 'Batch', 'Unit',
-  'System Qty', 'Physical Qty', 'Open ML', 'Difference', 'Locations', 'Status', 'Remarks'];
+  'System Qty', 'Physical Qty', 'Open ML', 'Difference', 'Location', 'Status', 'Remarks'];
 
-export function summaryRow(r) {
-  return [r.article, r.description || '', r.batch_no || '(no batch)', r.unit,
-    cell(r.stock_qty), cell(r.physical_qty), cell(r.counted_open_ml), cell(r.difference),
-    r.locations.map((l) => `${l.name} ${l.qty}`).join(' · '), r.status, r.remarks];
+// One spreadsheet line from a location line.
+export function summaryRow(l) {
+  return [l.material, l.description, l.batch, l.unit,
+    cell(l.stock), cell(l.physical), cell(l.open_ml), cell(l.difference),
+    l.location, l.status, l.remarks];
 }
 
 // The line under an article's batches: the article as a whole.
@@ -215,14 +216,17 @@ export function totalRow(r, t) {
     remarks];
 }
 
-// Batch rows with each multi-batch article's total line after its batches.
+// Location lines, with each multi-batch material's TOTAL line after them.
 export function summaryLines(report) {
+  const lines = locationLines(report, { includeUncounted: true });
   const out = [];
-  report.rows.forEach((r, i) => {
-    out.push(summaryRow(r));
-    const next = report.rows[i + 1];
-    const t = report.totals.get(r.item_id);
-    if ((!next || next.item_id !== r.item_id) && t && t.batches > 1) out.push(totalRow(r, t));
+  lines.forEach((l, i) => {
+    out.push(summaryRow(l));
+    const next = lines[i + 1];
+    const t = report.totals.get(l.item_id);
+    if ((!next || next.item_id !== l.item_id) && t && t.batches > 1) {
+      out.push(totalRow({ article: l.material, description: l.description }, t));
+    }
   });
   return out;
 }
@@ -252,7 +256,7 @@ export function batchSheets(report) {
   return [
     { name: 'Batch Summary', aoa: [
       [`Batch-wise stock count · ${title}`],
-      [`${provenance} · ${report.rows.length} batch rows · ${newBatches} created during counting`],
+      [`${provenance} · one line per batch and location · ${newBatches} batch(es) created during counting`],
       [],
       SUMMARY_HEADERS,
       ...summaryLines(report),
@@ -286,55 +290,77 @@ export function batchSheets(report) {
 export const COMPILE_HEADERS = ['Super category', 'Brand', 'Material', 'Material Description',
   'Batch', 'Stock', 'Physical Qty', 'Difference', 'Locations', 'Remarks'];
 
-export function compileRows(report) {
-  const batchOf = new Map(report.rows.map((r) => [`${r.item_id}:${r.batch_id ?? '-'}`, r]));
-  const lines = new Map();
+// ── One line per batch + location ───────────────────────────────────────────
+// A batch found in three places is THREE lines, never one line reading
+// "G2 · F2 · C3". Lines follow the batch order of the report (super category →
+// brand → material → batches, new ones last). Within a batch, places keep the
+// order they were first counted in; two auditors at the same batch and place
+// ("Kitchen", "kitchen ") are one line, added together.
+//
+// The batch's Stock, Difference and Status sit on its FIRST line only, so
+// adding a column never counts a batch's book stock twice.
+//
+// includeUncounted: a batch with no count at all still gets one line —
+// Physical blank, Difference = −Stock, "Not counted" — for the screens that
+// list every batch. The compile sheet leaves it out: it is what was entered.
+export function locationLines(report, { includeUncounted = false } = {}) {
+  const byBatch = new Map();
   for (const e of report.entries) {
+    const k = `${e.item_id}:${e.batch_id ?? '-'}`;
     const loc = String(e.location || '—').replace(/\s+/g, ' ').trim() || '—';
-    const key = `${e.item_id}:${e.batch_id ?? '-'}:${loc.toLowerCase()}`;
-    if (!lines.has(key)) {
-      lines.set(key, { e, location: loc, qty: 0, open_ml: 0, entries: 0 });
-    }
-    const l = lines.get(key);
-    l.qty = r3(l.qty + Number((e.is_liquor ? e.bottles : e.qty) || 0));
-    l.open_ml = r3(l.open_ml + Number(e.open_ml || 0));
-    l.entries += 1;
+    if (!byBatch.has(k)) byBatch.set(k, new Map());
+    const places = byBatch.get(k);
+    const lk = loc.toLowerCase();
+    if (!places.has(lk)) places.set(lk, { location: loc, qty: 0, open_ml: 0, e });
+    const p = places.get(lk);
+    p.qty = r3(p.qty + Number((e.is_liquor ? e.bottles : e.qty) || 0));
+    p.open_ml = r3(p.open_ml + Number(e.open_ml || 0));
   }
   const out = [];
-  const seenBatch = new Set();
-  const placesOf = new Map();
-  for (const l of lines.values()) {
-    const k = `${l.e.item_id}:${l.e.batch_id ?? '-'}`;
-    placesOf.set(k, (placesOf.get(k) || 0) + 1);
-  }
-  for (const l of lines.values()) {
-    const { e } = l;
-    const k = `${e.item_id}:${e.batch_id ?? '-'}`;
-    const b = batchOf.get(k);
-    const first = !seenBatch.has(k);
-    seenBatch.add(k);
-    const places = placesOf.get(k);
-    const isNew = e.batch_origin === 'counted';
-    const notes = [
-      isNew ? `NEW BATCH${e.batch_created_by ? ` — created by ${e.batch_created_by}` : ''}` : null,
-      e.batch_id == null ? 'Counted without a batch' : null,
-      first && places > 1 && b ? `batch total ${b.physical_qty} across ${places} locations` : null,
-      first && b && b.stock_qty == null && e.batch_id != null && !isNew ? 'No system stock' : null,
-      e.is_liquor && l.open_ml ? `+ ${l.open_ml} ml open` : null,
-    ].filter(Boolean);
-    out.push({
-      item_id: e.item_id, batch_id: e.batch_id, is_new: isNew, first_of_batch: first,
-      super_category: e.super_category || '', brand: e.brand || '',
-      material: e.article, description: e.description || '',
-      batch: e.batch_no || '(no batch)', unit: e.unit || '',
-      stock: first && b ? b.stock_qty : null,
-      physical: l.qty,
-      difference: first && b ? b.difference : null,
-      locations: l.location,
-      remarks: notes.join(' · '),
+  for (const b of report.rows) {
+    const k = `${b.item_id}:${b.batch_id ?? '-'}`;
+    const places = [...(byBatch.get(k)?.values() || [])];
+    const base = {
+      item_id: b.item_id, batch_id: b.batch_id, is_new: b.is_new, is_liquor: b.is_liquor,
+      super_category: b.super_category || '', brand: b.brand || '',
+      material: b.article, description: b.description || '',
+      batch: b.batch_no || '(no batch)', unit: b.unit || '',
+    };
+    if (!places.length) {
+      if (!includeUncounted) continue;
+      out.push({
+        ...base, first_of_batch: true, counted: false,
+        stock: b.stock_qty, physical: null, open_ml: null,
+        difference: b.stock_qty != null ? r3(-Number(b.stock_qty)) : null,
+        location: '', status: b.status,
+        remarks: [b.remarks, b.stock_qty != null ? 'Not counted' : null].filter(Boolean).join(' · '),
+      });
+      continue;
+    }
+    places.forEach((p, i) => {
+      const first = i === 0;
+      const notes = [
+        first ? b.remarks : (b.is_new ? 'NEW BATCH' : null),
+        first && places.length > 1 ? `batch total ${b.physical_qty} across ${places.length} locations` : null,
+        first && b.stock_qty == null && b.batch_id != null && !b.is_new ? 'No system stock' : null,
+        b.is_liquor && p.open_ml ? `+ ${p.open_ml} ml open` : null,
+      ].filter(Boolean);
+      out.push({
+        ...base, first_of_batch: first, counted: true,
+        stock: first ? b.stock_qty : null, physical: p.qty,
+        open_ml: b.is_liquor ? p.open_ml : null,
+        difference: first ? b.difference : null,
+        location: p.location, status: first ? b.status : '',
+        remarks: notes.join(' · '),
+      });
     });
   }
   return out;
+}
+
+// PHYSICAL COMPILE SHEET — exactly what was entered.
+export function compileRows(report) {
+  return locationLines(report).map((l) => ({ ...l, locations: l.location }));
 }
 
 export const MATERIAL_HEADERS = ['Super category', 'Brand', 'Material', 'Material Description',

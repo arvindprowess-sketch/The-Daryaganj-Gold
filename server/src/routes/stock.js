@@ -9,7 +9,7 @@ import { normalizeName, nameKey } from '../lib/itemName.js';
 import { toCsv } from '../lib/csvTemplate.js';
 import { logActivity } from '../lib/activityLog.js';
 import { buildWorkbook } from '../lib/exporters.js';
-import { batchReport, batchSheets, SUMMARY_HEADERS, summaryLines } from '../lib/batchReport.js';
+import { batchReport, batchSheets, SUMMARY_HEADERS, summaryLines, locationLines } from '../lib/batchReport.js';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Stock — the warehouse's batch-wise stock list. ADMIN ONLY.
@@ -566,7 +566,8 @@ router.get('/count', async (req, res) => {
     return res.send(buf);
   }
   // Map → plain object for JSON.
-  res.json({ ...report, totals: Object.fromEntries(report.totals) });
+  res.json({ ...report, totals: Object.fromEntries(report.totals),
+             lines: locationLines(report, { includeUncounted: true }) });
 });
 
 export default router;
