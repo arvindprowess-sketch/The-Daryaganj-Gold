@@ -438,6 +438,12 @@ router.post('/import', upload.single('file'), async (req, res) => {
   }
 
   const summary = await withTransaction(async (c) => {
+    // ONE stock import at a time. A second import started while the first is
+    // still writing — a double click, or a retry after a slow reply — used to
+    // race it and fail with a raw "duplicate key" error on the materials the
+    // first had just created. Now it waits here, then reads the stock list
+    // as the first import left it and simply updates.
+    await c.query("SELECT pg_advisory_xact_lock(hashtext('audix_stock_import'))");
     const s = { rows: valid.length, lines: records.length,
                 merged_lines: valid.reduce((t, r) => t + r.mergedLines.length, 0),
                 merged_batches: valid.filter((r) => r.mergedLines.length).length,
@@ -482,16 +488,22 @@ router.post('/import', upload.single('file'), async (req, res) => {
       let item = itemsByKey.get(nameKey(r.article));
       const { superId, catId } = await resolveHierarchy(r.superName, r.catName);
       if (!item) {
+        // ON CONFLICT as a second guard: if the material exists after all
+        // (its stored name differs only in a way the lookup above did not
+        // see), it is used, never created twice and never an error.
         const { rows } = await c.query(
           `INSERT INTO items (name, unit, description, super_category_id, category_id, inventory_mode)
            VALUES ($1,$2,$3,$4,$5,'warehouse')
-           RETURNING id, name, unit, description, super_category_id, category_id`,
+           ON CONFLICT (inventory_mode, lower(name)) DO UPDATE
+             SET description = COALESCE(EXCLUDED.description, items.description)
+           RETURNING id, name, unit, description, super_category_id, category_id, (xmax = 0) AS created`,
           [r.article, r.unit, r.description || null, superId, catId]
         );
         item = rows[0];
         itemsByKey.set(nameKey(item.name), item);
+        itemsByKey.set(nameKey(r.article), item);
         describedItems.add(item.id);
-        s.articles_created += 1;
+        if (item.created) s.articles_created += 1; else s.articles_updated += 1;
       } else if (!describedItems.has(item.id)
                  && ((r.description && r.description !== item.description)
                      || (superId && (superId !== item.super_category_id || catId !== item.category_id)))) {
@@ -513,29 +525,22 @@ router.post('/import', upload.single('file'), async (req, res) => {
         describedItems.add(item.id);
       }
 
-      const { rows: existing } = await c.query(
-        'SELECT id FROM item_batches WHERE item_id = $1 AND lower(btrim(batch_no)) = lower(btrim($2))',
-        [item.id, r.batchNo]
-      );
+      // One statement per batch: create it, or — if the material already has
+      // that batch number, however it is cased or spaced — update it. Half
+      // the round trips of look-up-then-write, and nothing to race.
       const unit = batchUnit(r.unit, item.unit);
-      if (existing[0]) {
-        await c.query(
-          `UPDATE item_batches SET unit = $2, qty = $3, expiry_date = COALESCE($4, expiry_date),
-                  is_active = TRUE, updated_at = now()
-            WHERE id = $1`,
-          [existing[0].id, unit, r.qty, r.expiry]
-        );
-        touchedBatchIds.push(existing[0].id);
-        s.batches_updated += 1;
-      } else {
-        const { rows } = await c.query(
-          `INSERT INTO item_batches (item_id, batch_no, unit, qty, expiry_date)
-           VALUES ($1,$2,$3,$4,$5) RETURNING id`,
-          [item.id, r.batchNo, unit, r.qty, r.expiry]
-        );
-        touchedBatchIds.push(rows[0].id);
-        s.batches_created += 1;
-      }
+      const { rows: br } = await c.query(
+        `INSERT INTO item_batches (item_id, batch_no, unit, qty, expiry_date)
+         VALUES ($1,$2,$3,$4,$5)
+         ON CONFLICT (item_id, lower(btrim(batch_no))) DO UPDATE
+           SET unit = EXCLUDED.unit, qty = EXCLUDED.qty,
+               expiry_date = COALESCE(EXCLUDED.expiry_date, item_batches.expiry_date),
+               is_active = TRUE, updated_at = now()
+         RETURNING id, (xmax = 0) AS created`,
+        [item.id, r.batchNo, unit, r.qty, r.expiry]
+      );
+      touchedBatchIds.push(br[0].id);
+      if (br[0].created) s.batches_created += 1; else s.batches_updated += 1;
     }
 
     if (mode === 'replace') {
