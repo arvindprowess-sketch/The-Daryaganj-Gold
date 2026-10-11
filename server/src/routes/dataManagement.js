@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { CAFE_ITEM_IDS } from '../lib/scope.js';
 import { query, withTransaction } from '../db.js';
 import { requireAuth, requireRole } from '../middleware/auth.js';
 import { requireIntParams } from '../lib/asyncRoutes.js';
@@ -42,12 +43,15 @@ const PHRASES = {
 // ── Impact preview: what a destructive action would touch ──────────────────
 router.get('/item-master/impact', async (_req, res) => {
   const { rows } = await query(
-    `SELECT (SELECT count(*)::int FROM items) AS total_items,
-            (SELECT count(*)::int FROM items WHERE is_active) AS active_items,
-            (SELECT count(*)::int FROM count_entries WHERE NOT is_demo) AS entries,
-            (SELECT count(DISTINCT audit_id)::int FROM count_entries WHERE NOT is_demo) AS audits_with_entries,
+    `SELECT (SELECT count(*)::int FROM items WHERE inventory_mode = 'cafe') AS total_items,
+            (SELECT count(*)::int FROM items WHERE is_active AND inventory_mode = 'cafe') AS active_items,
+            (SELECT count(*)::int FROM count_entries
+              WHERE NOT is_demo AND item_id IN ${CAFE_ITEM_IDS}) AS entries,
+            (SELECT count(DISTINCT audit_id)::int FROM count_entries
+              WHERE NOT is_demo AND item_id IN ${CAFE_ITEM_IDS}) AS audits_with_entries,
             (SELECT count(*)::int FROM count_entries WHERE is_demo) AS demo_entries,
-            (SELECT count(*)::int FROM items WHERE photo_url IS NOT NULL) AS with_photos`
+            (SELECT count(*)::int FROM items
+              WHERE photo_url IS NOT NULL AND inventory_mode = 'cafe') AS with_photos`
   );
   const r = rows[0];
   res.json({
@@ -64,15 +68,17 @@ router.get('/item-master/impact', async (_req, res) => {
 // ── (2) Delete the entire item master ──────────────────────────────────────
 router.post('/item-master/delete-all', async (req, res) => {
   const { rows: chk } = await query(
-    `SELECT (SELECT count(*)::int FROM count_entries WHERE NOT is_demo) AS entries,
-            (SELECT count(DISTINCT audit_id)::int FROM count_entries WHERE NOT is_demo) AS audits,
+    `SELECT (SELECT count(*)::int FROM count_entries
+              WHERE NOT is_demo AND item_id IN ${CAFE_ITEM_IDS}) AS entries,
+            (SELECT count(DISTINCT audit_id)::int FROM count_entries
+              WHERE NOT is_demo AND item_id IN ${CAFE_ITEM_IDS}) AS audits,
             -- A submitted snapshot is audit history in its own right: an admin
             -- can clear the working entries and the snapshot still references
             -- these items.
             (SELECT count(*)::int FROM submission_entries se
                JOIN audit_submissions sub ON sub.id = se.submission_id
-              WHERE NOT sub.is_demo) AS submitted,
-            (SELECT count(*)::int FROM items) AS items`
+              WHERE NOT sub.is_demo AND se.item_id IN ${CAFE_ITEM_IDS}) AS submitted,
+            (SELECT count(*)::int FROM items WHERE inventory_mode = 'cafe') AS items`
   );
   const { entries, audits, submitted, items } = chk[0];
 
@@ -91,17 +97,18 @@ router.post('/item-master/delete-all', async (req, res) => {
 
   // Collect photo URLs before deleting so the bucket can be cleaned afterwards.
   const { rows: photoRows } = await query(
-    'SELECT photo_url FROM items WHERE photo_url IS NOT NULL');
+    "SELECT photo_url FROM items WHERE photo_url IS NOT NULL AND inventory_mode = 'cafe'");
 
+  // The Item Master is the cafe side only; the warehouse Stock list is untouched.
   const deleted = await withTransaction(async (c) => {
     // Demo entries are sample data, not history — cleared with the master.
-    await c.query('DELETE FROM count_entries WHERE is_demo');
-    // Demo snapshots go with the demo entries they were taken from.
-    await c.query(`DELETE FROM audit_submissions WHERE is_demo`);
-    await c.query('DELETE FROM audit_na');
-    await c.query('DELETE FROM system_stock');
-    await c.query('DELETE FROM photo_reviews');
-    const { rowCount } = await c.query('DELETE FROM items');
+    await c.query(`DELETE FROM count_entries WHERE is_demo AND item_id IN ${CAFE_ITEM_IDS}`);
+    await c.query(`DELETE FROM submission_entries se USING audit_submissions sub
+                    WHERE sub.id = se.submission_id AND sub.is_demo AND se.item_id IN ${CAFE_ITEM_IDS}`);
+    await c.query(`DELETE FROM audit_na WHERE item_id IN ${CAFE_ITEM_IDS}`);
+    await c.query(`DELETE FROM system_stock WHERE item_id IN ${CAFE_ITEM_IDS}`);
+    await c.query(`DELETE FROM photo_reviews WHERE item_id IN ${CAFE_ITEM_IDS}`);
+    const { rowCount } = await c.query("DELETE FROM items WHERE inventory_mode = 'cafe'");
     await logActivity({
       entityType: 'item_master', action: 'delete_all',
       recordCount: rowCount,

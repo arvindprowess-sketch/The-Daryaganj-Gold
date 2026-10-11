@@ -1,4 +1,5 @@
 import { query } from '../db.js';
+import { AUDIT_MODE } from './scope.js';
 import { measurementBasis, finalTotals, BASES } from './measure.js';
 import { auditSource, submissionIds, clearedNotice, submissionDrift,
          SNAPSHOT, CLEARED } from './submissions.js';
@@ -105,7 +106,7 @@ export async function auditItemAggregates(auditId, source = null) {
        ) locagg ON TRUE
        LEFT JOIN system_stock ss ON ss.item_id = i.id AND ss.audit_id = $1
        LEFT JOIN audit_na na ON na.item_id = i.id AND na.audit_id = $1
-      WHERE i.is_active = TRUE
+      WHERE i.is_active = TRUE AND i.inventory_mode = ${AUDIT_MODE()}
       ORDER BY sc.sort_order NULLS LAST, sc.name, c.name, i.name`,
     params
   );
@@ -479,7 +480,8 @@ export async function systemStockSource(auditId) {
   );
   const { rows: cov } = await query(
     `SELECT (SELECT count(*)::int FROM system_stock WHERE audit_id = $1) AS with_system,
-            (SELECT count(*)::int FROM items WHERE is_active = TRUE) AS master_total`,
+            (SELECT count(*)::int FROM items
+              WHERE is_active = TRUE AND inventory_mode = ${AUDIT_MODE()}) AS master_total`,
     [auditId]
   );
   return { source: rows[0] || null, ...cov[0] };

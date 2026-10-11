@@ -51,13 +51,24 @@ export default function Stock() {
   const [articleForm, setArticleForm] = useState(null);   // {id?, name, description, unit}
   const [batchForm, setBatchForm] = useState(null);       // {itemId, id?, ...}
   const [busy, setBusy] = useState(false);
+  // Super categories and categories are the same admin-managed lists the cafe
+  // uses. An article's category is what the counter taps on the phone.
+  const [supers, setSupers] = useState([]);
+  const [cats, setCats] = useState([]);
+  const [superFilter, setSuperFilter] = useState('');
+  const loadHierarchy = useCallback(() => Promise.all([
+    api.get('/meta/super-categories').then(setSupers),
+    api.get('/meta/categories').then(setCats),
+  ]), []);
+  useEffect(() => { loadHierarchy(); }, [loadHierarchy]);
 
   const load = useCallback(() => {
     const qs = new URLSearchParams({ active });
     if (onlyNew) qs.set('origin', 'counted');
+    if (superFilter) qs.set('super_category_id', superFilter);
     if (debounced.trim()) qs.set('search', debounced.trim());
     return api.get(`/stock?${qs}`).then(setData);
-  }, [debounced, active, onlyNew]);
+  }, [debounced, active, onlyNew, superFilter]);
   useEffect(() => { load(); }, [load]);
 
   async function saveArticle() {
@@ -65,13 +76,38 @@ export default function Stock() {
     if (!f.name.trim()) { toast('Article name is required', 'error'); return; }
     setBusy(true);
     try {
-      const payload = { name: f.name, description: f.description, unit: f.unit };
+      const payload = { name: f.name, description: f.description, unit: f.unit,
+                        super_category_id: f.super_category_id || null,
+                        category_id: f.category_id || null,
+                        inventory_mode: 'warehouse' };
       if (f.id) await api.put(`/items/${f.id}`, payload);
       else await api.post('/items', payload);
       toast(f.id ? 'Article updated' : 'Article added');
       setArticleForm(null);
       await load();
     } catch (e) { toast(e.message, 'error'); } finally { setBusy(false); }
+  }
+
+  // A super category or category that does not exist yet is created here, so
+  // the admin never has to leave the article form.
+  async function newSuper() {
+    const name = window.prompt('New super category name (e.g. RAW MATERIAL)');
+    if (!name || !name.trim()) return;
+    try {
+      const r = await api.post('/meta/super-categories', { name: name.trim() });
+      await loadHierarchy();
+      setArticleForm((f) => ({ ...f, super_category_id: String(r.id), category_id: '' }));
+    } catch (e) { toast(e.message, 'error'); }
+  }
+  async function newCategory() {
+    if (!articleForm?.super_category_id) { toast('Choose the super category first', 'error'); return; }
+    const name = window.prompt('New category name');
+    if (!name || !name.trim()) return;
+    try {
+      const r = await api.post('/meta/categories', { name: name.trim(), super_category_id: Number(articleForm.super_category_id) });
+      await loadHierarchy();
+      setArticleForm((f) => ({ ...f, category_id: String(r.id) }));
+    } catch (e) { toast(e.message, 'error'); }
   }
 
   async function saveBatch() {
@@ -151,7 +187,7 @@ export default function Stock() {
             CSV template
           </button>
           <button className="btn-primary"
-                  onClick={() => setArticleForm({ name: '', description: '', unit: '' })}>+ Add article</button>
+                  onClick={() => setArticleForm({ name: '', description: '', unit: '', super_category_id: '', category_id: '' })}>+ Add article</button>
         </div>
       </div>
 
@@ -174,6 +210,28 @@ export default function Stock() {
             <input className="field mt-1" value={articleForm.unit} placeholder="e.g. KG, NOS, BOX (12 PCS)"
                    onChange={(e) => setArticleForm({ ...articleForm, unit: e.target.value })} />
           </label>
+          <label className="block md:col-span-2">
+            <span className="text-sm font-medium text-slate-600">
+              Super category <button type="button" className="text-brand text-xs ml-1" onClick={newSuper}>+ new</button>
+            </span>
+            <select className="field mt-1" value={articleForm.super_category_id || ''}
+                    onChange={(e) => setArticleForm({ ...articleForm, super_category_id: e.target.value, category_id: '' })}>
+              <option value="">— none —</option>
+              {supers.map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}
+            </select>
+          </label>
+          <label className="block md:col-span-2">
+            <span className="text-sm font-medium text-slate-600">
+              Category <button type="button" className="text-brand text-xs ml-1" onClick={newCategory}>+ new</button>
+            </span>
+            <select className="field mt-1" value={articleForm.category_id || ''}
+                    disabled={!articleForm.super_category_id}
+                    onChange={(e) => setArticleForm({ ...articleForm, category_id: e.target.value })}>
+              <option value="">— none —</option>
+              {cats.filter((c) => String(c.super_category_id) === String(articleForm.super_category_id))
+                .map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
+          </label>
           <div className="md:col-span-4 flex gap-2">
             <button className="btn-primary" disabled={busy} onClick={saveArticle}>
               {articleForm.id ? 'Save article' : 'Add article'}
@@ -193,11 +251,20 @@ export default function Stock() {
           New batches from counting ({counts.new_batches || 0})
         </button>
       </div>
+      <div className="flex gap-2 overflow-x-auto no-scrollbar mb-3">
+        <button className={superFilter === '' ? 'chip-on' : 'chip-off'} onClick={() => setSuperFilter('')}>All categories</button>
+        {supers.map((x) => (
+          <button key={x.id} className={String(superFilter) === String(x.id) ? 'chip-on' : 'chip-off'}
+                  onClick={() => setSuperFilter(String(x.id))}>{x.name}</button>
+        ))}
+        <button className={superFilter === 'none' ? 'chip-on' : 'chip-off'} onClick={() => setSuperFilter('none')}>Uncategorised</button>
+      </div>
 
       <div className="card overflow-x-auto mb-8">
         <table className="w-full text-sm">
           <thead className="bg-slate-50 text-left text-slate-500">
             <tr>
+              <th className="px-3 py-3">Category</th>
               <th className="px-3 py-3">Article</th>
               <th className="px-3 py-3">Description</th>
               <th className="px-3 py-3">Batches</th>
@@ -211,6 +278,12 @@ export default function Stock() {
               return (
                 <Fragment key={a.id}>
                   <tr className={a.is_active ? '' : 'opacity-60'}>
+                    <td className="px-3 py-2 whitespace-nowrap">
+                      {a.super_category_name
+                        ? <><div className="text-slate-700">{a.super_category_name}</div>
+                            <div className="text-xs text-slate-400">{a.category_name || '—'}</div></>
+                        : <span className="text-xs text-amber-600">Uncategorised</span>}
+                    </td>
                     <td className="px-3 py-2">
                       <div className="font-medium">{a.name}</div>
                       <div className="text-xs text-slate-400">{a.unit}{a.is_active ? '' : ' · inactive'}</div>
@@ -228,12 +301,14 @@ export default function Stock() {
                                                setBatchForm({ ...emptyBatch, itemId: a.id }); }}>+ Batch</button>
                       <button className="text-slate-500 font-medium ml-3"
                               onClick={() => setArticleForm({ id: a.id, name: a.name,
-                                                              description: a.description || '', unit: a.unit || '' })}>Edit</button>
+                                                              description: a.description || '', unit: a.unit || '',
+                                                              super_category_id: a.super_category_id ? String(a.super_category_id) : '',
+                                                              category_id: a.category_id ? String(a.category_id) : '' })}>Edit</button>
                     </td>
                   </tr>
                   {open && (
                     <tr className="bg-slate-50">
-                      <td colSpan={5} className="px-3 py-3">
+                      <td colSpan={6} className="px-3 py-3">
                         <table className="w-full text-xs">
                           <thead className="text-slate-500 text-left">
                             <tr>
@@ -291,7 +366,7 @@ export default function Stock() {
               );
             })}
             {articles.length === 0 && (
-              <tr><td colSpan={5} className="p-8 text-center text-slate-400">No articles match.</td></tr>
+              <tr><td colSpan={6} className="p-8 text-center text-slate-400">No articles match.</td></tr>
             )}
           </tbody>
         </table>
@@ -324,7 +399,8 @@ function StockImport({ onDone }) {
         tone: 'success',
         title: `Imported ${r.rows} row(s) from ${r.filename}`,
         lines: [
-          `Articles: ${r.articles_created} created, ${r.articles_updated} description(s) updated.`,
+          `Articles: ${r.articles_created} created, ${r.articles_updated} updated`
+            + (r.categories_created ? ` · ${r.categories_created} new categor${r.categories_created === 1 ? 'y' : 'ies'}.` : '.'),
           `Batches: ${r.batches_created} created, ${r.batches_updated} updated`
             + (r.mode === 'replace' ? `, ${r.batches_deactivated} not in the file deactivated.` : '.'),
         ],
@@ -356,7 +432,8 @@ function StockImport({ onDone }) {
         <button className="btn-primary" disabled={!file || busy} onClick={run}>{busy ? 'Importing…' : 'Import'}</button>
       </div>
       <p className="text-xs text-slate-500">
-        One row per batch: <code>article, description, batch, unit, quantity, expiry</code>.
+        One row per batch: <code>super_category, category, article, description, batch, unit, quantity, expiry</code>.
+        A super category or category that does not exist yet is created.
         Unit is free text, kept exactly as written; a batch whose unit differs from its article keeps its own.
       </p>
       {result && <ImportResult {...result} onDismiss={() => setResult(null)} />}

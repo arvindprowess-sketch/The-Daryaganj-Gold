@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { CAFE_ITEM_IDS } from '../lib/scope.js';
 import multer from 'multer';
 import sharp from 'sharp';
 import { query, withTransaction } from '../db.js';
@@ -50,7 +51,8 @@ router.get('/', requireRole('admin'), async (req, res) => {
   // [Active] [Inactive] [All] — inactive items are soft-deleted ones, kept so
   // historical audit records are never orphaned.
   const active = ['inactive', 'all'].includes(req.query.active) ? req.query.active : 'active';
-  const conds = [];
+  // The Item Master is the cafe side. Warehouse articles live on Stock.
+  const conds = ["i.inventory_mode = 'cafe'"];
   if (active === 'active') conds.push('i.is_active = TRUE');
   else if (active === 'inactive') conds.push('i.is_active = FALSE');
   const params = [];
@@ -77,7 +79,7 @@ router.get('/', requireRole('admin'), async (req, res) => {
             COUNT(photo_url) FILTER (WHERE is_active)::int AS with_photo,
             COUNT(*) FILTER (WHERE NOT is_active)::int AS inactive,
             COUNT(*)::int AS all_items
-       FROM items`
+       FROM items WHERE inventory_mode = 'cafe'`
   );
   res.json({ items: rows, counts: totals[0] });
 });
@@ -89,13 +91,16 @@ router.post('/', requireRole('admin'), async (req, res) => {
   try {
     const { rows } = await query(
       `INSERT INTO items (name, category_id, super_category_id, unit, bottle_unit_size,
-                          is_liquor, bottle_size_ml, rate, photo_url, is_active, description)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,COALESCE($10, TRUE),$11) RETURNING *`,
+                          is_liquor, bottle_size_ml, rate, photo_url, is_active, description,
+                          inventory_mode)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,COALESCE($10, TRUE),$11,$12) RETURNING *`,
       // Unit is stored exactly as given (only outer whitespace trimmed).
       [name, b.category_id || null, b.super_category_id || null, (b.unit ?? '').trim(),
        unitSize(b.bottle_unit_size),
        !!b.is_liquor, b.bottle_size_ml || null, b.rate ?? null, b.photo_url || null, b.is_active,
-       (b.description ?? '').trim() || null]
+       (b.description ?? '').trim() || null,
+       // Created from Stock → a warehouse article; from Item Master → cafe.
+       b.inventory_mode === 'warehouse' ? 'warehouse' : 'cafe']
     );
     res.status(201).json(rows[0]);
   } catch (err) {
@@ -111,7 +116,11 @@ router.put('/:id', requireRole('admin'), async (req, res) => {
     const { rows } = await query(
       `UPDATE items SET
          name = COALESCE($2, name),
-         category_id = COALESCE($3, category_id),
+         -- Moving an item to another super category without naming a
+         -- category must not leave it in a category of the old one.
+         category_id = CASE WHEN $4::int IS NOT NULL AND $4::int IS DISTINCT FROM super_category_id
+                                 AND $3::int IS NULL THEN NULL
+                            ELSE COALESCE($3, category_id) END,
          super_category_id = COALESCE($4, super_category_id),
          unit = COALESCE($5, unit),
          is_liquor = COALESCE($6, is_liquor),
@@ -161,8 +170,13 @@ async function analyseCsv(records) {
   const catBySuperAndName = new Map(
     cats.map((c) => [`${c.super_category_id}|${nameKey(c.name)}`, c.id])
   );
-  const { rows: existing } = await query('SELECT id, name FROM items');
-  const existingByName = new Map(existing.map((e) => [nameKey(e.name), e.id]));
+  const { rows: existing } = await query('SELECT id, name, inventory_mode FROM items');
+  // Only the cafe side is this master's. A name already used by a warehouse
+  // article is refused rather than silently updating that article.
+  const existingByName = new Map(existing.filter((e) => e.inventory_mode === 'cafe')
+    .map((e) => [nameKey(e.name), e.id]));
+  const warehouseNames = new Set(existing.filter((e) => e.inventory_mode === 'warehouse')
+    .map((e) => nameKey(e.name)));
 
   // Track hierarchy levels the file introduces so the preview can report them
   // as "new — will be created" rather than failing the import.
@@ -177,6 +191,7 @@ async function analyseCsv(records) {
     if (!name) errors.push('item_name is required');
     const key = nameKey(name);
     if (name && seen.has(key)) errors.push('duplicate item_name within file');
+    if (name && warehouseNames.has(key)) errors.push('this name is a warehouse article on the Stock list');
     seen.add(key);
 
     const superName = (r.super_category || '').trim();
@@ -287,9 +302,11 @@ async function importModeImpact(rows) {
   const matched = valid.filter((r) => r.matched).length;
   const unmatched = valid.filter((r) => !r.matched).length;
   const { rows: t } = await query(
-    `SELECT (SELECT count(*)::int FROM items) AS total_items,
-            (SELECT count(*)::int FROM count_entries WHERE NOT is_demo) AS entries,
-            (SELECT count(DISTINCT audit_id)::int FROM count_entries WHERE NOT is_demo) AS audits,
+    `SELECT (SELECT count(*)::int FROM items WHERE inventory_mode = 'cafe') AS total_items,
+            (SELECT count(*)::int FROM count_entries
+              WHERE NOT is_demo AND item_id IN ${CAFE_ITEM_IDS}) AS entries,
+            (SELECT count(DISTINCT audit_id)::int FROM count_entries
+              WHERE NOT is_demo AND item_id IN ${CAFE_ITEM_IDS}) AS audits,
             (SELECT count(*)::int FROM count_entries WHERE is_demo) AS demo_entries`
   );
   const { total_items: totalItems, entries, audits, demo_entries: demoEntries } = t[0];
@@ -342,8 +359,10 @@ router.post('/import/commit', requireRole('admin'), upload.single('file'), async
   let photoUrls = [];
   if (mode === 'replace') {
     const { rows: chk } = await query(
-      `SELECT (SELECT count(*)::int FROM count_entries WHERE NOT is_demo) AS entries,
-              (SELECT count(DISTINCT audit_id)::int FROM count_entries WHERE NOT is_demo) AS audits`
+      `SELECT (SELECT count(*)::int FROM count_entries
+                WHERE NOT is_demo AND item_id IN ${CAFE_ITEM_IDS}) AS entries,
+              (SELECT count(DISTINCT audit_id)::int FROM count_entries
+                WHERE NOT is_demo AND item_id IN ${CAFE_ITEM_IDS}) AS audits`
     );
     if (chk[0].entries > 0) {
       return res.status(409).json({
@@ -357,7 +376,7 @@ router.post('/import/commit', requireRole('admin'), upload.single('file'), async
       });
     }
     const { rows: ph } = await query(
-      'SELECT photo_url FROM items WHERE photo_url IS NOT NULL');
+      "SELECT photo_url FROM items WHERE photo_url IS NOT NULL AND inventory_mode = 'cafe'");
     photoUrls = ph.map((x) => x.photo_url);
   }
 
@@ -402,11 +421,15 @@ router.post('/import/commit', requireRole('admin'), upload.single('file'), async
     if (mode === 'replace') {
       // Demo entries are sample data, not audit history: remove them so the
       // real master can load. Real entries were rejected by the guard above.
-      await c.query('DELETE FROM count_entries WHERE is_demo');
-      await c.query('DELETE FROM system_stock');
-      await c.query('DELETE FROM photo_reviews');
-      await c.query('DELETE FROM audit_na');
-      deleted = (await c.query('DELETE FROM items')).rowCount;
+      // Only the cafe side: the warehouse's Stock list is not this master's
+      // to replace.
+      await c.query(`DELETE FROM count_entries WHERE is_demo AND item_id IN ${CAFE_ITEM_IDS}`);
+      await c.query(`DELETE FROM submission_entries se USING audit_submissions sub
+                      WHERE sub.id = se.submission_id AND sub.is_demo AND se.item_id IN ${CAFE_ITEM_IDS}`);
+      await c.query(`DELETE FROM system_stock WHERE item_id IN ${CAFE_ITEM_IDS}`);
+      await c.query(`DELETE FROM photo_reviews WHERE item_id IN ${CAFE_ITEM_IDS}`);
+      await c.query(`DELETE FROM audit_na WHERE item_id IN ${CAFE_ITEM_IDS}`);
+      deleted = (await c.query("DELETE FROM items WHERE inventory_mode = 'cafe'")).rowCount;
     }
 
     for (const r of rows) {

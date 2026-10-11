@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { AUDIT_MODE } from '../lib/scope.js';
 import multer from 'multer';
 import { query, withTransaction } from '../db.js';
 import { requireAuth, requireRole } from '../middleware/auth.js';
@@ -54,7 +55,8 @@ async function activeImport(auditId) {
 async function systemStockStats(auditId) {
   const { rows } = await query(
     `SELECT (SELECT count(*)::int FROM system_stock WHERE audit_id = $1) AS with_system,
-            (SELECT count(*)::int FROM items WHERE is_active = TRUE) AS master_total`,
+            (SELECT count(*)::int FROM items
+              WHERE is_active = TRUE AND inventory_mode = ${AUDIT_MODE()}) AS master_total`,
     [auditId]
   );
   return rows[0];
@@ -72,7 +74,7 @@ router.get('/:auditId', requireIntParams('auditId'), async (req, res) => {
        LEFT JOIN super_categories sc ON sc.id = i.super_category_id
        LEFT JOIN categories c ON c.id = i.category_id
        LEFT JOIN system_stock ss ON ss.item_id = i.id AND ss.audit_id = $1
-      WHERE i.is_active = TRUE
+      WHERE i.is_active = TRUE AND i.inventory_mode = ${AUDIT_MODE()}
       ORDER BY sc.sort_order NULLS LAST, sc.name, c.name, i.name`,
     [req.params.auditId]
   );
@@ -189,9 +191,11 @@ const pickSuper = (r) => r.super_category ?? r['super category name'] ?? r.super
 const pickCategory = (r) => r.category ?? r['category name'] ?? r.category_name ?? '';
 const pickLoc = (r) => r.loc ?? r.location ?? r.store ?? '';
 
-async function analyse(records) {
+async function analyse(records, auditId) {
+  // Only the audited store's side of the master can be matched.
   const { rows: items } = await query(
-    'SELECT id, name, is_liquor FROM items WHERE is_active = TRUE');
+    `SELECT id, name, is_liquor FROM items
+      WHERE is_active = TRUE AND inventory_mode = ${AUDIT_MODE()}`, [auditId]);
   // Both sides trimmed and internal double spaces collapsed before comparing.
   const byName = new Map(items.map((i) => [nameKey(i.name), i]));
 
@@ -255,8 +259,9 @@ async function analyse(records) {
        FROM items i
        LEFT JOIN super_categories sc ON sc.id = i.super_category_id
        LEFT JOIN categories c ON c.id = i.category_id
-      WHERE i.is_active = TRUE
-      ORDER BY sc.sort_order NULLS LAST, sc.name, c.name, i.name`
+      WHERE i.is_active = TRUE AND i.inventory_mode = ${AUDIT_MODE()}
+      ORDER BY sc.sort_order NULLS LAST, sc.name, c.name, i.name`,
+    [auditId]
   );
   const missing = missingRows.filter((m) => !matchedIds.has(m.item_id));
 
@@ -277,7 +282,7 @@ router.post('/:auditId/preview', requireIntParams('auditId'), upload.single('fil
   const audit = auditRows[0];
   if (!audit) return res.status(404).json({ error: 'Audit not found' });
 
-  const { matched, unmatched, invalid, missing, locs } = await analyse(records);
+  const { matched, unmatched, invalid, missing, locs } = await analyse(records, req.params.auditId);
   const stats = await systemStockStats(auditId);
   const existing = await activeImport(auditId);
 
@@ -362,7 +367,7 @@ router.post('/:auditId/preview/download', upload.single('file'), async (req, res
   if (!text) return res.status(400).json({ error: 'No CSV provided' });
   const which = req.query.list === 'missing' ? 'missing' : 'unmatched';
   const { records } = parseCsvObjects(text);
-  const { unmatched, missing } = await analyse(records);
+  const { unmatched, missing } = await analyse(records, req.params.auditId);
 
   const csv = which === 'missing'
     ? toCsv(['Super Category', 'Category', 'Item Name'],
@@ -391,7 +396,7 @@ router.post('/:auditId/commit', requireIntParams('auditId'), upload.single('file
   if (!auditRows[0]) return res.status(404).json({ error: 'Audit not found' });
   const storeCode = auditRows[0].store_code;
 
-  const { matched, unmatched, invalid, locs } = await analyse(records);
+  const { matched, unmatched, invalid, locs } = await analyse(records, req.params.auditId);
   if (invalid.length) {
     const shown = invalid.slice(0, 3).map((v) => `row ${v.row} (${v.name || 'no name'}): ${v.error}`);
     return res.status(400).json({
