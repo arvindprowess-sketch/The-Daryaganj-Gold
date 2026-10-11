@@ -3,7 +3,8 @@ import multer from 'multer';
 import { query, withTransaction } from '../db.js';
 import { requireAuth, requireRole } from '../middleware/auth.js';
 import { requireIntParams } from '../lib/asyncRoutes.js';
-import { readCsvUpload } from '../lib/csv.js';
+import ExcelJS from 'exceljs';
+import { readCsvUpload, CsvFormatError } from '../lib/csv.js';
 import { normalizeName, nameKey } from '../lib/itemName.js';
 import { toCsv } from '../lib/csvTemplate.js';
 import { logActivity } from '../lib/activityLog.js';
@@ -92,13 +93,13 @@ router.get('/', async (req, res) => {
     params.push(`%${clean(search)}%`);
     // A batch number finds its article too: a counter reads it off the carton.
     const n = `$${params.length}`;
-    conds.push(`(i.name ILIKE ${n} OR i.description ILIKE ${n}
+    conds.push(`(i.name ILIKE ${n} OR i.barcode ILIKE ${n} OR i.description ILIKE ${n}
                  OR EXISTS (SELECT 1 FROM item_batches xb
                              WHERE xb.item_id = i.id AND xb.batch_no ILIKE ${n}))`);
   }
   const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
   const { rows: articles } = await query(
-    `SELECT i.id, i.name, i.description, i.unit, i.is_liquor, i.is_active,
+    `SELECT i.id, i.name, i.barcode, i.description, i.unit, i.is_liquor, i.is_active,
             i.super_category_id, i.category_id,
             sc.name AS super_category_name, c.name AS category_name
        FROM items i
@@ -272,12 +273,14 @@ router.delete('/batches/:id', requireIntParams('id'), async (req, res) => {
 // A batch is matched on (article, batch number), both case-insensitively.
 router.get('/import/template', (_req, res) => {
   const csv = toCsv(
-    ['super_category', 'category', 'article', 'description', 'batch', 'unit', 'quantity', 'expiry'],
+    // The client's own column names first; Unit, Barcode and Expiry are optional.
+    ['Super category', 'Brand', 'Material', 'Material Description', 'Batch', 'Stock',
+     'Unit', 'Barcode', 'Expiry'],
     [
-      ['FOOD', 'PROVISION', 'Refined Oil', 'Sunflower oil 15 L tin', 'B2401', 'TIN (15 LTR)', '40', '2026-12-31'],
-      ['FOOD', 'PROVISION', 'Refined Oil', 'Sunflower oil 15 L tin', 'B2407', 'TIN (15 LTR)', '12', '2027-03-31'],
-      ['FOOD', 'PROVISION', 'Basmati Rice', 'Premium long grain', 'R-118', 'KG', '250.5', ''],
-      ['NON FOOD', 'PACKAGING', 'Paper Cups', '200 ml, sleeve of 50', 'PC-09', 'PKT (50 pcs)', '80', ''],
+      ['FOOD', 'TATA', '100234', 'Tata Salt 1 kg', 'B2401', '60', 'PKT', '8901000000011', ''],
+      ['FOOD', 'TATA', '100234', 'Tata Salt 1 kg', 'B2407', '30', 'PKT', '8901000000011', '2027-03-31'],
+      ['FOOD', 'AASHIRVAAD', '100561', 'Aashirvaad Atta 10 kg', 'A-118', '12', 'BAG', '', ''],
+      ['NON FOOD', 'GENERIC', '200017', 'Paper cups 200 ml (50)', 'PC-09', '80', 'PKT', '', ''],
     ]
   );
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
@@ -289,29 +292,123 @@ const pick = (rec, names) => {
   for (const n of names) if (rec[n] !== undefined) return rec[n];
   return '';
 };
-const ARTICLE = ['article', 'article_name', 'item_name', 'item', 'name'];
-const DESCRIPTION = ['description', 'article_description', 'desc'];
+// Column names as the client's own master writes them come first, so a sheet
+// headed  Super category · Brand · Material · Material Description · Batch ·
+// Stock  imports as it is. Headers are matched case-insensitively.
+const ARTICLE = ['material', 'material code', 'material no', 'material_code', 'article',
+  'article_name', 'item_name', 'item', 'name'];
+const DESCRIPTION = ['material description', 'material_description', 'description',
+  'article_description', 'desc'];
+const BARCODE = ['barcode', 'bar code', 'bar_code', 'ean', 'upc'];
 const SUPER = ['super_category', 'super category', 'super_category_name', 'super category name'];
-const CATEGORY = ['category', 'category_name', 'category name'];
+// The second level: the client's sheet calls it Brand.
+const CATEGORY = ['brand', 'category', 'category_name', 'category name'];
 const BATCH = ['batch', 'batch_no', 'batch_number', 'batch no', 'batch number'];
 const UNIT = ['unit', 'uom'];
-const QTY = ['quantity', 'qty', 'stock', 'stock_qty', 'system_qty'];
+const QTY = ['stock', 'quantity', 'qty', 'stock_qty', 'stock qty', 'system_qty', 'system qty'];
 const EXPIRY = ['expiry', 'expiry_date', 'exp', 'expiry date'];
+
+// ── Reading the upload: Excel or CSV ────────────────────────────────────────
+// The stock master usually lives in Excel, so an .xlsx is read directly — no
+// "Save As CSV" step. The first sheet is used, and the header row is the first
+// row (within the first ten) that names a Material/Article column, so a title
+// line above the table does not get in the way.
+const isXlsx = (req) => {
+  const buf = req.file?.buffer;
+  return !!buf && buf[0] === 0x50 && buf[1] === 0x4b
+    && /\.xlsx$/i.test(req.file?.originalname || 'x.xlsx');
+};
+
+function cellText(v) {
+  if (v == null) return '';
+  if (v instanceof Date) return v.toISOString().slice(0, 10);
+  if (typeof v === 'object') {
+    if (Array.isArray(v.richText)) return v.richText.map((t) => t.text).join('');
+    if (v.result !== undefined) return cellText(v.result);
+    if (v.text !== undefined) return cellText(v.text);
+    if (v.error) return '';
+    return '';
+  }
+  return String(v);
+}
+
+async function readStockUpload(req) {
+  if (!isXlsx(req)) return readCsvUpload(req, { requireColumns: [ARTICLE, BATCH] });
+  const filename = req.file.originalname;
+  const wb = new ExcelJS.Workbook();
+  try {
+    await wb.xlsx.load(req.file.buffer);
+  } catch {
+    throw new CsvFormatError(`Import failed — "${filename}" could not be read as an Excel workbook.`, 'bad_xlsx');
+  }
+  const ws = wb.worksheets.find((w) => w.actualRowCount > 0);
+  if (!ws) throw new CsvFormatError(`Import failed — "${filename}" has no data.`, 'no_rows');
+
+  const rows = [];
+  ws.eachRow({ includeEmpty: false }, (row) => {
+    const vals = [];
+    row.eachCell({ includeEmpty: true }, (cell, col) => { vals[col - 1] = cellText(cell.value).trim(); });
+    const out = Array.from(vals, (v) => v ?? '');
+    out.sheetRow = row.number; // the row number the admin sees in Excel
+    rows.push(out);
+  });
+  const norm = (h) => String(h || '').trim().toLowerCase().replace(/\s+/g, ' ');
+  const headerIdx = rows.slice(0, 10).findIndex((r) => r.some((h) => ARTICLE.includes(norm(h))));
+  if (headerIdx < 0) {
+    throw new CsvFormatError(
+      `Import failed — required column 'Material' is missing. Columns found: ${(rows[0] || []).filter(Boolean).join(', ')}.`,
+      'missing_column');
+  }
+  const headers = rows[headerIdx].map(norm);
+  if (!BATCH.some((b) => headers.includes(b))) {
+    throw new CsvFormatError(
+      `Import failed — required column 'Batch' is missing. Columns found: ${headers.filter(Boolean).join(', ')}.`,
+      'missing_column');
+  }
+  const records = rows.slice(headerIdx + 1)
+    .filter((r) => r.some((v) => String(v).trim() !== ''))
+    .map((r) => ({ ...Object.fromEntries(headers.map((h, i) => [h, String(r[i] ?? '').trim()])),
+                   __row: r.sheetRow }));
+  if (!records.length) {
+    throw new CsvFormatError(`Import failed — "${filename}" has a header row but no data rows.`, 'no_rows');
+  }
+  return { filename, records };
+}
 
 router.post('/import', upload.single('file'), async (req, res) => {
   const mode = req.body?.mode === 'replace' ? 'replace' : 'upsert';
-  const { filename, records } = readCsvUpload(req, { requireColumns: [ARTICLE, BATCH] });
+  const { filename, records } = await readStockUpload(req);
 
   // Validate every row before writing anything, so a bad file changes nothing.
   const invalid = [];
   const valid = [];
   const seen = new Map();
+  // A barcode names ONE article: within the file, and against the articles
+  // already on the list.
+  const { rows: knownCodes } = await query(
+    `SELECT lower(btrim(barcode)) AS code, name FROM items
+      WHERE inventory_mode = 'warehouse' AND barcode IS NOT NULL AND btrim(barcode) <> ''`);
+  const codeOwner = new Map(knownCodes.map((r) => [r.code, nameKey(r.name)]));
+  const fileCodeOwner = new Map();
   records.forEach((rec, idx) => {
-    const line = idx + 2; // header is line 1
+    // The line the admin will look for: the Excel row, or the CSV line (the
+    // header is line 1).
+    const line = rec.__row ?? idx + 2;
     const article = normalizeName(pick(rec, ARTICLE));
     const batchNo = normalizeName(pick(rec, BATCH));
     if (!article) { invalid.push({ row: line, reason: 'Article is blank' }); return; }
     if (!batchNo) { invalid.push({ row: line, article, reason: 'Batch is blank' }); return; }
+    const barcode = clean(pick(rec, BARCODE));
+    if (barcode) {
+      const code = barcode.toLowerCase();
+      const owner = fileCodeOwner.get(code) ?? codeOwner.get(code);
+      if (owner && owner !== nameKey(article)) {
+        invalid.push({ row: line, article, batch: batchNo,
+                       reason: `Barcode ${barcode} already belongs to another material` });
+        return;
+      }
+      fileCodeOwner.set(code, nameKey(article));
+    }
     const superName = normalizeName(pick(rec, SUPER));
     const catName = normalizeName(pick(rec, CATEGORY));
     if (catName && !superName) {
@@ -329,7 +426,7 @@ router.post('/import', upload.single('file'), async (req, res) => {
       return;
     }
     seen.set(key, line);
-    valid.push({ line, article, batchNo, key, superName, catName,
+    valid.push({ line, article, batchNo, key, superName, catName, barcode,
                  description: clean(pick(rec, DESCRIPTION)), unit: clean(pick(rec, UNIT)),
                  qty: q.value, expiry: d.value });
   });
@@ -345,7 +442,7 @@ router.post('/import', upload.single('file'), async (req, res) => {
     const s = { rows: valid.length, articles_created: 0, articles_updated: 0,
                 batches_created: 0, batches_updated: 0, batches_deactivated: 0 };
     const { rows: items } = await c.query(
-      `SELECT id, name, unit, description, super_category_id, category_id
+      `SELECT id, name, unit, description, barcode, super_category_id, category_id
          FROM items WHERE inventory_mode = 'warehouse'`);
     const itemsByKey = new Map(items.map((i) => [nameKey(i.name), i]));
     const touchedBatchIds = [];
@@ -384,10 +481,11 @@ router.post('/import', upload.single('file'), async (req, res) => {
       const { superId, catId } = await resolveHierarchy(r.superName, r.catName);
       if (!item) {
         const { rows } = await c.query(
-          `INSERT INTO items (name, unit, description, super_category_id, category_id, inventory_mode)
-           VALUES ($1,$2,$3,$4,$5,'warehouse')
-           RETURNING id, name, unit, description, super_category_id, category_id`,
-          [r.article, r.unit, r.description || null, superId, catId]
+          `INSERT INTO items (name, unit, description, super_category_id, category_id,
+                              inventory_mode, barcode)
+           VALUES ($1,$2,$3,$4,$5,'warehouse',$6)
+           RETURNING id, name, unit, description, barcode, super_category_id, category_id`,
+          [r.article, r.unit, r.description || null, superId, catId, r.barcode || null]
         );
         item = rows[0];
         itemsByKey.set(nameKey(item.name), item);
@@ -395,6 +493,7 @@ router.post('/import', upload.single('file'), async (req, res) => {
         s.articles_created += 1;
       } else if (!describedItems.has(item.id)
                  && ((r.description && r.description !== item.description)
+                     || (r.barcode && r.barcode !== item.barcode)
                      || (superId && (superId !== item.super_category_id || catId !== item.category_id)))) {
         // For an existing article only the description and the category are
         // taken from the file — nothing is renamed or reactivated. A blank
@@ -402,10 +501,11 @@ router.post('/import', upload.single('file'), async (req, res) => {
         // decides; its other batch rows do not change it again.
         await c.query(
           `UPDATE items SET description = COALESCE($2, description),
+                  barcode = COALESCE($5, barcode),
                   super_category_id = COALESCE($3, super_category_id),
                   category_id = CASE WHEN $3::int IS NULL THEN category_id ELSE $4 END
             WHERE id = $1`,
-          [item.id, r.description || null, superId, catId]);
+          [item.id, r.description || null, superId, catId, r.barcode || null]);
         if (r.description) item.description = r.description;
         if (superId) { item.super_category_id = superId; item.category_id = catId; }
         describedItems.add(item.id);

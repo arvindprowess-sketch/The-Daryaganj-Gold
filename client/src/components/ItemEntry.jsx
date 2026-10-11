@@ -196,7 +196,7 @@ export default function ItemEntry({ auditId, item, batch = null, onClose, onSave
         {/* Unit is READ-ONLY here and shown exactly as the master supplies it.
             The auditor never chooses or edits a unit. The category is
             deliberately not displayed — the counter does not need it. */}
-        <div className="text-sm text-slate-500">Unit: {unit}</div>
+        {unit && <div className="text-sm text-slate-500">Unit: {unit}</div>}
       </div>
 
       {/* Warehouse: which batch this count goes to, and its book quantity —

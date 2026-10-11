@@ -168,9 +168,19 @@ the batch list so the next batch is one tap away.
 and every report show the batch's unit; KG/LTR batches get the two-box entry.
 The Stock list totals quantity **per unit** — different units are never added.
 
-**Stock CSV** (Stock → Import): one row per batch,
-`super_category, category, article, description, batch, unit, quantity, expiry`
-(a super category or category not yet in the system is created). *Add & update* creates
+**Stock import** (Stock → Import, **Excel .xlsx or CSV**): one row per batch,
+headed the way the client's own sheet is —
+`Super category, Brand, Material, Material Description, Batch, Stock`, with
+`Unit`, `Barcode` and `Expiry` optional (the older `article / description /
+quantity` names still work). **Material is the identity**: every batch row of
+it carries the same Material. Brand is the category level. A super category
+or brand not yet in the system is created. In an .xlsx a title line above the
+table is skipped, and a refused row is named by its Excel row number. A
+barcode belongs to one material.
+
+**Searching on the phone** matches the material description (what counters
+type), the material and the barcode. Typing a whole barcode or material and
+pressing Enter opens that material's batches directly. *Add & update* creates
 and updates; *Replace* additionally deactivates every live batch not in the
 file. Any invalid row stops the whole import and is named. A blank quantity is
 "no figure", never zero.

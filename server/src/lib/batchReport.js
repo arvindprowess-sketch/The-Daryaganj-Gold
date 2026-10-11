@@ -51,7 +51,7 @@ export async function batchReport(auditId, source = null) {
   // Every individual entry — the detail sheet, and the location breakdown.
   const { rows: entries } = await query(
     `WITH e AS (${entrySql})
-     SELECT e.id, e.item_id, i.name AS article, i.description, i.is_liquor,
+     SELECT e.id, e.item_id, i.name AS article, i.barcode, i.description, i.is_liquor,
             e.batch_id, ${BATCH_INFO},
             e.qty, e.bottles, e.open_ml,
             COALESCE(l.name, e.location_text) AS location,
@@ -77,7 +77,7 @@ export async function batchReport(auditId, source = null) {
        UNION
        SELECT DISTINCT item_id, batch_id FROM e
      )
-     SELECT k.item_id, i.name AS article, i.description, i.is_liquor,
+     SELECT k.item_id, i.name AS article, i.barcode, i.description, i.is_liquor,
             k.batch_id, ${BATCH_INFO},
             b.qty AS stock_qty, b.expiry_date
        FROM keys k
@@ -136,20 +136,20 @@ const originLabel = (r) => (r.batch_id == null ? 'No batch'
 const when = (t) => (t ? new Date(t).toISOString().replace('T', ' ').slice(0, 16) : '');
 const cell = (v) => (v == null ? null : v);
 
-export const SUMMARY_HEADERS = ['Article', 'Description', 'Batch', 'Batch Origin', 'Unit',
+export const SUMMARY_HEADERS = ['Article', 'Barcode', 'Description', 'Batch', 'Batch Origin', 'Unit',
   'System Qty', 'Physical Qty', 'Open ML', 'Difference', 'Locations', 'Status'];
 
 export function summaryRow(r) {
-  return [r.article, r.description || '', r.batch_no || '(no batch)', originLabel(r), r.unit,
+  return [r.article, r.barcode || '', r.description || '', r.batch_no || '(no batch)', originLabel(r), r.unit,
     cell(r.stock_qty), cell(r.physical_qty), cell(r.counted_open_ml), cell(r.difference),
     r.locations.map((l) => `${l.name} ${l.qty}`).join(' · '), r.status];
 }
 
-export const ENTRY_HEADERS = ['Article', 'Description', 'Batch', 'Batch Origin', 'Quantity',
+export const ENTRY_HEADERS = ['Article', 'Barcode', 'Description', 'Batch', 'Batch Origin', 'Quantity',
   'Open ML', 'Location', 'Unit', 'Counted By', 'Counted At (UTC)', 'Remarks'];
 
 export function entryRow(e) {
-  return [e.article, e.description || '', e.batch_no || '(no batch)', originLabel(e),
+  return [e.article, e.barcode || '', e.description || '', e.batch_no || '(no batch)', originLabel(e),
     cell(e.is_liquor ? e.bottles : e.qty), e.is_liquor ? cell(e.open_ml) : null,
     e.location || '', e.unit, e.counted_by_name || '', when(e.counted_at), e.remarks || ''];
 }
