@@ -26,6 +26,16 @@ router.use(requireAuth);
 const ownerFilter = (user, alias = 'ce') =>
   (user.role === 'admin' ? '' : ` AND ${alias}.counted_by = ${Number(user.id)}`);
 
+// An item is on the phone's lists while it is on the stock list — OR while
+// it has counts in this audit. A Replace stock import mid-audit hides a
+// material that is not in the new file; one already counted used to vanish
+// from the counter's list while its count stayed in every report, so the
+// phone and the reports stopped agreeing. Its count is shown wherever the
+// count is reported.
+const shownItem = (user, alias = 'i') =>
+  `(${alias}.is_active OR EXISTS (SELECT 1 FROM count_entries cx
+       WHERE cx.item_id = ${alias}.id AND cx.audit_id = $1 AND cx.status = 'active'${ownerFilter(user, 'cx')}))`;
+
 // ── List audits ──────────────────────────────────────────────────────────────
 // Admin: all (optionally by store). Auditor: only audits for assigned stores.
 router.get('/', async (req, res) => {
@@ -547,7 +557,7 @@ router.get('/:id/super-categories', async (req, res) => {
                              WHERE na.item_id = i.id AND na.audit_id = $1)
             )::int AS counted
        FROM super_categories sc
-       LEFT JOIN items i ON i.super_category_id = sc.id AND i.is_active = TRUE
+       LEFT JOIN items i ON i.super_category_id = sc.id AND ${shownItem(req.user)}
                         AND i.inventory_mode = ${AUDIT_MODE()}
       WHERE sc.is_active = TRUE
       GROUP BY sc.id, sc.name, sc.sort_order
@@ -569,7 +579,7 @@ router.get('/:id/super-categories', async (req, res) => {
                              WHERE na.item_id = i.id AND na.audit_id = $1)
             )::int AS counted
        FROM items i
-      WHERE i.is_active AND i.super_category_id IS NULL
+      WHERE ${shownItem(req.user)} AND i.super_category_id IS NULL
         AND i.inventory_mode = ${AUDIT_MODE()}`,
     [req.params.id]
   );
@@ -597,7 +607,7 @@ router.get('/:id/categories', async (req, res) => {
             )::int AS counted
        FROM categories c
        LEFT JOIN super_categories sc ON sc.id = c.super_category_id
-       LEFT JOIN items i ON i.category_id = c.id AND i.is_active = TRUE
+       LEFT JOIN items i ON i.category_id = c.id AND ${shownItem(req.user)}
                         AND i.inventory_mode = ${AUDIT_MODE()}
       WHERE c.is_active = TRUE
       GROUP BY c.id, c.name, c.super_category_id, sc.name, sc.sort_order
@@ -614,7 +624,7 @@ router.get('/:id/items', async (req, res) => {
   if (!allowed) return res.status(403).json({ error: 'Forbidden' });
 
   const { super_category_id, category_id, search, status } = req.query;
-  const conds = ['i.is_active = TRUE', `i.inventory_mode = ${AUDIT_MODE()}`];
+  const conds = [shownItem(req.user), `i.inventory_mode = ${AUDIT_MODE()}`];
   const params = [req.params.id];
   if (super_category_id === 'none') conds.push('i.super_category_id IS NULL');
   else if (super_category_id) { params.push(super_category_id); conds.push(`i.super_category_id = $${params.length}`); }

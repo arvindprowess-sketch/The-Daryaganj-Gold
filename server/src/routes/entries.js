@@ -82,6 +82,8 @@ router.get('/audits/:auditId/items/:itemId/entries', async (req, res) => {
   // ?batch_id= narrows the sheet to one batch (warehouse). Without it every
   // entry for the article comes back, which is what the cafe has always read.
   const batchId = /^\d+$/.test(String(req.query.batch_id || '')) ? Number(req.query.batch_id) : null;
+  // ?batch_id=none — only the entries counted without a batch.
+  const noBatch = req.query.batch_id === 'none';
   const { rows } = await query(
     `SELECT ce.*, u.name AS counted_by_name, vu.name AS voided_by_name,
             b.batch_no
@@ -92,9 +94,10 @@ router.get('/audits/:auditId/items/:itemId/entries', async (req, res) => {
       WHERE ce.audit_id = $1 AND ce.item_id = $2
         AND ($3::int IS NULL OR ce.counted_by = $3)
         AND ($4::int IS NULL OR ce.batch_id = $4)
+        AND (NOT $5::boolean OR ce.batch_id IS NULL)
       ORDER BY ce.counted_at ASC`,
     [req.params.auditId, req.params.itemId,
-     req.user.role === 'admin' ? null : req.user.id, batchId]
+     req.user.role === 'admin' ? null : req.user.id, batchId, noBatch]
   );
   res.json(forRole(req.user.role, rows));
 });
@@ -147,6 +150,25 @@ router.get('/audits/:auditId/items/:itemId/batches', async (req, res) => {
     [req.params.auditId, req.params.itemId,
      req.user.role === 'admin' ? null : req.user.id]
   );
+  // Counts taken with NO batch — the material had none when it was counted,
+  // and the stock list gave it batches later. They are in every report, so
+  // they are a line here too, or this sheet's total falls short of them.
+  const { rows: nb } = await query(
+    `SELECT COUNT(*) FILTER (WHERE ce.status = 'active')::int AS entry_count,
+            SUM(ce.qty)     FILTER (WHERE ce.status = 'active') AS total_qty,
+            SUM(ce.bottles) FILTER (WHERE ce.status = 'active') AS total_bottles,
+            SUM(ce.open_ml) FILTER (WHERE ce.status = 'active') AS total_open_ml,
+            COUNT(*) FILTER (WHERE ce.status = 'void')::int AS void_count,
+            (SELECT unit FROM items WHERE id = $2) AS unit
+       FROM count_entries ce
+      WHERE ce.item_id = $2 AND ce.batch_id IS NULL AND ce.audit_id = $1
+        AND ($3::int IS NULL OR ce.counted_by = $3)`,
+    [req.params.auditId, req.params.itemId, req.user.role === 'admin' ? null : req.user.id]
+  );
+  if (rows.length && (nb[0].entry_count > 0 || nb[0].void_count > 0)) {
+    rows.unshift({ id: null, no_batch: true, item_id: Number(req.params.itemId), batch_no: 'No batch',
+                   origin: null, is_active: true, expiry_date: null, stock_qty: null, ...nb[0] });
+  }
   const showStock = req.user.role === 'admin' || audit.inventory_mode === 'warehouse';
   const out = rows.map((r) => {
     const counted = r.entry_count > 0;
