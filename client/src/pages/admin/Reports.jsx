@@ -63,8 +63,12 @@ export default function Reports() {
       ].filter(Boolean)
     : [];
 
+  // A warehouse store is reported batch-wise (WarehouseReports below), so the
+  // cafe's R1–R6 are not fetched for it at all.
+  const isWarehouse = audits.find((a) => String(a.id) === String(auditId))?.inventory_mode === 'warehouse';
+
   useEffect(() => {
-    if (!auditId) return;
+    if (!auditId || isWarehouse) return;
     setLoading(true); setData(null); setLoadedReport(null);
     const forReport = report;
     const qs = varianceParams.length ? `?${varianceParams.join('&')}` : '';
@@ -76,7 +80,7 @@ export default function Reports() {
       .catch((e) => { setData({ error: e.message, cleared: e.body?.cleared }); setLoadedReport(forReport); })
       .finally(() => setLoading(false));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [report, auditId, vCount, vSuper, vCategory, vGroup, vSystem, vRate, vNil]);
+  }, [report, auditId, isWarehouse, vCount, vSuper, vCategory, vGroup, vSystem, vRate, vNil]);
 
   // A cleared submission answers a download with 409 and an explanation
   // rather than a file of zeroes; show it instead of failing silently.
@@ -107,6 +111,7 @@ export default function Reports() {
         </select>
       </div>
 
+      {isWarehouse ? <WarehouseReports auditId={auditId} store={store} /> : (<>
       <div className="flex flex-wrap gap-2 mb-4">
         {REPORTS.map(([k, label]) => (
           <button key={k} className={report === k ? 'chip-on' : 'chip-off'} onClick={() => setReport(k)}>{label}</button>
@@ -312,12 +317,13 @@ export default function Reports() {
           ? <Spinner />
           : data ? <ReportView report={loadedReport} data={data} grouped={vGroup} /> : <p className="text-slate-400">Select a report.</p>}
       </div>
+      </>)}
 
-      {/* R5 Consolidated */}
-      <div className="mt-8">
+      {/* R5 Consolidated — cafe stores (R5 is built from R4). */}
+      {!isWarehouse && (<div className="mt-8">
         <h2 className="text-xl font-bold mb-2">R5 — Consolidated (all stores)</h2>
         <div className="flex flex-wrap gap-2 mb-3">
-          {audits.map((a) => (
+          {audits.filter((a) => a.inventory_mode !== 'warehouse').map((a) => (
             <button key={a.id} className={consolidateIds.includes(a.id) ? 'chip-on' : 'chip-off'}
                     onClick={() => setConsolidateIds((p) => p.includes(a.id) ? p.filter((x) => x !== a.id) : [...p, a.id])}>
               {a.store_name} {fmtDate(a.audit_date)}
@@ -360,7 +366,7 @@ export default function Reports() {
                      r.system_qty, r.variance, money(r.physical_value), money(r.variance_value)])} />
           </div>
         )}
-      </div>
+      </div>)}
     </div>
   );
 }
@@ -368,6 +374,125 @@ export default function Reports() {
 // `align` marks columns that hold numbers so figures line up on the decimal
 // point instead of drifting left. `rowClass` lets a caller emphasise subtotal
 // and total lines without a second table component.
+// ── Warehouse reports ───────────────────────────────────────────────────────
+// A warehouse store is reported batch-wise. Two reports, both reading what
+// was SUBMITTED, every auditor combined:
+//   Physical Compile Sheet  one line per batch
+//   Material-wise Variance  batches merged, one line per material
+const WH_REPORTS = [
+  ['physical-compile', 'Physical Compile Sheet'],
+  ['material-variance', 'Material-wise Variance'],
+];
+const qtyFmt = (v) => (v == null ? '—' : String(Number(Number(v).toFixed(3))));
+const diffCls = (v) => (v == null ? 'text-slate-300' : v < 0 ? 'text-red-600' : v > 0 ? 'text-amber-600' : 'text-green-600');
+const diffFmt = (v) => (v == null ? '—' : v > 0 ? `+${qtyFmt(v)}` : qtyFmt(v));
+
+function WarehouseReports({ auditId, store }) {
+  const [kind, setKind] = useState('physical-compile');
+  const [data, setData] = useState(null);
+  const [err, setErr] = useState('');
+  const [dlErr, setDlErr] = useState('');
+  const [filter, setFilter] = useState('all');
+
+  useEffect(() => {
+    setData(null); setErr(''); setFilter('all');
+    api.get(`/reports/${kind}/${auditId}`)
+      .then(setData)
+      .catch((e) => setErr(e.body?.cleared?.message || e.message));
+  }, [kind, auditId]);
+
+  const name = `${kind === 'physical-compile' ? 'Physical_Compile' : 'Material_Variance'}_${(store?.store_name || auditId).replace(/\W+/g, '_')}.xlsx`;
+  const compile = kind === 'physical-compile';
+  const rows = (data?.rows || []).filter((r) => {
+    if (filter === 'diff') return r.difference != null && r.difference !== 0;
+    if (filter === 'new') return compile ? r.is_new : /NEW BATCH/.test(r.remarks);
+    if (filter === 'notcounted') return /Not counted/.test(r.remarks);
+    return true;
+  });
+  const totals = rows.reduce((t, r) => ({
+    stock: t.stock + Number(r.stock || 0), physical: t.physical + Number(r.physical || 0),
+    difference: t.difference + Number(r.difference || 0),
+  }), { stock: 0, physical: 0, difference: 0 });
+
+  return (
+    <div>
+      <div className="flex flex-wrap gap-2 mb-4">
+        {WH_REPORTS.map(([k, label]) => (
+          <button key={k} className={kind === k ? 'chip-on' : 'chip-off'} onClick={() => setKind(k)}>{label}</button>
+        ))}
+      </div>
+      {data && (
+        <p className={`mb-3 text-sm ${data.source === 'submitted' ? 'text-slate-600' : 'text-amber-700 font-semibold'}`}>
+          {data.source === 'submitted'
+            ? 'Submitted count — every auditor who has submitted, combined.'
+            : 'PROVISIONAL — nothing submitted yet; showing the live count.'}
+          {compile && ' Location-wise, exactly as entered. A batch counted in several places has one line per place; its Stock and Difference are on its first line. Batches nobody counted are on the Material-wise Variance.'}
+        </p>
+      )}
+      <div className="flex flex-wrap gap-2 mb-3 items-center">
+        {[['all', 'All'], ['diff', 'With difference'],
+          ...(compile ? [] : [['notcounted', 'Not counted']]), ['new', 'New batches']].map(([k, l]) => (
+          <button key={k} className={filter === k ? 'chip-on' : 'chip-off'} onClick={() => setFilter(k)}>{l}</button>
+        ))}
+        <button className="btn-primary ml-auto" onClick={async () => {
+          setDlErr('');
+          try { await downloadReport(`/reports/${kind}/${auditId}?format=xlsx`, name); }
+          catch (e) { setDlErr(e.message); }
+        }}>⬇ Excel</button>
+      </div>
+      {dlErr && <p className="text-sm text-orange-700 mb-2">{dlErr}</p>}
+      {err && <p className="text-sm text-orange-700 mb-2">{err}</p>}
+      {!data && !err && <Spinner />}
+      {data && (
+        <div className="card overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead className="bg-slate-50 text-left text-slate-500">
+              <tr>
+                <th className="px-3 py-3">Super category</th><th className="px-3 py-3">Brand</th>
+                <th className="px-3 py-3">Material</th><th className="px-3 py-3">Material Description</th>
+                {compile && <th className="px-3 py-3">Batch</th>}
+                <th className="px-3 py-3 text-right">Stock</th><th className="px-3 py-3 text-right">Physical Qty</th>
+                <th className="px-3 py-3 text-right">Difference</th>
+                <th className="px-3 py-3">Locations</th><th className="px-3 py-3">Remarks</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y">
+              {rows.map((r) => (
+                <tr key={`${r.item_id}-${r.batch_id ?? 'x'}`} className={r.is_new ? 'bg-teal-50/40' : ''}>
+                  <td className="px-3 py-2 text-slate-600">{r.super_category || '—'}</td>
+                  <td className="px-3 py-2 text-slate-600">{r.brand || '—'}</td>
+                  <td className="px-3 py-2 font-medium">{r.material}</td>
+                  <td className="px-3 py-2">{r.description || '—'}</td>
+                  {compile && <td className="px-3 py-2">{r.batch}</td>}
+                  <td className="px-3 py-2 text-right tabular-nums">{qtyFmt(r.stock)}</td>
+                  <td className="px-3 py-2 text-right tabular-nums">{qtyFmt(r.physical)}</td>
+                  <td className={`px-3 py-2 text-right tabular-nums font-semibold ${diffCls(r.difference)}`}>{diffFmt(r.difference)}</td>
+                  <td className="px-3 py-2 text-xs text-slate-600">{r.locations || '—'}</td>
+                  <td className={`px-3 py-2 text-xs ${/NEW BATCH/.test(r.remarks) ? 'font-semibold text-teal-800' : 'text-slate-500'}`}>{r.remarks}</td>
+                </tr>
+              ))}
+              {rows.length === 0 && (
+                <tr><td colSpan={compile ? 10 : 9} className="p-8 text-center text-slate-400">Nothing to show.</td></tr>
+              )}
+            </tbody>
+            {rows.length > 0 && (
+              <tfoot className="bg-slate-100 font-semibold">
+                <tr>
+                  <td className="px-3 py-2" colSpan={compile ? 5 : 4}>Total ({rows.length} lines)</td>
+                  <td className="px-3 py-2 text-right tabular-nums">{qtyFmt(totals.stock)}</td>
+                  <td className="px-3 py-2 text-right tabular-nums">{qtyFmt(totals.physical)}</td>
+                  <td className={`px-3 py-2 text-right tabular-nums ${diffCls(totals.difference)}`}>{diffFmt(totals.difference)}</td>
+                  <td colSpan={2} className="px-3 py-2 text-xs font-normal text-slate-500">quantities added across lines</td>
+                </tr>
+              </tfoot>
+            )}
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function Table({ cols, rows, align = [], rowClass }) {
   const cell = (j) => (align[j] === 'right' ? 'px-3 py-2 text-right tabular-nums' : 'px-3 py-2');
   const head = (j) => (align[j] === 'right' ? 'px-3 py-2 text-right' : 'px-3 py-2');

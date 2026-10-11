@@ -121,9 +121,11 @@ export function clearedNotice(cleared) {
 // not. It is NULL on every cafe entry, on both sides, so it changes nothing
 // there.
 const ENTRY_SIG = (t) =>
-  `format('%s:%s:%s:%s:%s:%s', ${t}.item_id, coalesce(${t}.location_id, 0),
+  `format('%s:%s:%s:%s:%s:%s:%s', ${t}.item_id, coalesce(${t}.location_id, 0),
           coalesce(${t}.qty::text, ''), coalesce(${t}.bottles::text, ''),
-          coalesce(${t}.open_ml::text, ''), coalesce(${t}.batch_id, 0))`;
+          coalesce(${t}.open_ml::text, ''), coalesce(${t}.batch_id, 0),
+          -- A warehouse location is typed, so the words are the location.
+          lower(coalesce(${t}.location_text, '')))`;
 
 // Per auditor with a STANDING submission: how many entries the reports are
 // missing, and how many they are still carrying that the auditor has since

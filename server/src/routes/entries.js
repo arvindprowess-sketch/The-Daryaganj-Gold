@@ -134,7 +134,8 @@ router.get('/audits/:auditId/items/:itemId/batches', async (req, res) => {
             AND ($3::int IS NULL OR ce.counted_by = $3)
        ) agg ON TRUE
       WHERE b.item_id = $2 AND b.is_active
-      ORDER BY b.expiry_date NULLS LAST, lower(b.batch_no)`,
+      -- Batches created during counting come last, under the stock list's own.
+      ORDER BY (b.origin = 'counted'), b.expiry_date NULLS LAST, lower(b.batch_no)`,
     [req.params.auditId, req.params.itemId,
      req.user.role === 'admin' ? null : req.user.id]
   );
@@ -182,7 +183,24 @@ router.post('/audits/:auditId/entries', async (req, res) => {
   // Location is MANDATORY and must be a live entry in the global list. The UI
   // keeps Save disabled without one; this is the half that cannot be bypassed,
   // and it is what makes the report's location columns trustworthy.
-  const loc = await resolveLocation(b.location_id);
+  //
+  // A WAREHOUSE store types its location instead — a rack, bin or godown
+  // ("A-12", "Godown 2") that no fixed list could hold. It is just as
+  // mandatory: blank is refused here, whatever the phone did.
+  let loc;
+  if (audit.inventory_mode === 'warehouse') {
+    const typed = String(b.location_text ?? '').replace(/\s+/g, ' ').trim();
+    if (typed) {
+      if (typed.length > 100) return res.status(400).json({ error: 'Location is too long (100 characters at most)' });
+      loc = { location: { id: null, name: typed } };
+    } else if (b.location_id != null && b.location_id !== '') {
+      loc = await resolveLocation(b.location_id);
+    } else {
+      return res.status(400).json({ error: 'Location is required — type where this stock was found' });
+    }
+  } else {
+    loc = await resolveLocation(b.location_id);
+  }
   if (loc.error) return res.status(400).json({ error: loc.error });
 
   const { rows: itemRows } = await query('SELECT * FROM items WHERE id = $1 AND is_active = TRUE', [itemId]);

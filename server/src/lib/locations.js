@@ -11,6 +11,9 @@
 // ═══════════════════════════════════════════════════════════════════════════
 import { query } from '../db.js';
 
+// The single report column a warehouse audit has in place of fixed locations.
+export const WAREHOUSE_COLUMN = 'all';
+
 export async function activeLocations() {
   const { rows } = await query(
     `SELECT id, name, sort_order FROM locations
@@ -47,6 +50,16 @@ export async function allLocations() {
 // for a location whose quantity the report was not reading, so the column
 // came out empty on every single row.
 export async function reportLocations(auditId, submissionIds = null) {
+  // A warehouse store TYPES its locations (rack, bin, godown), so there is no
+  // fixed set to make columns from. Its reports carry one column holding the
+  // whole physical count; where each part was found is on the batch report.
+  const { rows: mode } = await query(
+    `SELECT s.inventory_mode FROM audits a JOIN stores s ON s.id = a.store_id WHERE a.id = $1`,
+    [auditId]
+  );
+  if (mode[0]?.inventory_mode === 'warehouse') {
+    return [{ id: WAREHOUSE_COLUMN, name: 'Physical Count', sort_order: 0, is_active: true }];
+  }
   const snapshot = Array.isArray(submissionIds);
   const { rows } = await query(
     `SELECT l.id, l.name, l.sort_order, l.is_active

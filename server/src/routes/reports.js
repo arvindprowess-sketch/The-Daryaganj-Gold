@@ -6,7 +6,8 @@ import {
 } from '../lib/reports.js';
 import { buildWorkbook, buildPdf } from '../lib/exporters.js';
 import { buildAuditWorkbook } from '../lib/auditWorkbook.js';
-import { batchReport, batchSheets } from '../lib/batchReport.js';
+import { batchReport, batchSheets, compileRows, materialRows, compileSheet, materialSheet }
+  from '../lib/batchReport.js';
 import { auditSource, clearedNotice, CLEARED } from '../lib/submissions.js';
 import { reportFields, reportColumns, fieldValue, bucketValue } from '../lib/columns.js';
 
@@ -96,6 +97,44 @@ const ymd = (v) => {
   const d = v instanceof Date ? v : new Date(v);
   return Number.isNaN(d.getTime()) ? String(v) : d.toISOString().slice(0, 10);
 };
+
+// ── Warehouse reports ───────────────────────────────────────────────────────
+// A warehouse store is reported batch-wise, not in the cafe's R1–R6 format:
+//
+//   physical-compile   every auditor's submitted count in one sheet, one line
+//                      per batch, with stock, difference, locations, remarks
+//   material-variance  the same with the batches merged, one line per material
+//
+// Both read what was submitted (all auditors combined), like every report.
+async function warehouseReport(req, res) {
+  const src = req.auditSource;
+  if (!src?.audit) { res.status(404).json({ error: 'Not found' }); return null; }
+  if (src.audit.inventory_mode !== 'warehouse') {
+    res.status(400).json({ error: 'This audit is for a cafe store — use R1–R6.' });
+    return null;
+  }
+  return batchReport(req.params.auditId, src);
+}
+
+router.get('/physical-compile/:auditId', async (req, res) => {
+  const report = await warehouseReport(req, res);
+  if (!report) return;
+  if (req.query.format === 'xlsx') {
+    return sendXlsx(res, `Physical_Compile_${slug(report.audit.store_name)}_${ymd(report.audit.audit_date)}`,
+      [compileSheet(report), materialSheet(report)]);
+  }
+  res.json({ audit: report.audit, source: report.source, rows: compileRows(report) });
+});
+
+router.get('/material-variance/:auditId', async (req, res) => {
+  const report = await warehouseReport(req, res);
+  if (!report) return;
+  if (req.query.format === 'xlsx') {
+    return sendXlsx(res, `Material_Variance_${slug(report.audit.store_name)}_${ymd(report.audit.audit_date)}`,
+      [materialSheet(report)]);
+  }
+  res.json({ audit: report.audit, source: report.source, rows: materialRows(report) });
+});
 
 // ── R1 Physical Stock Summary ────────────────────────────────────────────────
 // The standard columns, grouped Super Category › Category, with a Value column
@@ -239,7 +278,9 @@ router.get('/variance/:auditId', async (req, res) => {
     `Total items: ${rows.length}`,
     // Provenance — stated whenever there are system figures to attribute.
     ...(withSystem ? [
-      `System stock source: ${src?.filename || 'entered manually'}`,
+      `System stock source: ${provenance.batch_based && !src
+        ? 'Stock list — each material\'s system qty is the sum of its batches'
+        : src?.filename || 'entered manually'}`,
       src ? `Imported: ${new Date(src.imported_at).toLocaleString()}${src.imported_by_name ? ' by ' + src.imported_by_name : ''}` : null,
       `Coverage: ${provenance.with_system} of ${provenance.master_total} master items`,
       totals.no_system_data > 0

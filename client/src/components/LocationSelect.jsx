@@ -72,3 +72,67 @@ export default function LocationSelect({ value, onChange, label = 'Location' }) 
     </label>
   );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Warehouse: the location is TYPED — a rack, bin or godown ("A-12",
+// "Godown 2") that no fixed list could hold. Mandatory, like the list: Save
+// stays disabled while it is blank, and the server refuses a blank one.
+//
+// The last location typed carries to the next entry (a counter works one
+// rack at a time), and the places already typed in this audit are offered as
+// suggestions so the same rack is not spelt three ways.
+// ═══════════════════════════════════════════════════════════════════════════
+const textKey = (auditId) => `audix_last_location_text_${auditId}`;
+const recentKey = (auditId) => `audix_recent_locations_${auditId}`;
+
+export function useStickyLocationText(auditId) {
+  const [value, setValue] = useState(() => {
+    try { return localStorage.getItem(textKey(auditId)) || ''; } catch { return ''; }
+  });
+  const set = (v) => {
+    setValue(v);
+    try { localStorage.setItem(textKey(auditId), v); } catch { /* private mode */ }
+  };
+  return [value, set];
+}
+
+// Remember a location once an entry has been SAVED with it.
+export function rememberLocationText(auditId, text) {
+  const t = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!t) return;
+  try {
+    const list = JSON.parse(localStorage.getItem(recentKey(auditId)) || '[]')
+      .filter((x) => x.toLowerCase() !== t.toLowerCase());
+    localStorage.setItem(recentKey(auditId), JSON.stringify([t, ...list].slice(0, 30)));
+  } catch { /* private mode */ }
+}
+
+function recentLocations(auditId) {
+  try { return JSON.parse(localStorage.getItem(recentKey(auditId)) || '[]'); } catch { return []; }
+}
+
+export function LocationInput({ auditId, value, onChange, label = 'Location' }) {
+  const missing = !String(value || '').trim();
+  const listId = `loc-recent-${auditId}`;
+  const recent = recentLocations(auditId);
+  return (
+    <label className="block">
+      <span className="text-sm font-medium text-slate-600">
+        {label} <span className="text-red-600">*</span>
+      </span>
+      <input
+        className={`field mt-1 text-lg ${missing ? 'border-amber-400' : ''}`}
+        value={value || ''} list={listId} maxLength={100}
+        autoCapitalize="characters" autoCorrect="off"
+        placeholder="Rack / bin / area, e.g. A-12"
+        onChange={(e) => onChange(e.target.value)}
+      />
+      <datalist id={listId}>
+        {recent.map((r) => <option key={r} value={r} />)}
+      </datalist>
+      {missing && (
+        <span className="text-xs text-amber-700">Required — type where this stock is kept. You cannot save without it.</span>
+      )}
+    </label>
+  );
+}

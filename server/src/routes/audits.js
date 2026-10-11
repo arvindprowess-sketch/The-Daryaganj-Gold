@@ -621,14 +621,12 @@ router.get('/:id/items', async (req, res) => {
   if (category_id) { params.push(category_id); conds.push(`i.category_id = $${params.length}`); }
   if (search) {
     params.push(`%${search}%`);
-    // Article is the identity; the counter usually searches by description,
-    // and a barcode finds it too.
-    conds.push(`(i.name ILIKE $${params.length} OR i.description ILIKE $${params.length}
-                 OR i.barcode ILIKE $${params.length})`);
+    // Material is the identity; the counter usually searches by description.
+    conds.push(`(i.name ILIKE $${params.length} OR i.description ILIKE $${params.length})`);
   }
 
   const { rows } = await query(
-    `SELECT i.id, i.name, i.description, i.barcode, i.unit, i.is_liquor, i.bottle_size_ml,
+    `SELECT i.id, i.name, i.description, i.unit, i.is_liquor, i.bottle_size_ml,
             i.photo_url, i.photo_version, i.super_category_id, i.category_id, i.rate,
             sc.name AS super_category_name, c.name AS category_name,
             COALESCE(agg.entry_count, 0)::int AS entry_count,

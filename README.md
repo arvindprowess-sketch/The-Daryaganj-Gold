@@ -171,16 +171,65 @@ The Stock list totals quantity **per unit** — different units are never added.
 **Stock import** (Stock → Import, **Excel .xlsx or CSV**): one row per batch,
 headed the way the client's own sheet is —
 `Super category, Brand, Material, Material Description, Batch, Stock`, with
-`Unit`, `Barcode` and `Expiry` optional (the older `article / description /
+`Unit` and `Expiry` optional (the older `article / description /
 quantity` names still work). **Material is the identity**: every batch row of
 it carries the same Material. Brand is the category level. A super category
 or brand not yet in the system is created. In an .xlsx a title line above the
-table is skipped, and a refused row is named by its Excel row number. A
-barcode belongs to one material.
+table is skipped, and a refused row is named by its Excel row number.
+
+**Variance for a warehouse store.** A material's system qty is the sum of its
+live batches' stock (an imported system-stock row still wins); its physical
+qty is everything counted across its batches, new ones included. R4 therefore
+reads, for a material with batches 60 / 30 / 12.5 counted 58 / 30 / not
+counted plus a new batch of 5: system 102.5, physical 93, variance −9.5 — and
+the batch-wise report shows the same figures on the material's TOTAL line
+under its batches. Batches a counter created sit at the bottom of their
+material everywhere (phone, Stock, reports) and are named in Remarks
+("NEW BATCH").
+
+**Location in a warehouse store is typed, and mandatory.** A rack, bin or
+godown ("A-12", "Godown 2 / R3") — no fixed list. SAVE stays disabled while
+it is blank and the server refuses a blank one. The last location typed
+carries to the next entry, and places already typed in the audit are offered
+as suggestions. Reports for a warehouse audit carry one *Physical Count*
+column (typed places cannot be columns); where each quantity was found is on
+the batch report's Locations column. Cafe stores keep the fixed list.
+
+**A batch found in several places is several lines.** Every batch-level view
+— the Stock page's batch-wise count, the Batch Summary sheet, the Physical
+Compile Sheet — has one line per batch **and location** (G2, F2 and C3 are
+three lines, never "G2 · F2 · C3" in one cell). The batch's Stock, Difference
+and Status are on its first line. Only the Material-wise Variance, which is
+one line per material by definition, lists its places in one cell.
+
+**Re-importing stock never moves a physical count.** Physical quantities are
+the auditors' entries (and the submitted copies of them); a stock import —
+Add & update or Replace — only changes batches' book quantities. What does
+follow the stock list is the *system* side: Stock and Difference are always
+read from the current batch quantities, so re-importing changes them. A batch
+retired by a Replace import keeps its counted quantity on every report and
+stops contributing book stock (R4 and the batch reports agree).
+
+**Reports for a warehouse store.** Choosing a warehouse audit on Reports
+replaces the cafe's R1–R6 with two reports, each with an Excel download, both
+reading what was submitted (every auditor combined):
+
+- *Physical Compile Sheet* — exactly what was entered, **location-wise**: one
+  line per material + batch + location (two auditors at the same batch and
+  place are added together; "Kitchen" and "kitchen" are one place).
+  Columns: Super category, Brand, Material, Material Description, Batch,
+  Stock, Physical Qty, Difference, Locations, Remarks. A batch counted in
+  several places has one line per place, with its Stock and Difference on the
+  first line only, so the columns add up. Batches nobody counted are not
+  lines here.
+- *Material-wise Variance* — no batch column: one line per material, the
+  stock of all its batches against everything counted across them, so a batch
+  nobody counted shows as shortage here. Remarks name new batches and
+  materials not counted at all.
 
 **Searching on the phone** matches the material description (what counters
-type), the material and the barcode. Typing a whole barcode or material and
-pressing Enter opens that material's batches directly. *Add & update* creates
+type) and the material. Typing a whole material and pressing Enter opens its
+batches directly. *Add & update* creates
 and updates; *Replace* additionally deactivates every live batch not in the
 file. Any invalid row stops the whole import and is named. A blank quantity is
 "no figure", never zero.

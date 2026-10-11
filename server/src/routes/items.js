@@ -92,23 +92,18 @@ router.post('/', requireRole('admin'), async (req, res) => {
     const { rows } = await query(
       `INSERT INTO items (name, category_id, super_category_id, unit, bottle_unit_size,
                           is_liquor, bottle_size_ml, rate, photo_url, is_active, description,
-                          inventory_mode, barcode)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,COALESCE($10, TRUE),$11,$12,$13) RETURNING *`,
+                          inventory_mode)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,COALESCE($10, TRUE),$11,$12) RETURNING *`,
       // Unit is stored exactly as given (only outer whitespace trimmed).
       [name, b.category_id || null, b.super_category_id || null, (b.unit ?? '').trim(),
        unitSize(b.bottle_unit_size),
        !!b.is_liquor, b.bottle_size_ml || null, b.rate ?? null, b.photo_url || null, b.is_active,
        (b.description ?? '').trim() || null,
        // Created from Stock → a warehouse article; from Item Master → cafe.
-       b.inventory_mode === 'warehouse' ? 'warehouse' : 'cafe',
-       String(b.barcode ?? '').trim() || null]
+       b.inventory_mode === 'warehouse' ? 'warehouse' : 'cafe']
     );
     res.status(201).json(rows[0]);
   } catch (err) {
-    if (err.code === '23505' && err.constraint === 'idx_items_mode_barcode') {
-      return res.status(409).json({ code: 'barcode_exists',
-        error: `Barcode "${String(b.barcode).trim()}" already belongs to another material` });
-    }
     if (err.code === '23505') {
       return res.status(409).json({
         code: 'name_exists',
@@ -144,24 +139,17 @@ router.put('/:id', requireRole('admin'), async (req, res) => {
          is_active = COALESCE($10, is_active),
          bottle_unit_size = COALESCE($11, bottle_unit_size),
          -- Untouched unless sent; an empty string clears it.
-         description = CASE WHEN $12::boolean THEN NULLIF(btrim($13), '') ELSE description END,
-         -- Untouched unless sent; an empty string clears it.
-         barcode = CASE WHEN $14::boolean THEN NULLIF(btrim($15), '') ELSE barcode END
+         description = CASE WHEN $12::boolean THEN NULLIF(btrim($13), '') ELSE description END
        WHERE id = $1 RETURNING *`,
       [req.params.id, name, b.category_id, b.super_category_id,
        b.unit === undefined ? null : String(b.unit).trim(), b.is_liquor,
        b.bottle_size_ml ?? null, b.rate, b.photo_url, b.is_active,
        b.bottle_unit_size === undefined ? null : unitSize(b.bottle_unit_size),
-       b.description !== undefined, b.description == null ? '' : String(b.description),
-       b.barcode !== undefined, b.barcode == null ? '' : String(b.barcode)]
+       b.description !== undefined, b.description == null ? '' : String(b.description)]
     );
     if (!rows[0]) return res.status(404).json({ error: 'Not found' });
     res.json(rows[0]);
   } catch (err) {
-    if (err.code === '23505' && err.constraint === 'idx_items_mode_barcode') {
-      return res.status(409).json({ code: 'barcode_exists',
-        error: `Barcode "${String(b.barcode).trim()}" already belongs to another material` });
-    }
     if (err.code === '23505') return res.status(409).json({ error: 'An item with this name already exists' });
     throw err;
   }

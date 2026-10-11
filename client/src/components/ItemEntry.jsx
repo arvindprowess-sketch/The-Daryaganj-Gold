@@ -7,7 +7,9 @@ import { useToast } from './Toast.jsx';
 import { saveDraft, loadDraft, clearDraft, queueEntry, newClientRef } from '../lib/queue.js';
 import { fmtTime } from '../lib/datetime.js';
 import { subUnitFor, combine, preview } from '../lib/measuredUnit.js';
-import LocationSelect, { useStickyLocation } from './LocationSelect.jsx';
+import LocationSelect, { useStickyLocation, LocationInput, useStickyLocationText,
+         rememberLocationText } from './LocationSelect.jsx';
+import { useAuditMode } from '../lib/mode.js';
 import { useAuth } from '../lib/auth.jsx';
 
 // 250.5 → "250.5", 40 → "40": a book quantity read as written, not padded.
@@ -44,6 +46,11 @@ export default function ItemEntry({ auditId, item, batch = null, onClose, onSave
   // Sticky: an auditor counts everything in one place before moving on, so the
   // last location carries to the next item rather than being re-picked 618 times.
   const [locationId, setLocationId] = useStickyLocation(auditId);
+  // A warehouse store TYPES its location (rack / bin / godown) instead.
+  const warehouse = useAuditMode(auditId) === 'warehouse';
+  const [locationText, setLocationText] = useStickyLocationText(auditId);
+  const typedLocation = String(locationText || '').replace(/\s+/g, ' ').trim();
+  const hasLocation = warehouse ? !!typedLocation : !!locationId;
   const [entries, setEntries] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -69,7 +76,8 @@ export default function ItemEntry({ auditId, item, batch = null, onClose, onSave
   }
 
   function buildPayload() {
-    const p = { item_id: item.id, location_id: locationId || null, client_ref: clientRef.current,
+    const p = { item_id: item.id, client_ref: clientRef.current,
+                ...(warehouse ? { location_text: typedLocation } : { location_id: locationId || null }),
                 remarks: form.remarks || null, photo_url: form.photo_url || null };
     if (isNewBatch) {
       p.new_batch_no = batch.batch_no;
@@ -89,7 +97,7 @@ export default function ItemEntry({ auditId, item, batch = null, onClose, onSave
   }
 
   function validate() {
-    if (!locationId) return 'Choose a location.';
+    if (!hasLocation) return warehouse ? 'Type the location first — it is required.' : 'Choose a location.';
     if (item.is_liquor) {
       if (form.bottles === '' && form.open_ml === '') return 'Enter sealed bottles and/or open ml (type 0 if none).';
     } else if (sub) {
@@ -123,6 +131,7 @@ export default function ItemEntry({ auditId, item, batch = null, onClose, onSave
     try {
       const saved = await api.post(`/audits/${auditId}/entries`, payload);
       clearDraft(auditId, draftId);
+      if (warehouse) rememberLocationText(auditId, typedLocation);
       setForm(empty);
       clientRef.current = newClientRef();
       toast(saved?.duplicate ? `Already saved — ${describe(payload)}` : `Saved — ${describe(payload)}`);
@@ -296,8 +305,13 @@ export default function ItemEntry({ auditId, item, batch = null, onClose, onSave
                    placeholder="Type 0 if none found" />
           </label>
         )}
+        {warehouse ? (
+          <LocationInput auditId={auditId} value={locationText}
+                         onChange={(v) => { clientRef.current = newClientRef(); setLocationText(v); }} />
+        ) : (
         <LocationSelect value={locationId}
                         onChange={(v) => { clientRef.current = newClientRef(); setLocationId(v); }} />
+        )}
         <label className="block">
           <span className="text-sm font-medium text-slate-600">Remarks</span>
           <input className="field mt-1" value={form.remarks}
@@ -311,7 +325,7 @@ export default function ItemEntry({ auditId, item, batch = null, onClose, onSave
 
         {/* Location is mandatory. Disabled here, and rejected server-side —
             the report's location columns are only as good as this. */}
-        <button className="btn-primary w-full text-lg" disabled={busy || !locationId} onClick={attemptSave}>
+        <button className="btn-primary w-full text-lg" disabled={busy || !hasLocation} onClick={attemptSave}>
           {busy ? 'Saving…' : 'SAVE ENTRY'}
         </button>
       </div>

@@ -16,10 +16,10 @@ import useDebounced, { normalizeName } from '../../lib/useDebounced.js';
 //   → pick or create a batch → physical quantity and location → save
 //
 // Search covers the WHOLE STORE, not just this category, and matches the
-// description (what a counter usually types), the article and the barcode —
-// a counter who finds an article in the wrong place can still record it.
-// The ARTICLE is the identity: every batch and count hangs off it. Typing a
-// whole barcode or article and pressing Enter opens that article directly.
+// material description (what a counter usually types) and the material — a
+// counter who finds one in the wrong place can still record it. The MATERIAL
+// is the identity: every batch and count hangs off it. Typing a whole
+// material and pressing Enter opens it directly.
 // ═══════════════════════════════════════════════════════════════════════════
 export default function StockCount() {
   const { auditId, superCategoryId } = useParams();
@@ -59,17 +59,16 @@ export default function StockCount() {
     return ((searching ? allItems : items) || []).filter((i) => {
       if (status === 'counted' && !i.counted) return false;
       if (status === 'notcounted' && i.counted) return false;
-      if (q && !normalizeName(i.name).includes(q) && !normalizeName(i.description).includes(q)
-          && !normalizeName(i.barcode).includes(q)) return false;
+      if (q && !normalizeName(i.name).includes(q) && !normalizeName(i.description).includes(q)) return false;
       return true;
     });
   }, [items, allItems, status, debouncedSearch, searching]);
 
-  // Enter on an exact barcode or article opens it — the scanner/keyboard path.
+  // Enter on an exact material (or the only match) opens it.
   function openExact() {
     const q = normalizeName(search);
     if (!q) return;
-    const hit = (allItems || []).find((i) => normalizeName(i.barcode) === q || normalizeName(i.name) === q)
+    const hit = (allItems || []).find((i) => normalizeName(i.name) === q)
       || (filtered.length === 1 ? filtered[0] : null);
     if (hit) openItem(hit);
   }
@@ -83,7 +82,6 @@ export default function StockCount() {
         <div className="font-bold truncate">{i.name}</div>
         <div className="text-sm text-slate-600 truncate">{i.description || '—'}</div>
         <div className="text-xs text-slate-400 truncate">
-          {i.barcode ? `${i.barcode} · ` : ''}
           {searching && i.category_name ? `${i.category_name} · ` : ''}
           {i.unit ? `${i.unit} · ` : ''}
           {i.batch_count ? `${i.batch_count} ${i.batch_count === 1 ? 'batch' : 'batches'}` : 'no batches'}
@@ -112,7 +110,7 @@ export default function StockCount() {
                     back={`/a/audit/${auditId}`} />
 
       <div className="sticky top-[56px] z-10 bg-slate-100/95 backdrop-blur px-3 pt-3 pb-2 space-y-2">
-        <input className="field py-2.5" placeholder="Material description, material or barcode…"
+        <input className="field py-2.5" placeholder="Material description or material…"
                value={search} onChange={(e) => setSearch(e.target.value)}
                onKeyDown={(e) => e.key === 'Enter' && openExact()} enterKeyHint="search" />
         <div className="flex gap-2">
