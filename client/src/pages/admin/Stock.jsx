@@ -504,8 +504,13 @@ function StockImport({ onDone }) {
       const r = await api.upload('/stock/import', fd);
       setResult({
         tone: 'success',
-        title: `Imported ${r.rows} row(s) from ${r.filename}`,
+        title: `Imported ${r.lines ?? r.rows} line(s) from ${r.filename} — ${r.rows} batch(es)`,
         lines: [
+          // The same material + batch on several lines is one batch, its
+          // Stock added — said out loud so the total is not a surprise.
+          r.merged_lines
+            ? `${r.merged_lines} repeated line(s) of the same material + batch merged into ${r.merged_batches} batch(es) — their Stock was added together.`
+            : null,
           `Articles: ${r.articles_created} created, ${r.articles_updated} updated`
             + (r.categories_created ? ` · ${r.categories_created} new categor${r.categories_created === 1 ? 'y' : 'ies'}.` : '.'),
           `Batches: ${r.batches_created} created, ${r.batches_updated} updated`
@@ -540,7 +545,7 @@ function StockImport({ onDone }) {
       </div>
       <p className="text-xs text-slate-500">
         Excel (.xlsx) or CSV, one row per batch: <code>Super category, Brand, Material, Material Description, Batch, Stock</code>
-        (optional: Unit, Expiry). The <strong>Material</strong> identifies the item — every batch row of it carries the same Material.
+        (optional: Unit, Expiry). The same Material + Batch on several lines (one per rack or bin) is one batch — its Stock is added up. The <strong>Material</strong> identifies the item — every batch row of it carries the same Material.
         A super category or category that does not exist yet is created.
         Unit is free text, kept exactly as written; a batch whose unit differs from its article keeps its own.
       </p>
