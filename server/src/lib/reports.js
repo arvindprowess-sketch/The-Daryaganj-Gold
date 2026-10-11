@@ -3,7 +3,7 @@ import { AUDIT_MODE } from './scope.js';
 import { measurementBasis, finalTotals, BASES } from './measure.js';
 import { auditSource, submissionIds, clearedNotice, submissionDrift,
          SNAPSHOT, CLEARED } from './submissions.js';
-import { reportLocations } from './locations.js';
+import { reportLocations, WAREHOUSE_COLUMN } from './locations.js';
 
 export const LIQUOR_ESTIMATION_NOTE =
   'Open bottle quantities are recorded by visual estimation.';
@@ -141,7 +141,10 @@ export async function auditItemAggregates(auditId, source = null) {
     // reconciliation a reader checks first — so the total is the SUM of these,
     // not a separately aggregated figure that could drift from them.
     const by = r.by_location || {};
-    const byLocation = locations.map((l) => Number(by[String(l.id)] || 0));
+    // A warehouse audit has one column, and it holds everything counted —
+    // typed locations included, which no fixed column could.
+    const byLocation = locations.map((l) => (l.id === WAREHOUSE_COLUMN
+      ? physicalQty : Number(by[String(l.id)] || 0)));
     return {
       ...r,
       physical_qty: physicalQty,

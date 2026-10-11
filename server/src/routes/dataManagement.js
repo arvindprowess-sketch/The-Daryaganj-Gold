@@ -421,8 +421,11 @@ router.get('/readiness', async (req, res) => {
               WHERE lower(btrim(name)) NOT IN ('kitchen','foh/bar','store','l-4','l-17')) AS stray_locations,
             -- An entry with no location at all is left out of every location
             -- column, so its quantity would go unreported.
-            (SELECT count(*)::int FROM count_entries
-              WHERE status='active' AND location_id IS NULL) AS entries_no_location,
+            -- A warehouse store types its locations, so it is not counted here.
+            (SELECT count(*)::int FROM count_entries ce
+               JOIN audits a ON a.id = ce.audit_id
+               JOIN stores s ON s.id = a.store_id AND s.inventory_mode = 'cafe'
+              WHERE ce.status='active' AND ce.location_id IS NULL) AS entries_no_location,
             -- Counted, but in no standing submission, so in no report. Reports
             -- read submissions; an entry nobody submitted is invisible, and an
             -- audit product must not lose a count quietly.

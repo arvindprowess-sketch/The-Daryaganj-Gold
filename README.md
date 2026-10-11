@@ -187,6 +187,14 @@ under its batches. Batches a counter created sit at the bottom of their
 material everywhere (phone, Stock, reports) and are named in Remarks
 ("NEW BATCH").
 
+**Location in a warehouse store is typed, and mandatory.** A rack, bin or
+godown ("A-12", "Godown 2 / R3") — no fixed list. SAVE stays disabled while
+it is blank and the server refuses a blank one. The last location typed
+carries to the next entry, and places already typed in the audit are offered
+as suggestions. Reports for a warehouse audit carry one *Physical Count*
+column (typed places cannot be columns); where each quantity was found is on
+the batch report's Locations column. Cafe stores keep the fixed list.
+
 **Searching on the phone** matches the material description (what counters
 type) and the material. Typing a whole material and pressing Enter opens its
 batches directly. *Add & update* creates
