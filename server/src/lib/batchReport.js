@@ -442,3 +442,61 @@ export function materialSheet(report) {
       cell(r.stock), cell(r.physical), cell(r.difference), r.locations, r.remarks]),
   ] };
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ALL ENTRIES — every entry every auditor made in this audit, ACTIVE AND
+// VOID, straight from the working record. This is the list to reconcile
+// against each auditor's own figures line by line: nothing merged, nothing
+// filtered, every void with who withdrew it, when and why.
+// ═══════════════════════════════════════════════════════════════════════════
+export const ALL_ENTRY_HEADERS = ['Entry ID', 'Super category', 'Brand', 'Material', 'Material Description',
+  'Batch', 'Quantity', 'Open ML', 'Unit', 'Location', 'Counted By', 'Counted At (UTC)',
+  'Status', 'Void Reason', 'Voided By', 'Voided At (UTC)', 'Remarks'];
+
+export async function allEntries(auditId) {
+  const { rows } = await query(
+    `SELECT ce.id, sc.name AS super_category, c.name AS brand, i.name AS material,
+            i.description, i.is_liquor, b.batch_no, b.origin AS batch_origin,
+            COALESCE(NULLIF(btrim(b.unit), ''), i.unit) AS unit,
+            ce.qty, ce.bottles, ce.open_ml,
+            COALESCE(l.name, ce.location_text) AS location,
+            u.name AS counted_by, ce.counted_at, ce.status, ce.void_reason,
+            vu.name AS voided_by, ce.voided_at, ce.remarks
+       FROM count_entries ce
+       JOIN items i ON i.id = ce.item_id
+       LEFT JOIN super_categories sc ON sc.id = i.super_category_id
+       LEFT JOIN categories c ON c.id = i.category_id
+       LEFT JOIN item_batches b ON b.id = ce.batch_id
+       LEFT JOIN locations l ON l.id = ce.location_id
+       LEFT JOIN users u ON u.id = ce.counted_by
+       LEFT JOIN users vu ON vu.id = ce.voided_by
+      WHERE ce.audit_id = $1
+      ORDER BY u.name NULLS LAST, ce.counted_at, ce.id`,
+    [auditId]
+  );
+  return rows.map((r) => ({
+    id: r.id, super_category: r.super_category || '', brand: r.brand || '',
+    material: r.material, description: r.description || '',
+    batch: r.batch_no || '(no batch)', is_new: r.batch_origin === 'counted',
+    quantity: r.is_liquor ? r.bottles : r.qty, open_ml: r.is_liquor ? r.open_ml : null,
+    unit: r.unit || '', location: r.location || '',
+    counted_by: r.counted_by || '', counted_at: r.counted_at,
+    status: r.status === 'void' ? 'VOID' : 'Active',
+    void_reason: r.void_reason || '', voided_by: r.voided_by || '', voided_at: r.voided_at,
+    remarks: [r.batch_origin === 'counted' ? 'NEW BATCH' : null, r.remarks].filter(Boolean).join(' · '),
+  }));
+}
+
+export function allEntriesSheet(audit, rows) {
+  const d = audit.audit_date instanceof Date ? audit.audit_date.toISOString().slice(0, 10) : String(audit.audit_date).slice(0, 10);
+  const voids = rows.filter((r) => r.status === 'VOID').length;
+  return { name: 'All Entries', aoa: [
+    [`All Entries (active and void) · ${audit.store_name} — ${d}`],
+    [`${rows.length} entries · ${rows.length - voids} active · ${voids} void · every auditor, live`],
+    [],
+    ALL_ENTRY_HEADERS,
+    ...rows.map((r) => [r.id, r.super_category, r.brand, r.material, r.description, r.batch,
+      cell(r.quantity), cell(r.open_ml), r.unit, r.location, r.counted_by, when(r.counted_at),
+      r.status, r.void_reason, r.voided_by, when(r.voided_at), r.remarks]),
+  ] };
+}

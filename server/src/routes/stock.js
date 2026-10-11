@@ -9,7 +9,8 @@ import { normalizeName, nameKey } from '../lib/itemName.js';
 import { toCsv } from '../lib/csvTemplate.js';
 import { logActivity } from '../lib/activityLog.js';
 import { buildWorkbook } from '../lib/exporters.js';
-import { batchReport, batchSheets, SUMMARY_HEADERS, summaryLines, locationLines } from '../lib/batchReport.js';
+import { batchReport, batchSheets, SUMMARY_HEADERS, summaryLines, locationLines,
+         allEntries, allEntriesSheet } from '../lib/batchReport.js';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Stock — the warehouse's batch-wise stock list. ADMIN ONLY.
@@ -114,9 +115,12 @@ router.get('/', async (req, res) => {
     `SELECT ${BATCH_COLUMNS}
        FROM item_batches b JOIN items i ON i.id = b.item_id
       WHERE b.item_id = ANY($1::int[])
+        -- The Active view lists live batches only; a hidden batch (kept for
+        -- an audit's history) shows under Inactive / All.
+        AND ($2::boolean OR b.is_active)
       -- Batches a counter created sit at the bottom of their article.
       ORDER BY b.is_active DESC, (b.origin = 'counted'), b.expiry_date NULLS LAST, lower(b.batch_no)`,
-    [ids]
+    [ids, active !== 'active']
   ) : { rows: [] };
 
   const byItem = new Map();
@@ -543,18 +547,61 @@ router.post('/import', upload.single('file'), async (req, res) => {
       if (br[0].created) s.batches_created += 1; else s.batches_updated += 1;
     }
 
+    // A material in the file is in stock: if an earlier Replace had hidden
+    // it, it is shown again.
+    const touchedItemIds = [...new Set([...itemsByKey.values()]
+      .filter((i) => describedItems.has(i.id)).map((i) => i.id))];
+    const { rowCount: revived } = await c.query(
+      `UPDATE items SET is_active = TRUE, deactivated_at = NULL, deactivated_by = NULL
+        WHERE id = ANY($1::int[]) AND NOT is_active`, [touchedItemIds]);
+    s.articles_reactivated = revived;
+
     if (mode === 'replace') {
-      // Deactivated, never deleted: a batch that was counted against must stay
-      // readable in the count it belongs to.
-      // Batches a counter created are NOT the stock list's to retire: they
-      // exist because somebody found them on the shelf, and must stay
-      // available until the admin removes them deliberately.
-      const { rowCount } = await c.query(
+      // The file IS the stock list: what is not in it goes.
+      //
+      //   never counted  → DELETED outright
+      //   counted in an audit → kept in the database, hidden (inactive):
+      //                    deleting it would break the report it is in
+      //
+      // Batches a counter created during an audit are not the stock list's to
+      // remove — they exist because somebody found them on the shelf.
+      const { rowCount: batchesDeleted } = await c.query(
+        `DELETE FROM item_batches b
+          WHERE b.origin = 'stock' AND NOT (b.id = ANY($1::int[]))
+            AND EXISTS (SELECT 1 FROM items i WHERE i.id = b.item_id AND i.inventory_mode = 'warehouse')
+            AND NOT EXISTS (SELECT 1 FROM count_entries ce WHERE ce.batch_id = b.id)
+            AND NOT EXISTS (SELECT 1 FROM submission_entries se WHERE se.batch_id = b.id)`,
+        [touchedBatchIds]
+      );
+      const { rowCount: batchesHidden } = await c.query(
         `UPDATE item_batches SET is_active = FALSE, updated_at = now()
           WHERE is_active AND origin = 'stock' AND NOT (id = ANY($1::int[]))`,
         [touchedBatchIds]
       );
-      s.batches_deactivated = rowCount;
+      // Materials not in the file: deleted when nothing references them any
+      // more, otherwise hidden once they have no live batch left.
+      const { rowCount: articlesDeleted } = await c.query(
+        `DELETE FROM items i
+          WHERE i.inventory_mode = 'warehouse' AND NOT (i.id = ANY($1::int[]))
+            AND NOT EXISTS (SELECT 1 FROM item_batches b WHERE b.item_id = i.id)
+            AND NOT EXISTS (SELECT 1 FROM count_entries ce WHERE ce.item_id = i.id)
+            AND NOT EXISTS (SELECT 1 FROM submission_entries se WHERE se.item_id = i.id)
+            AND NOT EXISTS (SELECT 1 FROM system_stock ss WHERE ss.item_id = i.id)
+            AND NOT EXISTS (SELECT 1 FROM photo_reviews pr WHERE pr.item_id = i.id)
+            AND NOT EXISTS (SELECT 1 FROM audit_na na WHERE na.item_id = i.id)`,
+        [touchedItemIds]
+      );
+      const { rowCount: articlesHidden } = await c.query(
+        `UPDATE items i SET is_active = FALSE, deactivated_at = now(), deactivated_by = $2
+          WHERE i.inventory_mode = 'warehouse' AND i.is_active AND NOT (i.id = ANY($1::int[]))
+            AND NOT EXISTS (SELECT 1 FROM item_batches b WHERE b.item_id = i.id AND b.is_active)`,
+        [touchedItemIds, req.user.id]
+      );
+      Object.assign(s, {
+        batches_deleted: batchesDeleted, batches_hidden: batchesHidden,
+        batches_deactivated: batchesDeleted + batchesHidden,
+        articles_deleted: articlesDeleted, articles_hidden: articlesHidden,
+      });
     }
 
     await logActivity({
@@ -585,7 +632,8 @@ router.get('/count', async (req, res) => {
     return res.send(toCsv(SUMMARY_HEADERS, summaryLines(report)));
   }
   if (req.query.format === 'xlsx') {
-    const buf = await buildWorkbook(batchSheets(report));
+    const buf = await buildWorkbook([...batchSheets(report),
+      allEntriesSheet(report.audit, await allEntries(auditId))]);
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename="${base}.xlsx"`);
     return res.send(buf);

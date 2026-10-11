@@ -222,8 +222,11 @@ batch retired from the stock list after it was counted still appears there,
 greyed and closed to new entries, so the total always includes it.
 
 **Reports for a warehouse store.** Choosing a warehouse audit on Reports
-replaces the cafe's R1–R6 with two reports, each with an Excel download, both
-reading what was submitted (every auditor combined):
+replaces the cafe's R1–R6 with three reports, each with an Excel download.
+They are **live**: every auditor's entries as they stand right now, combined.
+Submitting is not needed for an entry to appear, and an auditor submitting
+does not freeze the reports or hide the others' entries (the cafe keeps its
+submission snapshots):
 
 - *Physical Compile Sheet* — exactly what was entered, **location-wise**: one
   line per material + batch + location (two auditors at the same batch and
@@ -237,12 +240,27 @@ reading what was submitted (every auditor combined):
   stock of all its batches against everything counted across them, so a batch
   nobody counted shows as shortage here. Remarks name new batches and
   materials not counted at all.
+- *All Entries (incl. void)* — every entry every auditor made, one line each,
+  **active and void**, with who counted it and when; void lines carry the
+  reason, who voided and when. Filter by status or auditor. Built for
+  matching against each auditor's phone; void entries are never in any total.
+  The Physical Compile and Stock-count Excel files carry it as an extra sheet
+  ("All Entries").
 
 **Repeated lines in the stock file.** The same Material + Batch on several
 lines (one line per rack or bin) is one batch: the lines are merged and their
 Stock added (10 + 20 + 5 → 35). Importing the same file again sets 35 again —
 it never adds to what is already there. Only the same batch in a different
 unit is refused, since those cannot be added.
+
+**Replace removes what is not in the file.** A *Replace* stock import makes
+the file the whole stock list. Materials and batches not in it are
+**deleted** — unless they were already counted in an audit, in which case they
+are kept in the database but **hidden** (inactive) so that audit's reports
+stay correct; they show only under the Stock page's *Inactive* filter. A
+material that comes back in a later file is shown again. Batches created
+during counting are never removed by an import. Counted items that were
+later removed still appear on every report with their count.
 
 **Searching on the phone** matches the material description (what counters
 type) and the material. Typing a whole material and pressing Enter opens its
