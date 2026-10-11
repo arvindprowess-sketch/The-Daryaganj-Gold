@@ -180,7 +180,18 @@ router.get('/audits/:id/impact', requireIntParams('id'), async (req, res) => {
             (SELECT count(*)::int FROM count_entries WHERE audit_id=a.id) AS entries,
             (SELECT count(*)::int FROM count_entries WHERE audit_id=a.id AND photo_url IS NOT NULL) AS entry_photos,
             (SELECT count(*)::int FROM system_stock WHERE audit_id=a.id) AS system_rows,
-            (SELECT count(*)::int FROM audit_na WHERE audit_id=a.id) AS na_rows
+            (SELECT count(*)::int FROM audit_na WHERE audit_id=a.id) AS na_rows,
+            (SELECT count(*)::int FROM audit_submissions WHERE audit_id=a.id) AS submissions,
+            (SELECT count(*)::int FROM submission_entries se
+               JOIN audit_submissions sub ON sub.id = se.submission_id
+              WHERE sub.audit_id = a.id) AS submitted_rows,
+            -- Batches a counter created during THIS audit that no other audit
+            -- has counted against. They go with the audit; a batch another
+            -- audit used is real history there and stays.
+            (SELECT count(*)::int FROM item_batches b
+              WHERE b.origin = 'counted' AND b.created_in_audit = a.id
+                AND NOT EXISTS (SELECT 1 FROM count_entries ce
+                                 WHERE ce.batch_id = b.id AND ce.audit_id <> a.id)) AS new_batches
        FROM audits a JOIN stores s ON s.id=a.store_id WHERE a.id=$1`,
     [req.params.id]
   );
@@ -200,24 +211,53 @@ router.post('/audits/:id/delete', requireIntParams('id'), async (req, res) => {
     'SELECT photo_url FROM count_entries WHERE audit_id=$1 AND photo_url IS NOT NULL', [id]);
 
   const counts = await withTransaction(async (c) => {
+    // Collected before the audit row goes: created_in_audit is ON DELETE SET
+    // NULL, so afterwards they could no longer be told apart.
+    const { rows: batchRows } = await c.query(
+      `SELECT b.id FROM item_batches b
+        WHERE b.origin = 'counted' AND b.created_in_audit = $1
+          AND NOT EXISTS (SELECT 1 FROM count_entries ce
+                           WHERE ce.batch_id = b.id AND ce.audit_id <> $1)`, [id]);
+    // What was submitted goes too — the snapshot rows first, then the
+    // submissions themselves (they would cascade, but this way it is counted).
+    const submittedRows = (await c.query(
+      `DELETE FROM submission_entries se USING audit_submissions sub
+        WHERE sub.id = se.submission_id AND sub.audit_id = $1`, [id])).rowCount;
+    const submissions = (await c.query('DELETE FROM audit_submissions WHERE audit_id=$1', [id])).rowCount;
     const entries = (await c.query('DELETE FROM count_entries WHERE audit_id=$1', [id])).rowCount;
     const sys = (await c.query('DELETE FROM system_stock WHERE audit_id=$1', [id])).rowCount;
     const na = (await c.query('DELETE FROM audit_na WHERE audit_id=$1', [id])).rowCount;
     await c.query('DELETE FROM system_stock_imports WHERE audit_id=$1', [id]);
     await c.query('DELETE FROM photo_reviews WHERE audit_id=$1', [id]);
     await c.query('DELETE FROM audits WHERE id=$1', [id]);
+    const newBatches = batchRows.length
+      ? (await c.query('DELETE FROM item_batches WHERE id = ANY($1::int[])',
+                       [batchRows.map((b) => b.id)])).rowCount
+      : 0;
     // audit_id is ON DELETE SET NULL, so this log entry survives its audit.
     await logActivity({
       entityType: 'audit', entityId: id, action: 'delete_audit',
       recordCount: entries,
       detail: { store: a[0].store_name, audit_date: a[0].audit_date,
-                entries, system_stock: sys, not_applicable: na },
+                entries, system_stock: sys, not_applicable: na,
+                submissions, submitted_rows: submittedRows, new_batches: newBatches },
       userId: req.user.id,
     }, c);
-    return { entries, sys, na };
+    return { entries, sys, na, submissions, submittedRows, newBatches };
   });
 
-  const photosRemoved = await removePhotos(photoRows.map((p) => p.photo_url));
+  // A photo taken while counting may have become the item's MASTER photo,
+  // or be shared with an entry in another audit. Only files nothing else
+  // still points at are removed from storage.
+  const urls = [...new Set(photoRows.map((p) => p.photo_url))];
+  const { rows: stillUsed } = urls.length ? await query(
+    `SELECT u FROM unnest($1::text[]) AS u
+      WHERE EXISTS (SELECT 1 FROM items WHERE photo_url = u)
+         OR EXISTS (SELECT 1 FROM count_entries WHERE photo_url = u)
+         OR EXISTS (SELECT 1 FROM photo_reviews WHERE proposed_url = u OR current_url = u)`,
+    [urls]) : { rows: [] };
+  const keep = new Set(stillUsed.map((r) => r.u));
+  const photosRemoved = await removePhotos(urls.filter((u) => !keep.has(u)));
   res.json({ ok: true, ...counts, photosRemoved });
 });
 

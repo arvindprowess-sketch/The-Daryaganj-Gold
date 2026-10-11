@@ -18,6 +18,9 @@ export default function AuditSessions() {
   const [overlaps, setOverlaps] = useState({});     // auditId -> overlap count
   const [clearErr, setClearErr] = useState('');
   const [busy, setBusy] = useState(false);
+  const [deleting, setDeleting] = useState(null);   // { audit, imp }
+  const [deleteErr, setDeleteErr] = useState('');
+  const [notice, setNotice] = useState('');
 
   // The per-auditor panel and the overlap warning are per audit, so they are
   // fetched alongside the list rather than folded into it — one extra request
@@ -78,6 +81,26 @@ export default function AuditSessions() {
     try { await api.post(`/audits/${a.id}/submit`); await load(); }
     catch (e) { setErr(e.message); }
   }
+  // Deleting removes the audit and EVERYTHING recorded under it. The impact is
+  // fetched first so the dialog states real numbers, and the server checks the
+  // typed phrase again.
+  async function askDelete(a) {
+    setDeleteErr(''); setNotice('');
+    try {
+      setDeleting({ audit: a, imp: await api.get(`/data/audits/${a.id}/impact`) });
+    } catch (e) { setErr(e.message); }
+  }
+  async function confirmDelete() {
+    setBusy(true); setDeleteErr('');
+    try {
+      const r = await api.post(`/data/audits/${deleting.audit.id}/delete`, { confirm: 'DELETE THIS AUDIT' });
+      setNotice(`Audit deleted — ${r.entries} entries, ${r.submissions} submission(s), `
+        + `${r.sys} system stock rows${r.newBatches ? `, ${r.newBatches} new batch(es)` : ''} removed.`);
+      setDeleting(null);
+      await load();
+    } catch (e) { setDeleteErr(e.message); } finally { setBusy(false); }
+  }
+
   async function close(a) {
     if (!confirm(`Close audit for ${a.store_name}? Auditors can no longer add entries.`)) return;
     await api.post(`/audits/${a.id}/close`); load();
@@ -99,6 +122,13 @@ export default function AuditSessions() {
         <button className="btn-primary" onClick={create}>Create audit</button>
         {err && <p className="text-red-600 text-sm w-full">{err}</p>}
       </div>
+
+      {notice && (
+        <div className="mb-3 rounded-xl border border-green-300 bg-green-50 px-4 py-2 text-sm text-green-800 flex justify-between gap-3">
+          <span>{notice}</span>
+          <button className="underline shrink-0" onClick={() => setNotice('')}>Dismiss</button>
+        </div>
+      )}
 
       <div className="card overflow-x-auto">
         <table className="w-full text-sm">
@@ -149,6 +179,7 @@ export default function AuditSessions() {
                       </button>
                     )}
                     {a.status !== 'closed' && <button className="text-red-600 font-medium" onClick={() => close(a)}>Close</button>}
+                    <button className="text-red-700 font-semibold" onClick={() => askDelete(a)}>Delete</button>
                   </div>
                 </td>
               </tr>
@@ -237,6 +268,29 @@ export default function AuditSessions() {
         error={clearErr}
         onCancel={() => setClearing(null)}
         onConfirm={doClear}
+      />
+      <DangerConfirm
+        open={!!deleting} phrase="DELETE THIS AUDIT"
+        title={`Delete the ${deleting?.audit?.store_name} audit of ${deleting ? fmtDate(deleting.audit.audit_date) : ''}?`}
+        impact={deleting && (
+          <>
+            This permanently deletes the audit session and everything recorded under it:
+            <ul className="list-disc ml-5 mt-1">
+              <li><strong>{deleting.imp.entries}</strong> count entries
+                {deleting.imp.entry_photos > 0 && <> ({deleting.imp.entry_photos} with photos)</>}</li>
+              <li><strong>{deleting.imp.submissions}</strong> submission(s) ({deleting.imp.submitted_rows} submitted rows)</li>
+              <li><strong>{deleting.imp.system_rows}</strong> system stock rows</li>
+              {deleting.imp.na_rows > 0 && <li><strong>{deleting.imp.na_rows}</strong> Not Applicable marks</li>}
+              {deleting.imp.new_batches > 0 && (
+                <li><strong>{deleting.imp.new_batches}</strong> batch(es) created during this audit's counting</li>
+              )}
+            </ul>
+          </>
+        )}
+        warning="This cannot be undone. The item master, the stock list and other audits are not affected. The activity log keeps a record that the audit was deleted and by whom."
+        confirmLabel="Delete audit and all its data" busy={busy} error={deleteErr}
+        onCancel={() => setDeleting(null)}
+        onConfirm={confirmDelete}
       />
     </div>
   );
