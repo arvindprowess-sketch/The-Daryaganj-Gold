@@ -47,7 +47,11 @@ export async function assertStoreAccess(user, storeId) {
 
 // Loads an audit and verifies the user may access its store.
 export async function loadAuditForUser(user, auditId) {
-  const { rows } = await query('SELECT * FROM audits WHERE id = $1', [auditId]);
+  // The store's inventory mode travels with the audit: it decides whether the
+  // audit is counted cafe-style or batch by batch.
+  const { rows } = await query(
+    `SELECT a.*, s.inventory_mode FROM audits a JOIN stores s ON s.id = a.store_id
+      WHERE a.id = $1`, [auditId]);
   const audit = rows[0];
   if (!audit) return { audit: null, allowed: false };
   const allowed = await assertStoreAccess(user, audit.store_id);

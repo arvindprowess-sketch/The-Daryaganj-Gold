@@ -1,4 +1,4 @@
-import { Routes, Route, Navigate, useLocation } from 'react-router-dom';
+import { Routes, Route, Navigate, useLocation, useParams } from 'react-router-dom';
 import { useAuth } from './lib/auth.jsx';
 import { Spinner } from './components/ui.jsx';
 import PendingBanner from './components/PendingBanner.jsx';
@@ -28,7 +28,7 @@ import DataManagement from './pages/admin/DataManagement.jsx';
 import Readiness from './pages/admin/Readiness.jsx';
 import PhotoReview from './pages/admin/PhotoReview.jsx';
 import Stock from './pages/admin/Stock.jsx';
-import { useInventoryMode } from './lib/mode.js';
+import { useAuditMode } from './lib/mode.js';
 
 function RequireRole({ role, children }) {
   const { user, loading } = useAuth();
@@ -53,10 +53,11 @@ function Home() {
   return <Navigate to={user.role === 'admin' ? '/admin' : '/a'} replace />;
 }
 
-// The audit's home screen. The cafe counts by super category; the warehouse
-// searches articles and counts batch by batch.
+// The audit's home screen, picked from the audit's STORE: a cafe counts by
+// super category, a warehouse searches articles and counts batch by batch.
 function AuditHome() {
-  const mode = useInventoryMode();
+  const { auditId } = useParams();
+  const mode = useAuditMode(auditId);
   if (!mode) return <Spinner />;
   return mode === 'warehouse' ? <StockCount /> : <SuperCategoryList />;
 }

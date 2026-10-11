@@ -133,13 +133,16 @@ The zero half is dropped rather than printed, so the badge stays on one line
 next to the item name on a 380px phone. Mobile item list and desktop count
 entry use the same helper.
 
-## Warehouse mode — batch-wise stock
+## Warehouse stores — batch-wise stock
 
-The same app runs a batch-managed warehouse. Set `INVENTORY_MODE=warehouse` on
-that deployment's server; the cafe leaves it unset (default `cafe`) and
-nothing about it changes.
+One installation serves cafes and warehouses side by side. Each **store** is
+marked *Cafe* or *Warehouse* by the admin (Stores & Users → Type; existing
+stores are Cafe). Nobody chooses a mode at login: an audit opens in its store's
+layout automatically, and the admin menu shows **Item Master** while there is a
+cafe store and **Stock** while there is a warehouse store (both when there are
+both). There is no server setting for this.
 
-| | Cafe (default) | Warehouse |
+| | Cafe store (default) | Warehouse store |
 | --- | --- | --- |
 | Admin menu | Item Master | **Stock** — Article · Description · Batches · Quantity |
 | Auditor home | Super category cards → item list | Search article (name **or** description) → batches |
@@ -180,7 +183,7 @@ and in which audit, and shows as **NEW** on the phone, on Stock (filter *New
 batches from counting*), on the count screen and in the batch report. A
 *Replace* stock import never deactivates it.
 
-**Excel.** In warehouse mode the R4 workbook (Reports → Excel) gains two sheets,
+**Excel.** For a warehouse store the R4 workbook (Reports → Excel) gains two sheets,
 and Stock → *Download Excel* produces the same two on their own:
 *Batch Summary* (one line per batch: article, description, batch, origin,
 unit, system / physical qty, difference, locations, status) and *Batch Entries*
@@ -209,8 +212,8 @@ retired batches that were counted, and entries with no batch are all rows.
   reports success or failure. On failure the entries stay on the server and the
   user can simply submit again.
 
-**Blind count.** `stock_qty` reaches an auditor **only** in warehouse mode; in
-cafe mode the server drops it from the batch endpoint. Batches that have been
+**Blind count.** `stock_qty` reaches an auditor **only** on a warehouse store's
+audit; for a cafe store the server drops it from the batch endpoint. Batches that have been
 counted are deactivated, never deleted. Schema: migration
 `013_batches.sql` (`items.description`, `item_batches`, `batch_id` on
 `count_entries` / `submission_entries`) and `014_counted_batches_and_idempotency.sql`

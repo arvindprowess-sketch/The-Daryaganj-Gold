@@ -46,7 +46,7 @@ router.get('/', async (req, res) => {
   //   submitted  a snapshot exists and the reports are reading it
   //   cleared    the admin cleared it; the auditor's count is still there
   const { rows } = await query(
-    `SELECT a.*, s.name AS store_name, s.code AS store_code,
+    `SELECT a.*, s.name AS store_name, s.code AS store_code, s.inventory_mode,
             sub.status AS submission_status, sub.submitted_at AS submission_at,
             sub.item_count AS submission_items, sub.entry_count AS submission_entries,
             sub.cleared_at, cu.name AS cleared_by_name, su.name AS submitted_by_name,

@@ -5,7 +5,6 @@ import { logActivity } from '../lib/activityLog.js';
 import { resolveLocation } from '../lib/locations.js';
 import { requireAuth, loadAuditForUser } from '../middleware/auth.js';
 import { forRole } from '../lib/blindCount.js';
-import { config } from '../config.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -106,7 +105,7 @@ router.get('/audits/:auditId/items/:itemId/entries', async (req, res) => {
 //
 // `stock_qty` is the batch's book quantity. The warehouse counter is meant to
 // see it, so they can compare system and physical stock while counting. The
-// cafe runs a BLIND count, so outside warehouse mode it never reaches an
+// cafe runs a BLIND count, so for a cafe store's audit it never reaches an
 // auditor: it is dropped here, not hidden in the client.
 router.get('/audits/:auditId/items/:itemId/batches', async (req, res) => {
   const { audit, allowed } = await loadAuditForUser(req.user, req.params.auditId);
@@ -139,7 +138,7 @@ router.get('/audits/:auditId/items/:itemId/batches', async (req, res) => {
     [req.params.auditId, req.params.itemId,
      req.user.role === 'admin' ? null : req.user.id]
   );
-  const showStock = req.user.role === 'admin' || config.inventoryMode === 'warehouse';
+  const showStock = req.user.role === 'admin' || audit.inventory_mode === 'warehouse';
   const out = rows.map((r) => {
     const counted = r.entry_count > 0;
     const row = { ...r, counted };
@@ -213,11 +212,11 @@ router.post('/audits/:auditId/entries', async (req, res) => {
     }
     batchId = batch.id;
   } else if (newBatchNo) {
-    if (config.inventoryMode !== 'warehouse') {
-      return res.status(400).json({ error: 'Batches are not used in this deployment' });
+    if (audit.inventory_mode !== 'warehouse') {
+      return res.status(400).json({ error: 'This store is not counted by batch' });
     }
     if (newBatchNo.length > 64) return res.status(400).json({ error: 'Batch number is too long (64 characters at most)' });
-  } else if (config.inventoryMode === 'warehouse') {
+  } else if (audit.inventory_mode === 'warehouse') {
     const { rows: has } = await query(
       'SELECT 1 FROM item_batches WHERE item_id = $1 AND is_active LIMIT 1', [item.id]
     );

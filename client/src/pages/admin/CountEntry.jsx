@@ -4,7 +4,6 @@ import { api, bustCache } from '../../lib/api.js';
 import { Spinner, PhotoThumb, VoidMark } from '../../components/ui.jsx';
 import ItemEntry from '../../components/ItemEntry.jsx';
 import BatchSheet from '../../components/BatchSheet.jsx';
-import { useInventoryMode } from '../../lib/mode.js';
 import { useToast } from '../../components/Toast.jsx';
 import useDebounced, { normalizeName } from '../../lib/useDebounced.js';
 import { liquorBadge } from '../../lib/liquor.js';
@@ -42,7 +41,7 @@ export default function CountEntry() {
   const toast = useToast();
   // Warehouse: an article with batches is counted against a batch, through the
   // same batch sheet the phone uses, never as an article-level figure.
-  const warehouse = useInventoryMode() === 'warehouse';
+  const warehouse = audit?.inventory_mode === 'warehouse';
   const byBatch = (i) => warehouse && i.batch_count > 0;
 
   const load = useCallback(async () => {

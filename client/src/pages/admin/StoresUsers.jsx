@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback } from 'react';
+import { storesChanged } from '../../lib/mode.js';
 import { api } from '../../lib/api.js';
 import { Spinner } from '../../components/ui.jsx';
 import ConfirmDialog from '../../components/ConfirmDialog.jsx';
@@ -47,7 +48,7 @@ const InactiveBadge = () => (
 
 function Stores() {
   const [stores, setStores] = useState(null);
-  const [f, setF] = useState({ code: '', name: '', address: '' });
+  const [f, setF] = useState({ code: '', name: '', address: '', inventory_mode: 'cafe' });
   const [err, setErr] = useState('');
   const [active, setActive] = useState('active');
   const [confirmDel, setConfirmDel] = useState(null); // { store, impact }
@@ -59,7 +60,18 @@ function Stores() {
 
   async function add() {
     setErr('');
-    try { await api.post('/stores', f); setF({ code: '', name: '', address: '' }); load(); }
+    try { await api.post('/stores', f); setF({ code: '', name: '', address: '', inventory_mode: 'cafe' }); load(); storesChanged(); }
+    catch (e) { setErr(e.message); }
+  }
+  // A store's type decides how it is counted: a cafe by super category with a
+  // blind count, a warehouse batch by batch with each batch's book quantity.
+  // The app follows it automatically — nobody picks a mode at login.
+  async function setMode(s, mode) {
+    if (mode === s.inventory_mode) return;
+    if (s.audit_count > 0 && !window.confirm(
+      `Change "${s.name}" to ${mode === 'warehouse' ? 'Warehouse' : 'Cafe'}? `
+      + 'Its audits will open in that layout from now on. Entries already recorded are not changed.')) return;
+    try { await api.put(`/stores/${s.id}`, { inventory_mode: mode }); load(); storesChanged(); }
     catch (e) { setErr(e.message); }
   }
   async function toggle(s) { await api.put(`/stores/${s.id}`, { is_active: !s.is_active }); load(); }
@@ -100,6 +112,14 @@ function Stores() {
           <input className="field" placeholder="Code (e.g. AERO)" value={f.code} onChange={(e) => setF({ ...f, code: e.target.value })} />
           <input className="field" placeholder="Name" value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} />
           <input className="field" placeholder="Address" value={f.address} onChange={(e) => setF({ ...f, address: e.target.value })} />
+          <label className="block">
+            <span className="text-sm font-medium text-slate-600">Type</span>
+            <select className="field mt-1" value={f.inventory_mode}
+                    onChange={(e) => setF({ ...f, inventory_mode: e.target.value })}>
+              <option value="cafe">Cafe — item master, super categories, blind count</option>
+              <option value="warehouse">Warehouse — stock by batch, system qty shown</option>
+            </select>
+          </label>
           {err && <p className="text-red-600 text-sm">{err}</p>}
           <button className="btn-primary w-full" onClick={add}>Add</button>
         </div>
@@ -113,7 +133,8 @@ function Stores() {
           <table className="w-full text-sm">
             <thead className="bg-slate-50 text-left text-slate-500"><tr>
               <th className="px-4 py-3">Code</th><th className="px-4 py-3">Name</th>
-              <th className="px-4 py-3">Address</th><th className="px-4 py-3">Audits</th>
+              <th className="px-4 py-3">Address</th><th className="px-4 py-3">Type</th>
+              <th className="px-4 py-3">Audits</th>
               <th className="px-4 py-3">Active</th><th className="px-4 py-3"></th></tr></thead>
             <tbody className="divide-y">
               {stores.map((s) => (
@@ -123,6 +144,13 @@ function Stores() {
                     {s.name}{!s.is_active && <InactiveBadge />}
                   </td>
                   <td className="px-4 py-2 text-slate-500">{s.address}</td>
+                  <td className="px-4 py-2">
+                    <select className="field py-1 px-2 w-32" value={s.inventory_mode || 'cafe'}
+                            onChange={(e) => setMode(s, e.target.value)}>
+                      <option value="cafe">Cafe</option>
+                      <option value="warehouse">Warehouse</option>
+                    </select>
+                  </td>
                   <td className="px-4 py-2 text-slate-500">{s.audit_count ?? 0}</td>
                   <td className="px-4 py-2"><button className="text-brand" onClick={() => toggle(s)}>{s.is_active ? 'Active' : 'Inactive'}</button></td>
                   <td className="px-4 py-2 text-right whitespace-nowrap">
@@ -133,7 +161,7 @@ function Stores() {
                 </tr>
               ))}
               {stores.length === 0 && (
-                <tr><td colSpan={6} className="p-6 text-center text-slate-400">No stores.</td></tr>
+                <tr><td colSpan={7} className="p-6 text-center text-slate-400">No stores.</td></tr>
               )}
             </tbody>
           </table>

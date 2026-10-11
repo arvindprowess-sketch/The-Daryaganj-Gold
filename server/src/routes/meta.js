@@ -4,7 +4,6 @@ import { requireAuth, requireRole } from '../middleware/auth.js';
 import { requireIntParams } from '../lib/asyncRoutes.js';
 import { logActivity } from '../lib/activityLog.js';
 import { allLocations, activeLocations } from '../lib/locations.js';
-import { config } from '../config.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -18,11 +17,16 @@ router.use(requireAuth);
 // They carry no rate/value/system data, so they are safe under blind count.
 // ═══════════════════════════════════════════════════════════════════════════
 
-// Which flavour of the app this deployment runs. Both sides read it once: the
-// admin console to show Stock instead of Item Master, the phone to count by
-// batch. Set by INVENTORY_MODE on the server, never chosen in the browser.
-router.get('/app', (_req, res) => {
-  res.json({ inventory_mode: config.inventoryMode });
+// Which kinds of store exist. The admin console shows Item Master while there
+// is a cafe store and Stock while there is a warehouse one — both when there
+// are both. Nothing here is chosen by the user: it follows the stores.
+router.get('/app', async (_req, res) => {
+  const { rows } = await query(
+    `SELECT bool_or(inventory_mode = 'cafe') AS has_cafe,
+            bool_or(inventory_mode = 'warehouse') AS has_warehouse
+       FROM stores WHERE is_active`
+  );
+  res.json({ has_cafe: !!rows[0]?.has_cafe, has_warehouse: !!rows[0]?.has_warehouse });
 });
 
 router.get('/super-categories', async (_req, res) => {
