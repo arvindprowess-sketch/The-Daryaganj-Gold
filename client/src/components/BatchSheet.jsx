@@ -18,7 +18,7 @@ export default function BatchSheet({ auditId, item, onClose, onSaved, uploadOnly
   const [batches, setBatches] = useState(null);
   const [error, setError] = useState('');
   const [active, setActive] = useState(null);   // a batch, or 'article' when it has none
-  const [creating, setCreating] = useState(null); // { batch_no, unit } while the form is open
+  const [creating, setCreating] = useState(null); // { batch_no } while the form is open
   const [createError, setCreateError] = useState('');
 
   const load = useCallback(() => {
@@ -46,7 +46,7 @@ export default function BatchSheet({ auditId, item, onClose, onSaved, uploadOnly
     // second copy of it.
     const existing = (batches || []).find((b) => !b.no_batch && b.batch_no.trim().toLowerCase() === batchNo.toLowerCase());
     if (existing) { setCreating(null); setActive(existing); return; }
-    const unit = String(creating.unit || '').trim() || item.unit;
+    const unit = item.unit;
     setCreating(null);
     setActive({ id: null, isNew: true, batch_no: batchNo, unit, stock_qty: null, expiry_date: null });
   }
@@ -166,13 +166,8 @@ export default function BatchSheet({ auditId, item, onClose, onSaved, uploadOnly
                    onChange={(e) => setCreating({ ...creating, batch_no: e.target.value })}
                    onKeyDown={(e) => e.key === 'Enter' && startNewBatch()} />
           </label>
-          <label className="block">
-            <span className="text-sm font-medium text-slate-600">Unit</span>
-            <input className="field mt-1" placeholder={item.unit || 'Unit'}
-                   value={creating.unit}
-                   onChange={(e) => setCreating({ ...creating, unit: e.target.value })} />
-            <span className="text-xs text-slate-500">Leave blank to use the article's unit ({item.unit || '—'}).</span>
-          </label>
+          {/* No unit box: a new batch is the same material, in its unit. */}
+          <div className="text-xs text-slate-500">Unit: {item.unit || 'same as the material'}</div>
           {createError && <p className="text-sm text-red-600">{createError}</p>}
           <div className="flex gap-2">
             <button className="btn-ghost flex-1" onClick={() => { setCreating(null); setCreateError(''); }}>Cancel</button>
@@ -180,7 +175,7 @@ export default function BatchSheet({ auditId, item, onClose, onSaved, uploadOnly
           </div>
         </div>
       ) : (
-        <button className="btn-primary w-full mt-4" onClick={() => setCreating({ batch_no: '', unit: '' })}>
+        <button className="btn-primary w-full mt-4" onClick={() => setCreating({ batch_no: '' })}>
           + Create new batch
         </button>
       ))}
