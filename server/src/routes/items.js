@@ -104,7 +104,14 @@ router.post('/', requireRole('admin'), async (req, res) => {
     );
     res.status(201).json(rows[0]);
   } catch (err) {
-    if (err.code === '23505') return res.status(409).json({ error: 'An item with this name already exists' });
+    if (err.code === '23505') {
+      return res.status(409).json({
+        code: 'name_exists',
+        error: b.inventory_mode === 'warehouse'
+          ? `"${name}" is already on the Stock list — add the batch to that article with "+ Batch".`
+          : 'An item with this name already exists',
+      });
+    }
     throw err;
   }
 });
@@ -170,13 +177,10 @@ async function analyseCsv(records) {
   const catBySuperAndName = new Map(
     cats.map((c) => [`${c.super_category_id}|${nameKey(c.name)}`, c.id])
   );
-  const { rows: existing } = await query('SELECT id, name, inventory_mode FROM items');
-  // Only the cafe side is this master's. A name already used by a warehouse
-  // article is refused rather than silently updating that article.
-  const existingByName = new Map(existing.filter((e) => e.inventory_mode === 'cafe')
-    .map((e) => [nameKey(e.name), e.id]));
-  const warehouseNames = new Set(existing.filter((e) => e.inventory_mode === 'warehouse')
-    .map((e) => nameKey(e.name)));
+  // Only the cafe side is this master's. A warehouse article of the same name
+  // is a different item and is never matched or touched from here.
+  const { rows: existing } = await query("SELECT id, name FROM items WHERE inventory_mode = 'cafe'");
+  const existingByName = new Map(existing.map((e) => [nameKey(e.name), e.id]));
 
   // Track hierarchy levels the file introduces so the preview can report them
   // as "new — will be created" rather than failing the import.
@@ -191,7 +195,6 @@ async function analyseCsv(records) {
     if (!name) errors.push('item_name is required');
     const key = nameKey(name);
     if (name && seen.has(key)) errors.push('duplicate item_name within file');
-    if (name && warehouseNames.has(key)) errors.push('this name is a warehouse article on the Stock list');
     seen.add(key);
 
     const superName = (r.super_category || '').trim();
@@ -456,7 +459,7 @@ router.post('/import/commit', requireRole('admin'), upload.single('file'), async
           `INSERT INTO items (name, category_id, super_category_id, unit, is_liquor,
                               bottle_size_ml, rate, bottle_unit_size)
            VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-           ON CONFLICT (lower(name)) DO NOTHING`,
+           ON CONFLICT (inventory_mode, lower(name)) DO NOTHING`,
           [d.name, catId, superId, d.unit, d.is_liquor, d.bottle_size_ml, d.rate,
            d.bottle_unit_size]
         );
@@ -495,7 +498,8 @@ router.post('/photos/bulk', requireRole('admin'), photoUpload.array('photos', 20
   const unmatched = [];
   for (const f of files) {
     const base = f.originalname.replace(/\.[^.]+$/, '');
-    const { rows } = await query('SELECT id, name FROM items WHERE lower(name) = $1', [nameKey(base)]);
+    const { rows } = await query(
+      "SELECT id, name FROM items WHERE lower(name) = $1 AND inventory_mode = 'cafe'", [nameKey(base)]);
     if (!rows[0]) { unmatched.push(f.originalname); continue; }
     try {
       const buf = await sharp(f.buffer).rotate()

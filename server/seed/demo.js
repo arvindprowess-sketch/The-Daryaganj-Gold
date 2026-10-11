@@ -68,7 +68,7 @@ async function seed() {
       const { rows } = await c.query(
         `INSERT INTO items (name, super_category_id, category_id, unit, is_liquor, bottle_size_ml, rate, is_demo)
          VALUES ($1,$2,$3,$4,$5,$6,$7,TRUE)
-         ON CONFLICT (lower(name)) DO NOTHING
+         ON CONFLICT (inventory_mode, lower(name)) DO NOTHING
          RETURNING id`,
         [it.item_name, superId, catId, it.unit, it.is_liquor, it.bottle_size_ml, it.rate]
       );

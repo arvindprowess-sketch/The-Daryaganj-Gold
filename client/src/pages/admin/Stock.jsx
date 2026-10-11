@@ -47,6 +47,13 @@ export default function Stock() {
   const debounced = useDebounced(search, 300);
   const [active, setActive] = useState('active');
   const [onlyNew, setOnlyNew] = useState(false);
+  // Article-wise (one row per article, batches folded under it) or
+  // batch-wise (one row per batch, the article repeated on each) — the second
+  // reads like the stock sheet itself.
+  const [view, setView] = useState(() => {
+    try { return localStorage.getItem('audix_stock_view') || 'batch'; } catch { return 'batch'; }
+  });
+  const chooseView = (v) => { setView(v); try { localStorage.setItem('audix_stock_view', v); } catch { /* */ } };
   const [expanded, setExpanded] = useState({});
   const [articleForm, setArticleForm] = useState(null);   // {id?, name, description, unit}
   const [batchForm, setBatchForm] = useState(null);       // {itemId, id?, ...}
@@ -80,12 +87,28 @@ export default function Stock() {
                         super_category_id: f.super_category_id || null,
                         category_id: f.category_id || null,
                         inventory_mode: 'warehouse' };
-      if (f.id) await api.put(`/items/${f.id}`, payload);
-      else await api.post('/items', payload);
-      toast(f.id ? 'Article updated' : 'Article added');
+      if (f.id) {
+        await api.put(`/items/${f.id}`, payload);
+        toast('Article updated');
+      } else {
+        const created = await api.post('/items', payload);
+        // The first batch can be entered with the article, so a new article
+        // is never left without the batch it was added for.
+        if (String(f.batch_no || '').trim()) {
+          await api.post(`/stock/${created.id}/batches`,
+            { batch_no: f.batch_no, qty: f.qty, expiry_date: f.expiry_date, unit: '' });
+          toast(`Article added with batch ${f.batch_no.trim()}`);
+        } else {
+          toast('Article added');
+        }
+      }
       setArticleForm(null);
       await load();
-    } catch (e) { toast(e.message, 'error'); } finally { setBusy(false); }
+    } catch (e) {
+      // The article is already there: show it, so the batch goes onto it.
+      if (e.code === 'name_exists') { setSearch(f.name.trim()); setArticleForm(null); }
+      toast(e.message, 'error', 5000);
+    } finally { setBusy(false); }
   }
 
   // A super category or category that does not exist yet is created here, so
@@ -232,6 +255,28 @@ export default function Stock() {
                 .map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
             </select>
           </label>
+          {!articleForm.id && (
+            <div className="md:col-span-4 grid gap-3 md:grid-cols-4 rounded-xl bg-teal-50/60 border border-teal-200 p-3">
+              <div className="md:col-span-4 text-sm font-semibold text-teal-800">
+                First batch <span className="font-normal text-slate-500">(optional — more batches with "+ Batch" on the article's row)</span>
+              </div>
+              <label className="block">
+                <span className="text-sm font-medium text-slate-600">Batch no</span>
+                <input className="field mt-1" value={articleForm.batch_no || ''}
+                       onChange={(e) => setArticleForm({ ...articleForm, batch_no: e.target.value })} />
+              </label>
+              <label className="block">
+                <span className="text-sm font-medium text-slate-600">Quantity</span>
+                <input className="field mt-1" inputMode="decimal" value={articleForm.qty || ''}
+                       onChange={(e) => setArticleForm({ ...articleForm, qty: e.target.value.replace(/[^0-9.]/g, '') })} />
+              </label>
+              <label className="block">
+                <span className="text-sm font-medium text-slate-600">Expiry</span>
+                <input className="field mt-1" type="date" value={articleForm.expiry_date || ''}
+                       onChange={(e) => setArticleForm({ ...articleForm, expiry_date: e.target.value })} />
+              </label>
+            </div>
+          )}
           <div className="md:col-span-4 flex gap-2">
             <button className="btn-primary" disabled={busy} onClick={saveArticle}>
               {articleForm.id ? 'Save article' : 'Add article'}
@@ -259,8 +304,15 @@ export default function Stock() {
         ))}
         <button className={superFilter === 'none' ? 'chip-on' : 'chip-off'} onClick={() => setSuperFilter('none')}>Uncategorised</button>
       </div>
+      <div className="flex items-center gap-2 mb-3 text-sm">
+        <span className="text-slate-500">View:</span>
+        <button className={view === 'batch' ? 'chip-on' : 'chip-off'} onClick={() => chooseView('batch')}>One row per batch</button>
+        <button className={view === 'article' ? 'chip-on' : 'chip-off'} onClick={() => chooseView('article')}>One row per article</button>
+      </div>
 
-      <div className="card overflow-x-auto mb-8">
+      {view === 'batch' && <BatchRows articles={articles} />}
+
+      <div className={`card overflow-x-auto mb-8 ${view === 'batch' ? 'hidden' : ''}`}>
         <table className="w-full text-sm">
           <thead className="bg-slate-50 text-left text-slate-500">
             <tr>
@@ -373,6 +425,59 @@ export default function Stock() {
       </div>
 
       <BatchCount />
+    </div>
+  );
+}
+
+// ── Batch-wise view ─────────────────────────────────────────────────────────
+// Every batch on its own line, the article (and its category and description)
+// repeated on each — the same shape as the stock sheet that was imported. An
+// article with no batch yet still gets a line, so nothing looks missing.
+function BatchRows({ articles }) {
+  const rows = articles.flatMap((a) => (a.batches.length
+    ? a.batches.map((b) => ({ a, b }))
+    : [{ a, b: null }]));
+  const total = rows.filter((r) => r.b).length;
+  return (
+    <div className="card overflow-x-auto mb-8">
+      <div className="px-3 py-2 text-xs text-slate-500 border-b">
+        {total} batch line(s) across {articles.length} article(s)
+      </div>
+      <table className="w-full text-sm">
+        <thead className="bg-slate-50 text-left text-slate-500">
+          <tr>
+            <th className="px-3 py-3">Category</th><th className="px-3 py-3">Article</th>
+            <th className="px-3 py-3">Description</th><th className="px-3 py-3">Batch</th>
+            <th className="px-3 py-3">Unit</th><th className="px-3 py-3 text-right">Quantity</th>
+            <th className="px-3 py-3">Expiry</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y">
+          {rows.map(({ a, b }) => (
+            <tr key={b ? `b${b.id}` : `a${a.id}`} className={!b || b.is_active ? '' : 'text-slate-400'}>
+              <td className="px-3 py-2 whitespace-nowrap text-slate-600">
+                {a.super_category_name || <span className="text-amber-600 text-xs">Uncategorised</span>}
+                {a.category_name && <span className="text-xs text-slate-400"> › {a.category_name}</span>}
+              </td>
+              <td className="px-3 py-2 font-medium">{a.name}</td>
+              <td className="px-3 py-2 text-slate-600">{a.description || '—'}</td>
+              <td className="px-3 py-2">
+                {b ? b.batch_no : <span className="text-slate-400 text-xs">no batch yet</span>}
+                {b?.origin === 'counted' && (
+                  <span className="ml-1.5 rounded bg-teal-100 px-1 py-0.5 text-[10px] font-semibold text-teal-800">NEW</span>
+                )}
+                {b && !b.is_active && <span className="text-xs"> · inactive</span>}
+              </td>
+              <td className="px-3 py-2 text-slate-500">{b ? b.unit : a.unit}</td>
+              <td className="px-3 py-2 text-right tabular-nums">{b && b.qty != null ? fmtQty(b.qty) : '—'}</td>
+              <td className="px-3 py-2">{b?.expiry_date || '—'}</td>
+            </tr>
+          ))}
+          {rows.length === 0 && (
+            <tr><td colSpan={7} className="p-8 text-center text-slate-400">No articles match.</td></tr>
+          )}
+        </tbody>
+      </table>
     </div>
   );
 }

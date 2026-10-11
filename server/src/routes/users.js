@@ -80,6 +80,23 @@ router.post('/', async (req, res) => {
 
 router.put('/:id', requireIntParams('id'), async (req, res) => {
   const { name, role, password, is_active, store_ids } = req.body || {};
+  // Demoting yourself would lock you out of the admin console mid-edit.
+  if (role && role !== 'admin' && String(req.params.id) === String(req.user.id)) {
+    return res.status(400).json({ error: 'You cannot change your own role' });
+  }
+  if (role && !['admin', 'auditor'].includes(role)) {
+    return res.status(400).json({ error: 'role must be admin or auditor' });
+  }
+  if (Array.isArray(store_ids) && store_ids.some((sid) => !/^\d+$/.test(String(sid)))) {
+    return res.status(400).json({ error: 'Invalid store' });
+  }
+  if (Array.isArray(store_ids) && store_ids.length) {
+    const { rows: found } = await query('SELECT count(*)::int AS n FROM stores WHERE id = ANY($1::int[])',
+      [store_ids.map(Number)]);
+    if (found[0].n !== new Set(store_ids.map(Number)).size) {
+      return res.status(400).json({ error: 'One of the chosen stores does not exist' });
+    }
+  }
   const passwordHash = password ? await hashPassword(password) : null;
   const updated = await withTransaction(async (c) => {
     const { rows } = await c.query(
