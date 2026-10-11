@@ -142,10 +142,18 @@ layout automatically, and the admin menu shows **Item Master** while there is a
 cafe store and **Stock** while there is a warehouse store (both when there are
 both). There is no server setting for this.
 
+**Two lists, one set of categories.** Cafe items (Item Master) and warehouse
+articles (Stock) are separate: `items.inventory_mode` is `cafe` or `warehouse`,
+an audit shows only its store's side, and the Item Master import or *delete
+all* never touches the Stock list (nor the other way round). Super categories
+and categories are one shared, admin-managed list; a card appears on the phone
+only where that side has items, plus an **UNCATEGORISED** card for articles
+with none. A name is still unique across both lists.
+
 | | Cafe store (default) | Warehouse store |
 | --- | --- | --- |
 | Admin menu | Item Master | **Stock** — Article · Description · Batches · Quantity |
-| Auditor home | Super category cards → item list | Search article (name **or** description) → batches |
+| Auditor home | Super category cards → item list | Super category cards → articles (search by name **or** description) → batches |
 | Entry recorded against | Item | **Batch** (required when the article has batches) |
 | Book quantity on the phone | Never (blind count) | Shown per batch, before counting |
 
@@ -160,7 +168,8 @@ and every report show the batch's unit; KG/LTR batches get the two-box entry.
 The Stock list totals quantity **per unit** — different units are never added.
 
 **Stock CSV** (Stock → Import): one row per batch,
-`article, description, batch, unit, quantity, expiry`. *Add & update* creates
+`super_category, category, article, description, batch, unit, quantity, expiry`
+(a super category or category not yet in the system is created). *Add & update* creates
 and updates; *Replace* additionally deactivates every live batch not in the
 file. Any invalid row stops the whole import and is named. A blank quantity is
 "no figure", never zero.

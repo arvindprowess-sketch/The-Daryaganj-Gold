@@ -53,13 +53,15 @@ function Home() {
   return <Navigate to={user.role === 'admin' ? '/admin' : '/a'} replace />;
 }
 
-// The audit's home screen, picked from the audit's STORE: a cafe counts by
-// super category, a warehouse searches articles and counts batch by batch.
-function AuditHome() {
+// Both cafe and warehouse audits open on the super category cards (the server
+// lists only the categories this store's side has items in). Tapping a card
+// opens that category's list — cafe items, or warehouse articles with their
+// batches — picked from the audit's STORE.
+function CategoryItems() {
   const { auditId } = useParams();
   const mode = useAuditMode(auditId);
   if (!mode) return <Spinner />;
-  return mode === 'warehouse' ? <StockCount /> : <SuperCategoryList />;
+  return mode === 'warehouse' ? <StockCount /> : <ItemList />;
 }
 
 export default function App() {
@@ -72,8 +74,8 @@ export default function App() {
         {/* ── Auditor (mobile-first) ── */}
         <Route path="/a" element={<RequireRole role="auditor"><StoreSelect /></RequireRole>} />
         <Route path="/a/store/:storeId" element={<RequireRole role="auditor"><AuditSession /></RequireRole>} />
-        <Route path="/a/audit/:auditId" element={<RequireRole role="auditor"><AuditHome /></RequireRole>} />
-        <Route path="/a/audit/:auditId/super-category/:superCategoryId" element={<RequireRole role="auditor"><ItemList /></RequireRole>} />
+        <Route path="/a/audit/:auditId" element={<RequireRole role="auditor"><SuperCategoryList /></RequireRole>} />
+        <Route path="/a/audit/:auditId/super-category/:superCategoryId" element={<RequireRole role="auditor"><CategoryItems /></RequireRole>} />
         <Route path="/a/audit/:auditId/submit" element={<RequireRole role="auditor"><Submit /></RequireRole>} />
 
         {/* ── Admin (desktop) ── */}

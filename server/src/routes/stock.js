@@ -74,13 +74,19 @@ const BATCH_COLUMNS = `b.id, b.item_id, b.batch_no, b.unit AS own_unit,
 router.get('/', async (req, res) => {
   const { search } = req.query;
   const active = ['inactive', 'all'].includes(req.query.active) ? req.query.active : 'active';
-  const conds = [];
+  // Stock is the warehouse side. Cafe items live on the Item Master.
+  const conds = ["i.inventory_mode = 'warehouse'"];
   const params = [];
   if (active === 'active') conds.push('i.is_active');
   else if (active === 'inactive') conds.push('NOT i.is_active');
   // Only articles that have a batch created by a counter.
   if (req.query.origin === 'counted') {
     conds.push(`EXISTS (SELECT 1 FROM item_batches nb WHERE nb.item_id = i.id AND nb.origin = 'counted')`);
+  }
+  if (req.query.super_category_id === 'none') conds.push('i.super_category_id IS NULL');
+  else if (/^\d+$/.test(String(req.query.super_category_id || ''))) {
+    params.push(Number(req.query.super_category_id));
+    conds.push(`i.super_category_id = $${params.length}`);
   }
   if (search) {
     params.push(`%${clean(search)}%`);
@@ -92,9 +98,14 @@ router.get('/', async (req, res) => {
   }
   const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
   const { rows: articles } = await query(
-    `SELECT i.id, i.name, i.description, i.unit, i.is_liquor, i.is_active
-       FROM items i ${where}
-      ORDER BY lower(i.name)`,
+    `SELECT i.id, i.name, i.description, i.unit, i.is_liquor, i.is_active,
+            i.super_category_id, i.category_id,
+            sc.name AS super_category_name, c.name AS category_name
+       FROM items i
+       LEFT JOIN super_categories sc ON sc.id = i.super_category_id
+       LEFT JOIN categories c ON c.id = i.category_id
+       ${where}
+      ORDER BY sc.sort_order NULLS LAST, sc.name NULLS LAST, c.name NULLS LAST, lower(i.name)`,
     params
   );
   const ids = articles.map((a) => a.id);
@@ -118,10 +129,10 @@ router.get('/', async (req, res) => {
   });
 
   const { rows: totals } = await query(
-    `SELECT (SELECT count(*)::int FROM items WHERE is_active) AS articles,
+    `SELECT (SELECT count(*)::int FROM items WHERE is_active AND inventory_mode = 'warehouse') AS articles,
             (SELECT count(*)::int FROM item_batches b JOIN items i ON i.id = b.item_id
-              WHERE b.is_active AND i.is_active) AS batches,
-            (SELECT count(*)::int FROM items WHERE NOT is_active) AS inactive,
+              WHERE b.is_active AND i.is_active AND i.inventory_mode = 'warehouse') AS batches,
+            (SELECT count(*)::int FROM items WHERE NOT is_active AND inventory_mode = 'warehouse') AS inactive,
             (SELECT count(*)::int FROM item_batches WHERE origin = 'counted') AS new_batches`
   );
   res.json({ articles: out, counts: totals[0] });
@@ -261,12 +272,12 @@ router.delete('/batches/:id', requireIntParams('id'), async (req, res) => {
 // A batch is matched on (article, batch number), both case-insensitively.
 router.get('/import/template', (_req, res) => {
   const csv = toCsv(
-    ['article', 'description', 'batch', 'unit', 'quantity', 'expiry'],
+    ['super_category', 'category', 'article', 'description', 'batch', 'unit', 'quantity', 'expiry'],
     [
-      ['Refined Oil', 'Sunflower oil 15 L tin', 'B2401', 'TIN (15 LTR)', '40', '2026-12-31'],
-      ['Refined Oil', 'Sunflower oil 15 L tin', 'B2407', 'TIN (15 LTR)', '12', '2027-03-31'],
-      ['Basmati Rice', 'Premium long grain', 'R-118', 'KG', '250.5', ''],
-      ['Paper Cups', '200 ml, sleeve of 50', 'PC-09', 'PKT (50 pcs)', '80', ''],
+      ['FOOD', 'PROVISION', 'Refined Oil', 'Sunflower oil 15 L tin', 'B2401', 'TIN (15 LTR)', '40', '2026-12-31'],
+      ['FOOD', 'PROVISION', 'Refined Oil', 'Sunflower oil 15 L tin', 'B2407', 'TIN (15 LTR)', '12', '2027-03-31'],
+      ['FOOD', 'PROVISION', 'Basmati Rice', 'Premium long grain', 'R-118', 'KG', '250.5', ''],
+      ['NON FOOD', 'PACKAGING', 'Paper Cups', '200 ml, sleeve of 50', 'PC-09', 'PKT (50 pcs)', '80', ''],
     ]
   );
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
@@ -280,6 +291,8 @@ const pick = (rec, names) => {
 };
 const ARTICLE = ['article', 'article_name', 'item_name', 'item', 'name'];
 const DESCRIPTION = ['description', 'article_description', 'desc'];
+const SUPER = ['super_category', 'super category', 'super_category_name', 'super category name'];
+const CATEGORY = ['category', 'category_name', 'category name'];
 const BATCH = ['batch', 'batch_no', 'batch_number', 'batch no', 'batch number'];
 const UNIT = ['unit', 'uom'];
 const QTY = ['quantity', 'qty', 'stock', 'stock_qty', 'system_qty'];
@@ -293,12 +306,27 @@ router.post('/import', upload.single('file'), async (req, res) => {
   const invalid = [];
   const valid = [];
   const seen = new Map();
+  // Names are unique across the whole system, so an article cannot take a
+  // name the cafe Item Master already uses.
+  const { rows: cafeRows } = await query("SELECT name FROM items WHERE inventory_mode = 'cafe'");
+  const cafeNames = new Set(cafeRows.map((r) => nameKey(r.name)));
   records.forEach((rec, idx) => {
     const line = idx + 2; // header is line 1
     const article = normalizeName(pick(rec, ARTICLE));
     const batchNo = normalizeName(pick(rec, BATCH));
     if (!article) { invalid.push({ row: line, reason: 'Article is blank' }); return; }
     if (!batchNo) { invalid.push({ row: line, article, reason: 'Batch is blank' }); return; }
+    if (cafeNames.has(nameKey(article))) {
+      invalid.push({ row: line, article, batch: batchNo,
+                     reason: 'This name is already a cafe item on the Item Master — use a different article name' });
+      return;
+    }
+    const superName = normalizeName(pick(rec, SUPER));
+    const catName = normalizeName(pick(rec, CATEGORY));
+    if (catName && !superName) {
+      invalid.push({ row: line, article, batch: batchNo, reason: 'Category needs a super category' });
+      return;
+    }
     const q = parseQty(pick(rec, QTY));
     if (q.error) { invalid.push({ row: line, article, batch: batchNo, reason: q.error }); return; }
     const d = parseDate(pick(rec, EXPIRY));
@@ -310,7 +338,7 @@ router.post('/import', upload.single('file'), async (req, res) => {
       return;
     }
     seen.set(key, line);
-    valid.push({ line, article, batchNo, key,
+    valid.push({ line, article, batchNo, key, superName, catName,
                  description: clean(pick(rec, DESCRIPTION)), unit: clean(pick(rec, UNIT)),
                  qty: q.value, expiry: d.value });
   });
@@ -325,30 +353,74 @@ router.post('/import', upload.single('file'), async (req, res) => {
   const summary = await withTransaction(async (c) => {
     const s = { rows: valid.length, articles_created: 0, articles_updated: 0,
                 batches_created: 0, batches_updated: 0, batches_deactivated: 0 };
-    const { rows: items } = await c.query('SELECT id, name, unit, description FROM items');
+    const { rows: items } = await c.query(
+      `SELECT id, name, unit, description, super_category_id, category_id
+         FROM items WHERE inventory_mode = 'warehouse'`);
     const itemsByKey = new Map(items.map((i) => [nameKey(i.name), i]));
     const touchedBatchIds = [];
     const describedItems = new Set();
+    s.categories_created = 0;
+
+    // A super category / category named in the file but not yet in the
+    // system is CREATED — the same rule as the Item Master import. The lists
+    // are shared with the cafe; a card only shows where it has items.
+    const hier = new Map();
+    async function resolveHierarchy(superName, catName) {
+      if (!superName) return { superId: null, catId: null };
+      const k = `${nameKey(superName)}\u0000${nameKey(catName)}`;
+      if (hier.has(k)) return hier.get(k);
+      const { rows: sr } = await c.query(
+        `INSERT INTO super_categories (name, sort_order) VALUES ($1, 99)
+         ON CONFLICT (lower(name)) DO UPDATE SET name = super_categories.name
+         RETURNING id, (xmax = 0) AS created`, [superName]);
+      if (sr[0].created) s.categories_created += 1;
+      let catId = null;
+      if (catName) {
+        const { rows: cr } = await c.query(
+          `INSERT INTO categories (name, super_category_id) VALUES ($1, $2)
+           ON CONFLICT (super_category_id, lower(name)) DO UPDATE SET name = categories.name
+           RETURNING id, (xmax = 0) AS created`, [catName, sr[0].id]);
+        if (cr[0].created) s.categories_created += 1;
+        catId = cr[0].id;
+      }
+      const out = { superId: sr[0].id, catId };
+      hier.set(k, out);
+      return out;
+    }
 
     for (const r of valid) {
       let item = itemsByKey.get(nameKey(r.article));
+      const { superId, catId } = await resolveHierarchy(r.superName, r.catName);
       if (!item) {
         const { rows } = await c.query(
-          `INSERT INTO items (name, unit, description) VALUES ($1,$2,$3)
-           RETURNING id, name, unit, description`,
-          [r.article, r.unit, r.description || null]
+          `INSERT INTO items (name, unit, description, super_category_id, category_id, inventory_mode)
+           VALUES ($1,$2,$3,$4,$5,'warehouse')
+           RETURNING id, name, unit, description, super_category_id, category_id`,
+          [r.article, r.unit, r.description || null, superId, catId]
         );
         item = rows[0];
         itemsByKey.set(nameKey(item.name), item);
         describedItems.add(item.id);
         s.articles_created += 1;
-      } else if (r.description && r.description !== item.description && !describedItems.has(item.id)) {
-        // An imported row may reactivate nothing and rename nothing: only the
-        // description is taken from the file for an existing article.
-        await c.query('UPDATE items SET description = $2 WHERE id = $1', [item.id, r.description]);
-        item.description = r.description;
+      } else if (!describedItems.has(item.id)
+                 && ((r.description && r.description !== item.description)
+                     || (superId && (superId !== item.super_category_id || catId !== item.category_id)))) {
+        // For an existing article only the description and the category are
+        // taken from the file — nothing is renamed or reactivated. A blank
+        // cell leaves the current value alone. The first row of an article
+        // decides; its other batch rows do not change it again.
+        await c.query(
+          `UPDATE items SET description = COALESCE($2, description),
+                  super_category_id = COALESCE($3, super_category_id),
+                  category_id = CASE WHEN $3::int IS NULL THEN category_id ELSE $4 END
+            WHERE id = $1`,
+          [item.id, r.description || null, superId, catId]);
+        if (r.description) item.description = r.description;
+        if (superId) { item.super_category_id = superId; item.category_id = catId; }
         describedItems.add(item.id);
         s.articles_updated += 1;
+      } else {
+        describedItems.add(item.id);
       }
 
       const { rows: existing } = await c.query(

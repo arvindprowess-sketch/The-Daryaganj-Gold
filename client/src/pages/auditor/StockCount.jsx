@@ -1,36 +1,45 @@
 import { useEffect, useState, useCallback, useMemo, useRef } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams } from 'react-router-dom';
 import { api } from '../../lib/api.js';
 import MobileHeader from '../../components/MobileHeader.jsx';
-import { Spinner, ProgressBar, VoidMark } from '../../components/ui.jsx';
+import { Spinner, VoidMark } from '../../components/ui.jsx';
 import BatchSheet from '../../components/BatchSheet.jsx';
 import VirtualList from '../../components/VirtualList.jsx';
 import useDebounced, { normalizeName } from '../../lib/useDebounced.js';
-import { fmtDate } from '../../lib/datetime.js';
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Warehouse — the auditor's counting screen. Takes the place of the super
-// category cards and item list the cafe uses.
+// Warehouse — the articles of one SUPER CATEGORY, the warehouse counterpart of
+// the cafe's item list. The auditor gets here the same way: audit → super
+// category cards → tap a card.
 //
-//   Search article → select article → its batches (with system stock)
-//   → select batch → enter physical quantity and location → save
+//   card → article (name + description) → its batches (with system stock)
+//   → pick or create a batch → physical quantity and location → save
 //
-// Search matches the article name AND its description, and every row shows
-// both, so two articles with similar names can be told apart before tapping.
+// Search covers the WHOLE STORE, not just this category, and matches the
+// article name AND its description — a counter who finds an article in the
+// wrong place can still record it.
 // ═══════════════════════════════════════════════════════════════════════════
 export default function StockCount() {
-  const { auditId } = useParams();
-  const nav = useNavigate();
-  const [items, setItems] = useState(null);
-  const [audit, setAudit] = useState(null);
+  const { auditId, superCategoryId } = useParams();
+  const [items, setItems] = useState(null);        // this super category
+  const [allItems, setAllItems] = useState(null);  // whole store, for search
+  const [superCategory, setSuperCategory] = useState(null);
   const [status, setStatus] = useState('all');
   const [search, setSearch] = useState('');
   const debouncedSearch = useDebounced(search, 250);
   const [active, setActive] = useState(null);
   const scrollRef = useRef(0);
 
-  const load = useCallback(() => api.get(`/audits/${auditId}/items`).then(setItems), [auditId]);
-  useEffect(() => { load(); api.get(`/audits/${auditId}`).then(setAudit); }, [load, auditId]);
+  const load = useCallback(() => Promise.all([
+    api.get(`/audits/${auditId}/items?super_category_id=${superCategoryId}`).then(setItems),
+    api.get(`/audits/${auditId}/items`).then(setAllItems),
+  ]), [auditId, superCategoryId]);
+  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    if (superCategoryId === 'none') { setSuperCategory({ name: 'UNCATEGORISED' }); return; }
+    api.get('/meta/super-categories')
+      .then((list) => setSuperCategory(list.find((x) => String(x.id) === String(superCategoryId))));
+  }, [superCategoryId]);
 
   function openItem(item) {
     scrollRef.current = window.scrollY;
@@ -41,19 +50,19 @@ export default function StockCount() {
     requestAnimationFrame(() => window.scrollTo(0, scrollRef.current));
   }
 
+  const searching = normalizeName(debouncedSearch).length > 0;
+
   const filtered = useMemo(() => {
     const q = normalizeName(debouncedSearch);
-    return (items || []).filter((i) => {
+    return ((searching ? allItems : items) || []).filter((i) => {
       if (status === 'counted' && !i.counted) return false;
       if (status === 'notcounted' && i.counted) return false;
       if (q && !normalizeName(i.name).includes(q) && !normalizeName(i.description).includes(q)) return false;
       return true;
     });
-  }, [items, status, debouncedSearch]);
+  }, [items, allItems, status, debouncedSearch, searching]);
 
   if (!items) return <Spinner label="Loading stock…" />;
-
-  const countedTotal = items.filter((i) => i.counted).length;
 
   const renderRow = (i) => (
     <button onClick={() => openItem(i)}
@@ -62,6 +71,7 @@ export default function StockCount() {
         <div className="font-bold truncate">{i.name}</div>
         <div className="text-sm text-slate-600 truncate">{i.description || '—'}</div>
         <div className="text-xs text-slate-400 truncate">
+          {searching && i.category_name ? `${i.category_name} · ` : ''}
           {i.unit}{' · '}
           {i.batch_count ? `${i.batch_count} ${i.batch_count === 1 ? 'batch' : 'batches'}` : 'no batches'}
         </div>
@@ -83,22 +93,13 @@ export default function StockCount() {
   );
 
   return (
-    <div className="min-h-full pb-24">
-      <MobileHeader
-        title={audit?.store_name || 'Stock count'}
-        subtitle={audit ? `${fmtDate(audit.audit_date)} · cut-off ${audit.cutoff_time || '—'}` : ''}
-        back={audit ? `/a/store/${audit.store_id}` : '/a'}
-      />
+    <div className="min-h-full pb-6">
+      <MobileHeader title={superCategory?.name || 'Stock'}
+                    subtitle={`${items.filter((i) => i.counted).length} / ${items.length} counted`}
+                    back={`/a/audit/${auditId}`} />
 
       <div className="sticky top-[56px] z-10 bg-slate-100/95 backdrop-blur px-3 pt-3 pb-2 space-y-2">
-        <div className="card px-3 py-2">
-          <div className="flex items-center justify-between mb-1 text-sm">
-            <span className="font-semibold">Articles counted</span>
-            <span className="text-slate-500">{countedTotal} / {items.length}</span>
-          </div>
-          <ProgressBar value={countedTotal} total={items.length} />
-        </div>
-        <input className="field py-2.5" placeholder="Search article or description…"
+        <input className="field py-2.5" placeholder="Search article or description (whole store)…"
                value={search} onChange={(e) => setSearch(e.target.value)} />
         <div className="flex gap-2">
           {[['all', 'All'], ['notcounted', 'Not counted'], ['counted', 'Counted']].map(([k, label]) => (
@@ -106,9 +107,9 @@ export default function StockCount() {
                     className={`flex-1 ${status === k ? 'chip-on' : 'chip-off'} justify-center`}>{label}</button>
           ))}
         </div>
-        {normalizeName(debouncedSearch) && (
+        {searching && (
           <p className="text-xs text-slate-500">
-            {filtered.length} match{filtered.length === 1 ? '' : 'es'}.
+            Searching all categories — {filtered.length} match{filtered.length === 1 ? '' : 'es'}.
           </p>
         )}
       </div>
@@ -118,12 +119,6 @@ export default function StockCount() {
       {active && (
         <BatchSheet auditId={auditId} item={active} onClose={closeSheet} onSaved={load} />
       )}
-
-      <div className="fixed bottom-0 inset-x-0 p-3 bg-gradient-to-t from-slate-100 to-transparent">
-        <button className="btn-primary w-full" onClick={() => nav(`/a/audit/${auditId}/submit`)}>
-          Review &amp; Submit
-        </button>
-      </div>
     </div>
   );
 }

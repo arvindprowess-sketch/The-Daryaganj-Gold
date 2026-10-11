@@ -37,6 +37,7 @@ export default function ItemList() {
 
   useEffect(() => { load(); }, [load]);
   useEffect(() => {
+    if (superCategoryId === 'none') { setSuperCategory({ name: 'UNCATEGORISED' }); return; }
     api.get('/meta/super-categories')
       .then((list) => setSuperCategory(list.find((x) => String(x.id) === String(superCategoryId))));
   }, [superCategoryId]);

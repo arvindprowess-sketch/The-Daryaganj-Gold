@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { AUDIT_MODE } from '../lib/scope.js';
 import { query, withTransaction } from '../db.js';
 import { requireAuth, requireRole, assertStoreAccess, loadAuditForUser } from '../middleware/auth.js';
 import { forRole } from '../lib/blindCount.js';
@@ -113,10 +114,12 @@ async function submitSummary(auditId, userId) {
   // The auditor's OWN figures. What they are about to send is their own
   // count, so the confirmation dialog must state their own numbers.
   const { rows } = await query(
-    `SELECT (SELECT count(*)::int FROM items WHERE is_active) AS total,
+    `SELECT (SELECT count(*)::int FROM items
+              WHERE is_active AND inventory_mode = ${AUDIT_MODE()}) AS total,
             (SELECT count(DISTINCT ce.item_id)::int
                FROM count_entries ce JOIN items i ON i.id = ce.item_id
               WHERE ce.audit_id = $1 AND ce.status = 'active' AND i.is_active
+                AND i.inventory_mode = ${AUDIT_MODE()}
                 AND ($2::int IS NULL OR ce.counted_by = $2)) AS counted,
             (SELECT count(*)::int FROM audit_na WHERE audit_id = $1) AS not_applicable`,
     [auditId, userId ?? null]
@@ -545,11 +548,34 @@ router.get('/:id/super-categories', async (req, res) => {
             )::int AS counted
        FROM super_categories sc
        LEFT JOIN items i ON i.super_category_id = sc.id AND i.is_active = TRUE
+                        AND i.inventory_mode = ${AUDIT_MODE()}
       WHERE sc.is_active = TRUE
       GROUP BY sc.id, sc.name, sc.sort_order
+      -- Super categories are shared by cafe and warehouse. A card is shown
+      -- only where THIS audit's side has items in it.
+      HAVING COUNT(i.id) > 0
       ORDER BY sc.sort_order, sc.name`,
     [req.params.id]
   );
+  // Items with no super category get a card of their own, rather than being
+  // reachable only through search.
+  const { rows: none } = await query(
+    `SELECT COUNT(i.id)::int AS total,
+            COUNT(i.id) FILTER (
+              WHERE EXISTS (SELECT 1 FROM count_entries ce
+                             WHERE ce.item_id = i.id AND ce.audit_id = $1 AND ce.status = 'active'
+                                   ${ownerFilter(req.user)})
+                 OR EXISTS (SELECT 1 FROM audit_na na
+                             WHERE na.item_id = i.id AND na.audit_id = $1)
+            )::int AS counted
+       FROM items i
+      WHERE i.is_active AND i.super_category_id IS NULL
+        AND i.inventory_mode = ${AUDIT_MODE()}`,
+    [req.params.id]
+  );
+  if (none[0].total > 0) {
+    rows.push({ id: 'none', name: 'UNCATEGORISED', sort_order: 9999, ...none[0] });
+  }
   res.json(rows);
 });
 
@@ -572,6 +598,7 @@ router.get('/:id/categories', async (req, res) => {
        FROM categories c
        LEFT JOIN super_categories sc ON sc.id = c.super_category_id
        LEFT JOIN items i ON i.category_id = c.id AND i.is_active = TRUE
+                        AND i.inventory_mode = ${AUDIT_MODE()}
       WHERE c.is_active = TRUE
       GROUP BY c.id, c.name, c.super_category_id, sc.name, sc.sort_order
       ORDER BY sc.sort_order NULLS LAST, sc.name, c.name`,
@@ -587,9 +614,10 @@ router.get('/:id/items', async (req, res) => {
   if (!allowed) return res.status(403).json({ error: 'Forbidden' });
 
   const { super_category_id, category_id, search, status } = req.query;
-  const conds = ['i.is_active = TRUE'];
+  const conds = ['i.is_active = TRUE', `i.inventory_mode = ${AUDIT_MODE()}`];
   const params = [req.params.id];
-  if (super_category_id) { params.push(super_category_id); conds.push(`i.super_category_id = $${params.length}`); }
+  if (super_category_id === 'none') conds.push('i.super_category_id IS NULL');
+  else if (super_category_id) { params.push(super_category_id); conds.push(`i.super_category_id = $${params.length}`); }
   if (category_id) { params.push(category_id); conds.push(`i.category_id = $${params.length}`); }
   if (search) {
     params.push(`%${search}%`);
@@ -656,7 +684,7 @@ router.get('/:id/uncounted', async (req, res) => {
   const { rows } = await query(
     `SELECT i.id, i.name, i.unit, i.super_category_id
        FROM items i
-      WHERE i.is_active = TRUE
+      WHERE i.is_active = TRUE AND i.inventory_mode = ${AUDIT_MODE()}
         AND NOT EXISTS (SELECT 1 FROM count_entries ce WHERE ce.item_id=i.id AND ce.audit_id=$1 AND ce.status='active'
                                 ${ownerFilter(req.user)})
         AND NOT EXISTS (SELECT 1 FROM audit_na na WHERE na.item_id=i.id AND na.audit_id=$1)

@@ -188,6 +188,10 @@ router.post('/audits/:auditId/entries', async (req, res) => {
   const { rows: itemRows } = await query('SELECT * FROM items WHERE id = $1 AND is_active = TRUE', [itemId]);
   const item = itemRows[0];
   if (!item) return res.status(404).json({ error: 'Item not found' });
+  // A cafe item is not counted in a warehouse audit, nor the other way round.
+  if (item.inventory_mode !== audit.inventory_mode) {
+    return res.status(400).json({ error: `"${item.name}" is not part of this store's ${audit.inventory_mode === 'warehouse' ? 'stock list' : 'item master'}` });
+  }
 
   // ── Batch ──────────────────────────────────────────────────────────────
   // Either an existing batch (batch_id), or a NEW one the counter has just
