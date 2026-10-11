@@ -519,6 +519,23 @@ This only prevents data loss; the app is otherwise online-only.
 
 ---
 
+### A save the server did not confirm is never shown as saved
+
+- **No network, a timeout (25 s; 90 s for uploads) or a gateway error
+  (502/503/504):** the entry is kept on the phone and a red box says
+  *"Network issue — this entry is NOT saved on the server yet"*; the bottom
+  banner counts what is waiting. It is sent automatically when the network
+  returns, and its `client_ref` makes it one entry on the server however many
+  times it is retried or tapped.
+- **Phone storage full:** room is made by dropping half-typed drafts (never a
+  queued or refused entry). If it still cannot be kept, the screen says
+  *"NOT SAVED"* and the figures stay in the form — nothing is lost silently.
+- **Logging out with entries still waiting:** the confirmation says how many
+  are not on the server yet, that they try to send first, and that any left
+  stay on *this* phone and go after the next sign-in here.
+- Nothing on the server deletes entries on login or logout, and a refused
+  queued entry is parked before it leaves the queue.
+
 ## Sessions and logout
 
 Auditors count for hours in places with poor signal, so the session is built not

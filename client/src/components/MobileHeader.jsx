@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../lib/auth.jsx';
 import ConfirmDialog from './ConfirmDialog.jsx';
+import { pendingCount } from '../lib/queue.js';
 
 // Sticky top bar for the auditor flow. Back button + title + logout.
 export default function MobileHeader({ title, subtitle, back }) {
@@ -27,7 +28,7 @@ export default function MobileHeader({ title, subtitle, back }) {
         </div>
         {offline && (
           <div className="bg-amber-500 text-white text-xs px-3 py-1 text-center">
-            Working offline — your entries are saved and will sync.
+            No network — new entries are kept on this phone and are NOT saved on the server until it returns.
           </div>
         )}
       </header>
@@ -35,7 +36,14 @@ export default function MobileHeader({ title, subtitle, back }) {
       <ConfirmDialog
         open={confirm}
         title="Log out?"
-        message="Any unsaved entry on this screen will be lost."
+        // Entries waiting for the network are NOT lost by logging out — they
+        // stay on this phone and go after the next sign-in — but only on THIS
+        // phone. Say so before, not after.
+        message={pendingCount() > 0
+          ? `${pendingCount()} entr${pendingCount() === 1 ? 'y is' : 'ies are'} NOT saved on the server yet (no network). `
+            + 'They will try to send now. Any that cannot stay on THIS phone and are sent after you sign in again here — '
+            + 'do not clear the browser data or use another phone until they have gone.'
+          : 'Any entry still being typed on this screen will be lost.'}
         confirmLabel="Log out"
         danger
         onCancel={() => setConfirm(false)}
