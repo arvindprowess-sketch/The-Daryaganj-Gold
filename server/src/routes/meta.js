@@ -4,6 +4,7 @@ import { requireAuth, requireRole } from '../middleware/auth.js';
 import { requireIntParams } from '../lib/asyncRoutes.js';
 import { logActivity } from '../lib/activityLog.js';
 import { allLocations, activeLocations } from '../lib/locations.js';
+import { config } from '../config.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -16,6 +17,13 @@ router.use(requireAuth);
 // Readable by any authenticated user (auditors need super categories for M4).
 // They carry no rate/value/system data, so they are safe under blind count.
 // ═══════════════════════════════════════════════════════════════════════════
+
+// Which flavour of the app this deployment runs. Both sides read it once: the
+// admin console to show Stock instead of Item Master, the phone to count by
+// batch. Set by INVENTORY_MODE on the server, never chosen in the browser.
+router.get('/app', (_req, res) => {
+  res.json({ inventory_mode: config.inventoryMode });
+});
 
 router.get('/super-categories', async (_req, res) => {
   const { rows } = await query(

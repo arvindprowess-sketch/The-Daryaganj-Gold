@@ -133,6 +133,89 @@ The zero half is dropped rather than printed, so the badge stays on one line
 next to the item name on a 380px phone. Mobile item list and desktop count
 entry use the same helper.
 
+## Warehouse mode — batch-wise stock
+
+The same app runs a batch-managed warehouse. Set `INVENTORY_MODE=warehouse` on
+that deployment's server; the cafe leaves it unset (default `cafe`) and
+nothing about it changes.
+
+| | Cafe (default) | Warehouse |
+| --- | --- | --- |
+| Admin menu | Item Master | **Stock** — Article · Description · Batches · Quantity |
+| Auditor home | Super category cards → item list | Search article (name **or** description) → batches |
+| Entry recorded against | Item | **Batch** (required when the article has batches) |
+| Book quantity on the phone | Never (blind count) | Shown per batch, before counting |
+
+**Workflow on the phone:** search article → tap it → every batch is listed with
+its system stock and what you have counted → tap a batch → system stock is shown
+above the form → enter physical quantity and location → save. Saving returns to
+the batch list so the next batch is one tap away.
+
+**Units.** A batch inherits its article's unit unless it has its own (e.g.
+`KG` loose in one batch, `BAG (25 KG)` in another). The phone, the entry sheet
+and every report show the batch's unit; KG/LTR batches get the two-box entry.
+The Stock list totals quantity **per unit** — different units are never added.
+
+**Stock CSV** (Stock → Import): one row per batch,
+`article, description, batch, unit, quantity, expiry`. *Add & update* creates
+and updates; *Replace* additionally deactivates every live batch not in the
+file. Any invalid row stops the whole import and is named. A blank quantity is
+"no figure", never zero.
+
+**Batch-wise count** (bottom of Stock): system vs physical per batch for any
+audit, reading the submitted snapshot (or the live count before submission),
+with a CSV download. Counts made against an article with no batch appear as
+`(no batch)` rather than being hidden.
+
+**Creating a batch while counting.** A batch on the shelf that the stock list
+does not have: *+ Create new batch* in the batch list → batch number (and its
+unit, if different from the article's) → quantity and location → save. The
+batch is created **on the server, in the same transaction as its first entry**.
+It never exists without the count that created it, and a count is never saved
+against a batch that failed to be created. Typing a batch number that already
+exists (case and spaces ignored) uses that batch rather than making a copy.
+From then on it is an ordinary, permanent batch, available to every counter
+and every later audit. It is marked `origin = 'counted'` with who created it
+and in which audit, and shows as **NEW** on the phone, on Stock (filter *New
+batches from counting*), on the count screen and in the batch report. A
+*Replace* stock import never deactivates it.
+
+**Excel.** In warehouse mode the R4 workbook (Reports → Excel) gains two sheets,
+and Stock → *Download Excel* produces the same two on their own:
+*Batch Summary* (one line per batch: article, description, batch, origin,
+unit, system / physical qty, difference, locations, status) and *Batch Entries*
+(one line per entry: article, description, batch, origin, quantity, location,
+unit, who, when). Both come from one function (`server/src/lib/batchReport.js`),
+the same one the screen reads, and nothing is filtered out: new batches,
+retired batches that were counted, and entries with no batch are all rows.
+
+**Data safety.**
+
+- *No duplicate entries.* Every save carries a `client_ref`. The same reference
+  from the same person is the same entry, so a save whose reply was lost, then
+  queued and retried, is recorded once. A retry that arrives after the audit
+  closed is recognised as already saved, not refused.
+- *Nothing is submitted while entries are still on the phone.* Submit first sends
+  the offline queue, and refuses (saying how many are waiting) while anything
+  is still queued or was refused by the server.
+- *Verified before "success".* Submitting runs under a per-auditor lock (a double
+  tap waits and then replaces the first with the identical snapshot) and checks,
+  **inside the transaction**, that the snapshot holds exactly the auditor's
+  active entries, content included. On a mismatch everything rolls back and the
+  phone reports the failure. The success screen shows the figures the server
+  read back from the snapshot (articles, entries, batches, new batches).
+- *Lost reply.* If the connection drops during submit, the phone asks the server
+  what it holds (`GET /audits/:id/submission` → `verified.in_sync`) and only then
+  reports success or failure. On failure the entries stay on the server and the
+  user can simply submit again.
+
+**Blind count.** `stock_qty` reaches an auditor **only** in warehouse mode; in
+cafe mode the server drops it from the batch endpoint. Batches that have been
+counted are deactivated, never deleted. Schema: migration
+`013_batches.sql` (`items.description`, `item_batches`, `batch_id` on
+`count_entries` / `submission_entries`) and `014_counted_batches_and_idempotency.sql`
+(batch origin/creator, `count_entries.client_ref`) — all additive, so cafe data is untouched.
+
 ## Non-negotiable design rules (audit defensibility)
 
 These are enforced in code, not just the UI:

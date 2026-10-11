@@ -12,6 +12,7 @@ import AuditSession from './pages/auditor/AuditSession.jsx';
 import SuperCategoryList from './pages/auditor/SuperCategoryList.jsx';
 import ItemList from './pages/auditor/ItemList.jsx';
 import Submit from './pages/auditor/Submit.jsx';
+import StockCount from './pages/auditor/StockCount.jsx';
 
 // Admin (desktop) flow
 import AdminLayout from './pages/admin/AdminLayout.jsx';
@@ -26,6 +27,8 @@ import Reports from './pages/admin/Reports.jsx';
 import DataManagement from './pages/admin/DataManagement.jsx';
 import Readiness from './pages/admin/Readiness.jsx';
 import PhotoReview from './pages/admin/PhotoReview.jsx';
+import Stock from './pages/admin/Stock.jsx';
+import { useInventoryMode } from './lib/mode.js';
 
 function RequireRole({ role, children }) {
   const { user, loading } = useAuth();
@@ -50,6 +53,14 @@ function Home() {
   return <Navigate to={user.role === 'admin' ? '/admin' : '/a'} replace />;
 }
 
+// The audit's home screen. The cafe counts by super category; the warehouse
+// searches articles and counts batch by batch.
+function AuditHome() {
+  const mode = useInventoryMode();
+  if (!mode) return <Spinner />;
+  return mode === 'warehouse' ? <StockCount /> : <SuperCategoryList />;
+}
+
 export default function App() {
   return (
     <>
@@ -60,7 +71,7 @@ export default function App() {
         {/* ── Auditor (mobile-first) ── */}
         <Route path="/a" element={<RequireRole role="auditor"><StoreSelect /></RequireRole>} />
         <Route path="/a/store/:storeId" element={<RequireRole role="auditor"><AuditSession /></RequireRole>} />
-        <Route path="/a/audit/:auditId" element={<RequireRole role="auditor"><SuperCategoryList /></RequireRole>} />
+        <Route path="/a/audit/:auditId" element={<RequireRole role="auditor"><AuditHome /></RequireRole>} />
         <Route path="/a/audit/:auditId/super-category/:superCategoryId" element={<RequireRole role="auditor"><ItemList /></RequireRole>} />
         <Route path="/a/audit/:auditId/submit" element={<RequireRole role="auditor"><Submit /></RequireRole>} />
 
@@ -68,6 +79,7 @@ export default function App() {
         <Route path="/admin" element={<RequireRole role="admin"><AdminLayout /></RequireRole>}>
           <Route index element={<Dashboard />} />
           <Route path="items" element={<ItemMaster />} />
+          <Route path="stock" element={<Stock />} />
           <Route path="photo-review" element={<PhotoReview />} />
           <Route path="stores-users" element={<StoresUsers />} />
           <Route path="audits" element={<AuditSessions />} />

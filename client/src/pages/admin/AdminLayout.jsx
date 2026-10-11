@@ -3,8 +3,9 @@ import { useAuth } from '../../lib/auth.jsx';
 import { useState, useEffect } from 'react';
 import ConfirmDialog from '../../components/ConfirmDialog.jsx';
 import { api } from '../../lib/api.js';
+import { useInventoryMode } from '../../lib/mode.js';
 
-const nav = [
+const cafeNav = [
   ['', 'Dashboard', '📊'],
   ['items', 'Item Master', '📦'],
   ['photo-review', 'Photo Review', '🖼️'],
@@ -16,8 +17,14 @@ const nav = [
   ['data', 'Data Management', '🗑️'],
 ];
 
+// The warehouse keeps its stock batch-wise, so Stock takes the Item Master's
+// place in the menu. Everything else is the same console.
+const warehouseNav = cafeNav.map((n) => (n[0] === 'items' ? ['stock', 'Stock', '📦'] : n));
+
 export default function AdminLayout() {
   const { user, logout } = useAuth();
+  const mode = useInventoryMode();
+  const nav = mode === 'warehouse' ? warehouseNav : cafeNav;
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
   const [confirm, setConfirm] = useState(false);

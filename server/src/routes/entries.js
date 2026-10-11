@@ -1,11 +1,74 @@
 import { Router } from 'express';
-import { query } from '../db.js';
+import { query, withTransaction } from '../db.js';
+import { normalizeName } from '../lib/itemName.js';
+import { logActivity } from '../lib/activityLog.js';
 import { resolveLocation } from '../lib/locations.js';
 import { requireAuth, loadAuditForUser } from '../middleware/auth.js';
 import { forRole } from '../lib/blindCount.js';
+import { config } from '../config.js';
 
 const router = Router();
 router.use(requireAuth);
+
+// A client reference is generated on the phone: letters, digits, - and _.
+const CLIENT_REF = /^[A-Za-z0-9_-]{8,64}$/;
+
+async function findByClientRef(userId, clientRef) {
+  const { rows } = await query(
+    `SELECT ce.*, b.batch_no FROM count_entries ce
+       LEFT JOIN item_batches b ON b.id = ce.batch_id
+      WHERE ce.counted_by = $1 AND ce.client_ref = $2`,
+    [userId, clientRef]
+  );
+  return rows[0] || null;
+}
+
+// ── A batch the counter found that the stock list does not have ─────────────
+// Matched on the batch number within the article, case- and space-insensitive,
+// so two counters typing "b-12" and "B-12 " get the SAME batch rather than
+// two. The insert is ON CONFLICT DO NOTHING, which makes it safe against two
+// phones creating the same batch at the same moment.
+//
+// It is permanent: an ordinary batch of the article from now on, available to
+// every counter and every later audit. `origin = 'counted'` and who / which
+// audit created it are kept so the admin can find it.
+async function findOrCreateBatch(c, { item, batchNo, unit, userId, auditId }) {
+  const ownUnit = String(unit ?? '').trim();
+  const storedUnit = ownUnit && ownUnit.toLowerCase() !== String(item.unit || '').trim().toLowerCase()
+    ? ownUnit : null;
+  const { rows: created } = await c.query(
+    `INSERT INTO item_batches (item_id, batch_no, unit, origin, created_by, created_in_audit)
+     VALUES ($1,$2,$3,'counted',$4,$5)
+     ON CONFLICT (item_id, lower(btrim(batch_no))) DO NOTHING
+     RETURNING id`,
+    [item.id, batchNo, storedUnit, userId, auditId]
+  );
+  if (created[0]) {
+    await logActivity({
+      auditId, entityType: 'item_batch', entityId: created[0].id, action: 'create_while_counting',
+      recordCount: 1, detail: { article: item.name, batch_no: batchNo, unit: storedUnit || item.unit },
+      userId,
+    }, c);
+    return { id: created[0].id, outcome: 'created' };
+  }
+  const { rows: found } = await c.query(
+    `SELECT id, is_active FROM item_batches
+      WHERE item_id = $1 AND lower(btrim(batch_no)) = lower(btrim($2))`,
+    [item.id, batchNo]
+  );
+  const batch = found[0];
+  // A batch that was retired but is physically on the shelf again is put
+  // back into use — the count is the evidence that it exists.
+  if (!batch.is_active) {
+    await c.query('UPDATE item_batches SET is_active = TRUE, updated_at = now() WHERE id = $1', [batch.id]);
+    await logActivity({
+      auditId, entityType: 'item_batch', entityId: batch.id, action: 'reactivate_while_counting',
+      recordCount: 1, detail: { article: item.name, batch_no: batchNo }, userId,
+    }, c);
+    return { id: batch.id, outcome: 'reactivated' };
+  }
+  return { id: batch.id, outcome: 'existing' };
+}
 
 // ── Prior entries for one item in an audit (M6 bottom sheet) ─────────────────
 // Returns active + void rows. Void rows stay visible (struck through in UI).
@@ -17,18 +80,73 @@ router.get('/audits/:auditId/items/:itemId/entries', async (req, res) => {
   // never see a colleague's count of the same item — that is the point of the
   // per-auditor model, and it is enforced in the query rather than hidden in
   // the client. An admin sees every entry, which is how a total is verified.
+  // ?batch_id= narrows the sheet to one batch (warehouse). Without it every
+  // entry for the article comes back, which is what the cafe has always read.
+  const batchId = /^\d+$/.test(String(req.query.batch_id || '')) ? Number(req.query.batch_id) : null;
   const { rows } = await query(
-    `SELECT ce.*, u.name AS counted_by_name, vu.name AS voided_by_name
+    `SELECT ce.*, u.name AS counted_by_name, vu.name AS voided_by_name,
+            b.batch_no
        FROM count_entries ce
        JOIN users u ON u.id = ce.counted_by
        LEFT JOIN users vu ON vu.id = ce.voided_by
+       LEFT JOIN item_batches b ON b.id = ce.batch_id
       WHERE ce.audit_id = $1 AND ce.item_id = $2
         AND ($3::int IS NULL OR ce.counted_by = $3)
+        AND ($4::int IS NULL OR ce.batch_id = $4)
       ORDER BY ce.counted_at ASC`,
+    [req.params.auditId, req.params.itemId,
+     req.user.role === 'admin' ? null : req.user.id, batchId]
+  );
+  res.json(forRole(req.user.role, rows));
+});
+
+// ── Batches of one article (warehouse) ──────────────────────────────────────
+// Every active batch with what has been counted against it so far — the
+// auditor's OWN count, the same per-auditor rule as the entry sheet.
+//
+// `stock_qty` is the batch's book quantity. The warehouse counter is meant to
+// see it, so they can compare system and physical stock while counting. The
+// cafe runs a BLIND count, so outside warehouse mode it never reaches an
+// auditor: it is dropped here, not hidden in the client.
+router.get('/audits/:auditId/items/:itemId/batches', async (req, res) => {
+  const { audit, allowed } = await loadAuditForUser(req.user, req.params.auditId);
+  if (!audit) return res.status(404).json({ error: 'Not found' });
+  if (!allowed) return res.status(403).json({ error: 'Forbidden' });
+  if (!/^\d+$/.test(String(req.params.itemId))) return res.status(400).json({ error: 'Invalid item' });
+
+  const { rows } = await query(
+    `SELECT b.id, b.item_id, b.batch_no, b.origin,
+            to_char(b.expiry_date, 'YYYY-MM-DD') AS expiry_date,
+            COALESCE(NULLIF(btrim(b.unit), ''), i.unit) AS unit,
+            b.qty AS stock_qty,
+            COALESCE(agg.entry_count, 0)::int AS entry_count,
+            agg.total_qty, agg.total_bottles, agg.total_open_ml,
+            COALESCE(agg.void_count, 0)::int AS void_count
+       FROM item_batches b
+       JOIN items i ON i.id = b.item_id
+       LEFT JOIN LATERAL (
+         SELECT COUNT(*) FILTER (WHERE ce.status = 'active') AS entry_count,
+                SUM(ce.qty)     FILTER (WHERE ce.status = 'active') AS total_qty,
+                SUM(ce.bottles) FILTER (WHERE ce.status = 'active') AS total_bottles,
+                SUM(ce.open_ml) FILTER (WHERE ce.status = 'active') AS total_open_ml,
+                COUNT(*) FILTER (WHERE ce.status = 'void') AS void_count
+           FROM count_entries ce
+          WHERE ce.batch_id = b.id AND ce.audit_id = $1
+            AND ($3::int IS NULL OR ce.counted_by = $3)
+       ) agg ON TRUE
+      WHERE b.item_id = $2 AND b.is_active
+      ORDER BY b.expiry_date NULLS LAST, lower(b.batch_no)`,
     [req.params.auditId, req.params.itemId,
      req.user.role === 'admin' ? null : req.user.id]
   );
-  res.json(forRole(req.user.role, rows));
+  const showStock = req.user.role === 'admin' || config.inventoryMode === 'warehouse';
+  const out = rows.map((r) => {
+    const counted = r.entry_count > 0;
+    const row = { ...r, counted };
+    if (!showStock) delete row.stock_qty;
+    return row;
+  });
+  res.json(forRole(req.user.role, out));
 });
 
 // ── Create entry (APPEND-ONLY). Never overwrites; always a new row. ──────────
@@ -36,9 +154,29 @@ router.post('/audits/:auditId/entries', async (req, res) => {
   const { audit, allowed } = await loadAuditForUser(req.user, req.params.auditId);
   if (!audit) return res.status(404).json({ error: 'Not found' });
   if (!allowed) return res.status(403).json({ error: 'Forbidden' });
-  if (audit.status !== 'open') return res.status(409).json({ error: 'Audit is closed' });
 
   const b = req.body || {};
+
+  // ── Idempotency ────────────────────────────────────────────────────────
+  // The phone stamps every save with a reference. A retry of a save that
+  // already landed — the reply was lost, so it was queued and sent again —
+  // returns the entry that exists instead of creating a second one. This is
+  // checked BEFORE the audit-status check: a retry arriving after the audit
+  // was submitted must still be recognised as already saved, not refused and
+  // parked as a lost count.
+  const clientRef = b.client_ref == null || b.client_ref === '' ? null : String(b.client_ref);
+  if (clientRef !== null && !CLIENT_REF.test(clientRef)) {
+    return res.status(400).json({ error: 'Invalid client_ref' });
+  }
+  if (clientRef) {
+    const existing = await findByClientRef(req.user.id, clientRef);
+    if (existing) {
+      return res.status(200).json({ ...forRole(req.user.role, existing), duplicate: true });
+    }
+  }
+
+  if (audit.status !== 'open') return res.status(409).json({ error: 'Audit is closed' });
+
   const itemId = b.item_id;
   if (!itemId) return res.status(400).json({ error: 'item_id required' });
 
@@ -51,6 +189,40 @@ router.post('/audits/:auditId/entries', async (req, res) => {
   const { rows: itemRows } = await query('SELECT * FROM items WHERE id = $1 AND is_active = TRUE', [itemId]);
   const item = itemRows[0];
   if (!item) return res.status(404).json({ error: 'Item not found' });
+
+  // ── Batch ──────────────────────────────────────────────────────────────
+  // Either an existing batch (batch_id), or a NEW one the counter has just
+  // created (new_batch_no). A batch must belong to this article and still be
+  // live. In warehouse mode an article that HAS batches must be counted
+  // against one of them — an article-level figure could not be reconciled
+  // with any batch's book stock. The cafe never sends a batch and never has
+  // one required.
+  let batchId = null;
+  const newBatchNo = normalizeName(b.new_batch_no);
+  if (b.batch_id !== undefined && b.batch_id !== null && b.batch_id !== '') {
+    if (!/^\d+$/.test(String(b.batch_id))) return res.status(400).json({ error: 'Invalid batch' });
+    const { rows: br } = await query(
+      'SELECT id, item_id, batch_no, is_active FROM item_batches WHERE id = $1', [b.batch_id]
+    );
+    const batch = br[0];
+    if (!batch || String(batch.item_id) !== String(item.id)) {
+      return res.status(400).json({ error: 'That batch does not belong to this article' });
+    }
+    if (!batch.is_active) {
+      return res.status(400).json({ error: `Batch "${batch.batch_no}" is no longer in use` });
+    }
+    batchId = batch.id;
+  } else if (newBatchNo) {
+    if (config.inventoryMode !== 'warehouse') {
+      return res.status(400).json({ error: 'Batches are not used in this deployment' });
+    }
+    if (newBatchNo.length > 64) return res.status(400).json({ error: 'Batch number is too long (64 characters at most)' });
+  } else if (config.inventoryMode === 'warehouse') {
+    const { rows: has } = await query(
+      'SELECT 1 FROM item_batches WHERE item_id = $1 AND is_active LIMIT 1', [item.id]
+    );
+    if (has.length) return res.status(400).json({ error: 'Choose a batch for this article' });
+  }
 
   let qty = null, bottles = null, openMl = null;
   if (item.is_liquor) {
@@ -75,18 +247,41 @@ router.post('/audits/:auditId/entries', async (req, res) => {
     if (Number.isNaN(qty) || qty < 0) return res.status(400).json({ error: 'Quantity must be a non-negative number' });
   }
 
-  const { rows } = await query(
-    `INSERT INTO count_entries
-       (audit_id, item_id, qty, bottles, open_ml, location_id, location_text,
-        remarks, photo_url, counted_by)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
-    // location_text is written from the chosen location's name, so the audit
-    // trail still records the words, and old rows stay readable alongside new
-    // ones without a special case.
-    [req.params.auditId, itemId, qty, bottles, openMl, loc.location.id, loc.location.name,
-     b.remarks || null, b.photo_url || null, req.user.id]
-  );
-  const entry = rows[0];
+  // The new batch and the entry are written in ONE transaction: a batch is
+  // never created without the count that created it, and a count is never
+  // saved against a batch that failed to be created.
+  const result = await withTransaction(async (c) => {
+    let batchOutcome = null;
+    if (newBatchNo) {
+      const r = await findOrCreateBatch(c, {
+        item, batchNo: newBatchNo, unit: b.new_batch_unit, userId: req.user.id,
+        auditId: Number(req.params.auditId),
+      });
+      batchId = r.id;
+      batchOutcome = r.outcome;
+    }
+    const { rows } = await c.query(
+      `INSERT INTO count_entries
+         (audit_id, item_id, qty, bottles, open_ml, location_id, location_text,
+          remarks, photo_url, counted_by, batch_id, client_ref)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+       ON CONFLICT (counted_by, client_ref) WHERE client_ref IS NOT NULL DO NOTHING
+       RETURNING *`,
+      // location_text is written from the chosen location's name, so the audit
+      // trail still records the words, and old rows stay readable alongside new
+      // ones without a special case.
+      [req.params.auditId, itemId, qty, bottles, openMl, loc.location.id, loc.location.name,
+       b.remarks || null, b.photo_url || null, req.user.id, batchId, clientRef]
+    );
+    return { entry: rows[0] || null, batchOutcome };
+  });
+
+  // Lost a race with an identical retry: that one saved it.
+  if (!result.entry) {
+    const existing = await findByClientRef(req.user.id, clientRef);
+    return res.status(200).json({ ...forRole(req.user.role, existing), duplicate: true });
+  }
+  const entry = result.entry;
 
   // ── Photo flow to item master ──────────────────────────────────────────
   // The entry photo stays attached to the entry as evidence either way; the
@@ -115,7 +310,8 @@ router.post('/audits/:auditId/entries', async (req, res) => {
   await query('DELETE FROM audit_na WHERE audit_id = $1 AND item_id = $2',
     [req.params.auditId, itemId]);
 
-  res.status(201).json({ ...forRole(req.user.role, entry), photo_outcome: photoOutcome });
+  res.status(201).json({ ...forRole(req.user.role, entry), photo_outcome: photoOutcome,
+                         batch_outcome: result.batchOutcome });
 });
 
 // ── Void an entry (NO DELETION). Auditor may void own; admin may void any. ────

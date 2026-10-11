@@ -30,6 +30,7 @@ import reportRoutes from './routes/reports.js';
 import uploadRoutes from './routes/uploads.js';
 import photoReviewRoutes from './routes/photoReviews.js';
 import dataManagementRoutes from './routes/dataManagement.js';
+import stockRoutes from './routes/stock.js';
 
 const app = express();
 
@@ -98,6 +99,7 @@ app.use('/api/settings', settingsRoutes);
 app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/reports', reportRoutes);
 app.use('/api/data', dataManagementRoutes);
+app.use('/api/stock', stockRoutes);
 app.use('/api/upload', uploadRoutes);
 app.use('/api/photo-reviews', photoReviewRoutes);
 
@@ -182,6 +184,7 @@ async function warnAboutDemoData() {
 app.listen(config.port, () => {
   console.log(`Audix API listening on http://localhost:${config.port}`);
   console.log(`Storage driver: ${config.storageDriver}`);
+  console.log(`Inventory mode: ${config.inventoryMode}`);
   console.log(`Environment: ${config.nodeEnv}`);
   warnAboutDemoData();
 });

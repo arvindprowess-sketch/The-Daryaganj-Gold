@@ -89,12 +89,13 @@ router.post('/', requireRole('admin'), async (req, res) => {
   try {
     const { rows } = await query(
       `INSERT INTO items (name, category_id, super_category_id, unit, bottle_unit_size,
-                          is_liquor, bottle_size_ml, rate, photo_url, is_active)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,COALESCE($10, TRUE)) RETURNING *`,
+                          is_liquor, bottle_size_ml, rate, photo_url, is_active, description)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,COALESCE($10, TRUE),$11) RETURNING *`,
       // Unit is stored exactly as given (only outer whitespace trimmed).
       [name, b.category_id || null, b.super_category_id || null, (b.unit ?? '').trim(),
        unitSize(b.bottle_unit_size),
-       !!b.is_liquor, b.bottle_size_ml || null, b.rate ?? null, b.photo_url || null, b.is_active]
+       !!b.is_liquor, b.bottle_size_ml || null, b.rate ?? null, b.photo_url || null, b.is_active,
+       (b.description ?? '').trim() || null]
     );
     res.status(201).json(rows[0]);
   } catch (err) {
@@ -120,12 +121,15 @@ router.put('/:id', requireRole('admin'), async (req, res) => {
          photo_version = CASE WHEN $9 IS NOT NULL AND $9 IS DISTINCT FROM photo_url
                               THEN photo_version + 1 ELSE photo_version END,
          is_active = COALESCE($10, is_active),
-         bottle_unit_size = COALESCE($11, bottle_unit_size)
+         bottle_unit_size = COALESCE($11, bottle_unit_size),
+         -- Untouched unless sent; an empty string clears it.
+         description = CASE WHEN $12::boolean THEN NULLIF(btrim($13), '') ELSE description END
        WHERE id = $1 RETURNING *`,
       [req.params.id, name, b.category_id, b.super_category_id,
        b.unit === undefined ? null : String(b.unit).trim(), b.is_liquor,
        b.bottle_size_ml ?? null, b.rate, b.photo_url, b.is_active,
-       b.bottle_unit_size === undefined ? null : unitSize(b.bottle_unit_size)]
+       b.bottle_unit_size === undefined ? null : unitSize(b.bottle_unit_size),
+       b.description !== undefined, b.description == null ? '' : String(b.description)]
     );
     if (!rows[0]) return res.status(404).json({ error: 'Not found' });
     res.json(rows[0]);

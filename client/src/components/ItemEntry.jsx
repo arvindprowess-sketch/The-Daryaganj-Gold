@@ -1,25 +1,46 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import BottomSheet from './BottomSheet.jsx';
 import PhotoInput from './PhotoInput.jsx';
 import { PhotoThumb, Spinner } from './ui.jsx';
 import { api, bustCache } from '../lib/api.js';
 import { useToast } from './Toast.jsx';
-import { saveDraft, loadDraft, clearDraft, queueEntry } from '../lib/queue.js';
+import { saveDraft, loadDraft, clearDraft, queueEntry, newClientRef } from '../lib/queue.js';
 import { fmtTime } from '../lib/datetime.js';
 import { subUnitFor, combine, preview } from '../lib/measuredUnit.js';
 import LocationSelect, { useStickyLocation } from './LocationSelect.jsx';
 import { useAuth } from '../lib/auth.jsx';
 
+// 250.5 → "250.5", 40 → "40": a book quantity read as written, not padded.
+export const fmtQty = (n) => String(Number(Number(n).toFixed(3)));
+
 // M6 — Item entry bottom sheet. Non-liquor and liquor layouts.
 // M7 — Duplicate prompt when adding a second entry (warn, never block).
 // On success the sheet CLOSES and the caller returns to the list (#6).
-export default function ItemEntry({ auditId, item, onClose, onSaved, uploadOnly = false, canVoid = true }) {
+//
+// Warehouse: `batch` is the batch being counted. The entry is recorded against
+// it, the sheet shows only that batch's entries, and the unit is the batch's
+// own (it falls back to the article's on the server). Without a batch the
+// sheet behaves exactly as it always has.
+export default function ItemEntry({ auditId, item, batch = null, onClose, onSaved,
+                                    uploadOnly = false, canVoid = true }) {
+  const unit = batch?.unit || item.unit;
+  // A batch the counter is creating right now: it does not exist on the
+  // server until this entry is saved, and is created together with it.
+  const isNewBatch = !!batch?.isNew;
   // A KG or LTR item is entered as two boxes; the stored value is still one
   // number in the item's own unit.
-  const sub = item.is_liquor ? null : subUnitFor(item.unit);
+  const sub = item.is_liquor ? null : subUnitFor(unit);
+  // Drafts are kept per batch, so a half-typed count never lands on another.
+  const draftId = !batch ? item.id
+    : isNewBatch ? `${item.id}_n${String(batch.batch_no).trim().toLowerCase()}`
+      : `${item.id}_b${batch.id}`;
+  // The reference this save goes out under. It changes whenever the form
+  // changes, so pressing Save twice on the same figures is one entry, while
+  // correcting a figure and saving again is a new one.
+  const clientRef = useRef(newClientRef());
   const empty = { qty: '', major: '', minor: '', bottles: '', open_ml: '',
                   remarks: '', photo_url: null };
-  const [form, setForm] = useState(() => loadDraft(auditId, item.id) || empty);
+  const [form, setForm] = useState(() => loadDraft(auditId, draftId) || empty);
   // Sticky: an auditor counts everything in one place before moving on, so the
   // last location carries to the next item rather than being re-picked 618 times.
   const [locationId, setLocationId] = useStickyLocation(auditId);
@@ -33,20 +54,27 @@ export default function ItemEntry({ auditId, item, onClose, onSaved, uploadOnly 
   const activeEntries = (entries || []).filter((e) => e.status === 'active');
 
   function loadEntries() {
-    return api.get(`/audits/${auditId}/items/${item.id}/entries`).then(setEntries);
+    if (isNewBatch) { setEntries([]); return Promise.resolve(); }
+    const qs = batch ? `?batch_id=${batch.id}` : '';
+    return api.get(`/audits/${auditId}/items/${item.id}/entries${qs}`).then(setEntries);
   }
-  useEffect(() => { loadEntries(); /* eslint-disable-next-line */ }, [auditId, item.id]);
+  useEffect(() => { loadEntries(); /* eslint-disable-next-line */ }, [auditId, item.id, batch?.id]);
 
   // Mirror every keystroke to localStorage (network safety net).
   function update(patch) {
     const next = { ...form, ...patch };
+    clientRef.current = newClientRef();
     setForm(next);
-    saveDraft(auditId, item.id, next);
+    saveDraft(auditId, draftId, next);
   }
 
   function buildPayload() {
-    const p = { item_id: item.id, location_id: locationId || null,
+    const p = { item_id: item.id, location_id: locationId || null, client_ref: clientRef.current,
                 remarks: form.remarks || null, photo_url: form.photo_url || null };
+    if (isNewBatch) {
+      p.new_batch_no = batch.batch_no;
+      p.new_batch_unit = batch.unit || null;
+    } else if (batch) p.batch_id = batch.id;
     if (item.is_liquor) {
       p.bottles = form.bottles === '' ? null : Number(form.bottles);
       p.open_ml = form.open_ml === '' ? null : Number(form.open_ml);
@@ -77,12 +105,13 @@ export default function ItemEntry({ auditId, item, onClose, onSaved, uploadOnly 
 
   // Human-readable summary for the toast, e.g. "Refined Oil, 2.000 Ltr".
   function describe(payload) {
+    const name = batch ? `${item.name} [${batch.batch_no}]` : item.name;
     if (item.is_liquor) {
       const parts = [`${payload.bottles ?? 0} btl`];
       if (payload.open_ml) parts.push(`${payload.open_ml} ml`);
-      return `${item.name}, ${parts.join(' · ')}`;
+      return `${name}, ${parts.join(' · ')}`;
     }
-    return `${item.name}, ${Number(payload.qty).toFixed(3)} ${item.unit}`;
+    return `${name}, ${Number(payload.qty).toFixed(3)} ${unit}`;
   }
 
   async function doSave() {
@@ -93,9 +122,11 @@ export default function ItemEntry({ auditId, item, onClose, onSaved, uploadOnly 
     const payload = buildPayload();
     try {
       const saved = await api.post(`/audits/${auditId}/entries`, payload);
-      clearDraft(auditId, item.id);
+      clearDraft(auditId, draftId);
       setForm(empty);
-      toast(`Saved — ${describe(payload)}`);
+      clientRef.current = newClientRef();
+      toast(saved?.duplicate ? `Already saved — ${describe(payload)}` : `Saved — ${describe(payload)}`);
+      if (saved?.batch_outcome === 'created') toast(`New batch "${batch.batch_no}" created`, undefined, 2600);
       if (saved?.photo_outcome === 'pending_review') {
         toast('Photo sent to admin for review (item already has a photo)', 'warn', 3400);
       }
@@ -151,7 +182,7 @@ export default function ItemEntry({ auditId, item, onClose, onSaved, uploadOnly 
   const dupDesc = firstActive
     ? item.is_liquor
       ? `${firstActive.bottles ?? 0} btl / ${firstActive.open_ml ?? 0} ml, ${firstActive.location_text || 'no location'}`
-      : `${Number(firstActive.qty).toFixed(3)} ${item.unit}, ${firstActive.location_text || 'no location'}`
+      : `${Number(firstActive.qty).toFixed(3)} ${unit}, ${firstActive.location_text || 'no location'}`
     : '';
 
   return (
@@ -165,8 +196,29 @@ export default function ItemEntry({ auditId, item, onClose, onSaved, uploadOnly 
         {/* Unit is READ-ONLY here and shown exactly as the master supplies it.
             The auditor never chooses or edits a unit. The category is
             deliberately not displayed — the counter does not need it. */}
-        <div className="text-sm text-slate-500">Unit: {item.unit}</div>
+        <div className="text-sm text-slate-500">Unit: {unit}</div>
       </div>
+
+      {/* Warehouse: which batch this count goes to, and its book quantity —
+          shown BEFORE the count so system and physical stock can be compared
+          on the spot. */}
+      {batch && (
+        <div className="mb-4 rounded-xl border border-teal-200 bg-teal-50 px-3 py-2.5 flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            <div className="text-xs uppercase tracking-wide text-teal-700">
+              {isNewBatch ? 'New batch — created when you save' : 'Batch'}
+            </div>
+            <div className="font-bold truncate">{batch.batch_no}</div>
+            {batch.expiry_date && <div className="text-xs text-slate-500">Expiry {batch.expiry_date}</div>}
+          </div>
+          <div className="text-right shrink-0">
+            <div className="text-xs uppercase tracking-wide text-teal-700">System stock</div>
+            <div className="font-bold tabular-nums">
+              {batch.stock_qty == null ? (isNewBatch ? 'none (new)' : '—') : `${fmtQty(batch.stock_qty)} ${unit}`}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Prior entries (read-only). Void shown struck through. */}
       {entries === null ? <Spinner label="Loading entries…" /> : entries.length > 0 && (
@@ -179,7 +231,7 @@ export default function ItemEntry({ auditId, item, onClose, onSaved, uploadOnly 
                   <div className="font-medium">
                     {item.is_liquor
                       ? `${e.bottles ?? 0} btl · ${e.open_ml ?? 0} ml`
-                      : `${Number(e.qty).toFixed(3)} ${item.unit}`}
+                      : `${Number(e.qty).toFixed(3)} ${unit}`}
                     {e.location_text ? ` · ${e.location_text}` : ''}
                   </div>
                   <div className="text-xs text-slate-500">
@@ -244,7 +296,8 @@ export default function ItemEntry({ auditId, item, onClose, onSaved, uploadOnly 
                    placeholder="Type 0 if none found" />
           </label>
         )}
-        <LocationSelect value={locationId} onChange={setLocationId} />
+        <LocationSelect value={locationId}
+                        onChange={(v) => { clientRef.current = newClientRef(); setLocationId(v); }} />
         <label className="block">
           <span className="text-sm font-medium text-slate-600">Remarks</span>
           <input className="field mt-1" value={form.remarks}
@@ -268,7 +321,7 @@ export default function ItemEntry({ auditId, item, onClose, onSaved, uploadOnly 
         <div className="fixed inset-0 z-[60] flex items-center justify-center p-5 bg-black/40">
           <div className="card p-5 max-w-sm w-full">
             <p className="font-medium mb-4">
-              This item already has an entry ({dupDesc}). Are you adding stock found at a different location?
+              This {batch ? 'batch' : 'item'} already has an entry ({dupDesc}). Are you adding stock found at a different location?
             </p>
             <div className="flex gap-2">
               <button className="btn-ghost flex-1" onClick={() => setDupPrompt(false)}>Cancel</button>
