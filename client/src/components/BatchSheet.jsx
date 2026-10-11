@@ -94,8 +94,11 @@ export default function BatchSheet({ auditId, item, onClose, onSaved, uploadOnly
                 {item.is_liquor
                   ? liquorBadge(batches.reduce((t, b) => t + Number(b.total_bottles || 0), 0),
                                 batches.reduce((t, b) => t + Number(b.total_open_ml || 0), 0))
-                  : Object.entries(batches.filter((b) => b.counted).reduce((m, b) => {
-                    const u = b.unit || '';
+                  : Object.entries(batches.filter((b) => b.counted).reduce((m, b, _i, list) => {
+                    // A blank unit is the material's unit: it joins the one
+                    // unit the other batches name rather than standing apart.
+                    const named = [...new Set(list.map((x) => (x.unit || '').trim()).filter(Boolean))];
+                    const u = (b.unit || '').trim() || (named.length === 1 ? named[0] : '');
                     m[u] = Number(((m[u] || 0) + Number(b.total_qty || 0)).toFixed(3));
                     return m;
                   }, {})).map(([u, q]) => `${fmtQty(q)}${u ? ` ${u}` : ''}`).join(' · ')}

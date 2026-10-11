@@ -695,23 +695,23 @@ function BatchCount() {
                     return (
                       <tr className="bg-slate-100 font-semibold">
                         <td className="px-3 py-2" colSpan={3}>{r.material} — total</td>
-                        <td className="px-3 py-2 text-slate-500">{t.mixed_units ? 'mixed' : t.unit}</td>
+                        <td className="px-3 py-2 text-slate-500">{t.unit}</td>
                         <td className="px-3 py-2 text-right tabular-nums">
-                          {t.mixed_units || t.system_qty == null ? '—' : fmtQty(t.system_qty)}
+                          {t.system_qty == null ? '—' : fmtQty(t.system_qty)}
                         </td>
                         <td className="px-3 py-2 text-right tabular-nums">
-                          {t.mixed_units || t.physical_qty == null ? '—' : fmtQty(t.physical_qty)}
+                          {t.physical_qty == null ? (t.physical_by_unit || '—') : fmtQty(t.physical_qty)}
                         </td>
                         <td className={`px-3 py-2 text-right tabular-nums ${
-                          t.mixed_units || t.difference == null ? 'text-slate-300' : t.difference < 0 ? 'text-red-600'
+                          t.difference == null ? 'text-slate-300' : t.difference < 0 ? 'text-red-600'
                             : t.difference > 0 ? 'text-amber-600' : 'text-green-600'}`}>
-                          {t.mixed_units || t.difference == null ? '—'
+                          {t.difference == null ? '—'
                             : t.difference > 0 ? `+${fmtQty(t.difference)}` : fmtQty(t.difference)}
                         </td>
                         <td></td><td></td>
                         <td className="px-3 py-2 text-xs font-normal text-slate-600">
                           {t.batches} batches merged{t.new_batches ? ` · incl. ${t.new_batches} new` : ''}
-                          {t.mixed_units ? ' · different units, not totalled' : ''}
+                          {t.mixed_units ? ` · units differ (${(t.units || []).join(' / ')}), no difference worked out` : ''}
                         </td>
                       </tr>
                     );

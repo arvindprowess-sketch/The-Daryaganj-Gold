@@ -163,8 +163,16 @@ function remarksFor(r) {
 // against everything counted across them, new batches included. A batch with
 // book stock that nobody counted adds to the system side and nothing to the
 // physical side, so it shows up in the article's difference as the shortage
-// it is. Batches held in different units cannot be added into one number, so
-// such an article is marked rather than totalled.
+// it is.
+//
+// Units: a BLANK unit is "the material's unit", never a unit of its own — a
+// stock file with no Unit column and a counter who typed one for a new batch
+// are the same unit, and used to blank out the material's Stock. Only two
+// different units actually written down (BOX and PCS) cannot be added; even
+// then the book Stock still shows (when the stock batches share one unit) and
+// the counts are listed per unit, so nothing goes missing — only the
+// Difference is left out.
+const unitKey = (u) => String(u || '').trim().toLowerCase();
 function articleTotals(rows) {
   const by = new Map();
   for (const r of rows) {
@@ -173,17 +181,34 @@ function articleTotals(rows) {
   }
   const out = new Map();
   for (const [itemId, list] of by) {
-    const units = new Set(list.map((r) => String(r.unit || '').trim().toLowerCase()));
+    const named = new Map();          // unit key → first spelling seen
+    for (const r of list) if (unitKey(r.unit) && !named.has(unitKey(r.unit))) named.set(unitKey(r.unit), String(r.unit).trim());
+    const mixed = named.size > 1;
     const withStock = list.filter((r) => r.stock_qty != null);
     const counted = list.filter((r) => r.counted);
-    const system = withStock.length ? r3(withStock.reduce((t, r) => t + Number(r.stock_qty), 0)) : null;
-    const physical = counted.length ? r3(counted.reduce((t, r) => t + Number(r.physical_qty || 0), 0)) : null;
-    const physicalOrZero = physical ?? (system != null ? 0 : null);
+    const stockUnits = new Set(withStock.map((r) => unitKey(r.unit)).filter(Boolean));
+    const system = withStock.length && stockUnits.size <= 1
+      ? r3(withStock.reduce((t, r) => t + Number(r.stock_qty), 0)) : null;
+    const physical = counted.length && !mixed
+      ? r3(counted.reduce((t, r) => t + Number(r.physical_qty || 0), 0)) : null;
+    const physicalOrZero = physical ?? (system != null && !counted.length ? 0 : null);
+    // "90 BOX + 5 PCS" — the counts of a mixed-unit material, per unit.
+    const perUnit = new Map();
+    for (const r of counted) {
+      const k = unitKey(r.unit) || [...stockUnits][0] || '';
+      perUnit.set(k, r3((perUnit.get(k) || 0) + Number(r.physical_qty || 0)));
+    }
+    const fallbackUnit = stockUnits.size === 1 ? named.get([...stockUnits][0]) : [...named.values()][0];
     out.set(itemId, {
-      item_id: itemId, batches: list.length, mixed_units: units.size > 1,
-      unit: list[0].unit, new_batches: list.filter((r) => r.is_new).length,
+      item_id: itemId, batches: list.length, mixed_units: mixed,
+      unit: mixed ? (fallbackUnit || '') : ([...named.values()][0] || ''),
+      units: [...named.values()],
+      new_batches: list.filter((r) => r.is_new).length,
       system_qty: system, physical_qty: physical,
-      difference: system != null && physicalOrZero != null ? r3(physicalOrZero - system) : null,
+      physical_by_unit: mixed
+        ? [...perUnit].map(([k, q]) => `${q}${named.get(k) ? ` ${named.get(k)}` : ''}`).join(' + ')
+        : null,
+      difference: !mixed && system != null && physicalOrZero != null ? r3(physicalOrZero - system) : null,
     });
   }
   return out;
@@ -204,16 +229,21 @@ export function summaryRow(l) {
     l.location, l.counted_by, l.status, l.remarks];
 }
 
+// "units differ (BOX / PCS) — counted 90 BOX + 5 PCS, no difference worked out"
+function mixedNote(t) {
+  return `units differ (${t.units.join(' / ')})${t.physical_by_unit ? ` — counted ${t.physical_by_unit}` : ''}, no difference worked out`;
+}
+
 // The line under an article's batches: the article as a whole.
 export function totalRow(r, t) {
   const remarks = [
     `${t.batches} batches merged`,
     t.new_batches ? `incl. ${t.new_batches} NEW BATCH${t.new_batches === 1 ? '' : 'ES'}` : null,
-    t.mixed_units ? 'batches in different units — not totalled' : null,
+    t.mixed_units ? mixedNote(t) : null,
   ].filter(Boolean).join(' · ');
-  return [`${r.article} — TOTAL`, r.description || '', '', t.mixed_units ? 'mixed' : t.unit,
-    t.mixed_units ? null : cell(t.system_qty), t.mixed_units ? null : cell(t.physical_qty), null,
-    t.mixed_units ? null : cell(t.difference), '', '',
+  return [`${r.article} — TOTAL`, r.description || '', '', t.unit,
+    cell(t.system_qty), cell(t.physical_qty), null,
+    cell(t.difference), '', '',
     t.mixed_units || t.difference == null ? '' : t.difference === 0 ? 'Match' : t.difference > 0 ? 'Excess' : 'Short',
     remarks];
 }
@@ -369,6 +399,18 @@ export function compileRows(report) {
 export const MATERIAL_HEADERS = ['Super category', 'Brand', 'Material', 'Material Description',
   'Stock', 'Physical Qty', 'Difference', 'Locations', 'Remarks'];
 
+// Why a counted material has no Stock figure — said plainly, so a blank is
+// never a mystery: its batches were taken off the stock list by a later
+// import, the stock file left Stock blank, or it simply is not in the file.
+function noStockReason(report, itemId) {
+  const rows = report.rows.filter((r) => r.item_id === itemId);
+  const stockRows = rows.filter((r) => r.batch_id != null && !r.is_new);
+  if (stockRows.some((r) => r.stock_qty != null)) return 'Stock batches in different units — not totalled';
+  if (stockRows.some((r) => r.batch_active === false)) return 'No system stock — counted batch is no longer on the stock list (removed by a later stock import)';
+  if (stockRows.some((r) => r.batch_active)) return 'No system stock — Stock is blank for this material in the stock file';
+  return 'No system stock — material has no batch in the stock file';
+}
+
 export function materialRows(report) {
   const out = [];
   const seen = new Map();
@@ -393,15 +435,15 @@ export function materialRows(report) {
       t.batches > 1 ? `${t.batches} batches` : null,
       t.new_batches ? `incl. ${t.new_batches} NEW BATCH${t.new_batches === 1 ? '' : 'ES'}` : null,
       !counted ? 'Not counted' : null,
-      counted && t.system_qty == null ? 'No system stock' : null,
-      t.mixed_units ? 'batches in different units — not totalled' : null,
+      counted && t.system_qty == null ? noStockReason(report, id) : null,
+      t.mixed_units ? mixedNote(t) : null,
     ].filter(Boolean);
     return {
       item_id: id, super_category: r.super_category || '', brand: r.brand || '',
-      material: r.article, description: r.description || '', unit: t.mixed_units ? 'mixed' : (t.unit || ''),
-      stock: t.mixed_units ? null : t.system_qty,
-      physical: t.mixed_units ? null : t.physical_qty,
-      difference: t.mixed_units ? null : t.difference,
+      material: r.article, description: r.description || '', unit: t.unit || '',
+      stock: t.system_qty,
+      physical: t.physical_qty,
+      difference: t.difference,
       locations: [...locs.values()].map((l) => `${l.name} ${l.qty}`).join(' · '),
       remarks: notes.join(' · '),
     };
