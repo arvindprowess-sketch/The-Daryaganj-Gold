@@ -382,6 +382,7 @@ export default function Reports() {
 const WH_REPORTS = [
   ['physical-compile', 'Physical Compile Sheet'],
   ['material-variance', 'Material-wise Variance'],
+  ['all-entries', 'All Entries (incl. void)'],
 ];
 const qtyFmt = (v) => (v == null ? '—' : String(Number(Number(v).toFixed(3))));
 const diffCls = (v) => (v == null ? 'text-slate-300' : v < 0 ? 'text-red-600' : v > 0 ? 'text-amber-600' : 'text-green-600');
@@ -396,6 +397,7 @@ function WarehouseReports({ auditId, store }) {
 
   useEffect(() => {
     setData(null); setErr(''); setFilter('all');
+    if (kind === 'all-entries') return;
     api.get(`/reports/${kind}/${auditId}`)
       .then(setData)
       .catch((e) => setErr(e.body?.cleared?.message || e.message));
@@ -421,11 +423,12 @@ function WarehouseReports({ auditId, store }) {
           <button key={k} className={kind === k ? 'chip-on' : 'chip-off'} onClick={() => setKind(k)}>{label}</button>
         ))}
       </div>
+      {kind === 'all-entries' ? <AllEntries auditId={auditId} store={store} /> : (<>
       {data && (
-        <p className={`mb-3 text-sm ${data.source === 'submitted' ? 'text-slate-600' : 'text-amber-700 font-semibold'}`}>
-          {data.source === 'submitted'
-            ? 'Submitted count — every auditor who has submitted, combined.'
-            : 'PROVISIONAL — nothing submitted yet; showing the live count.'}
+        <p className="mb-3 text-sm text-slate-600">
+          {data.source === 'cleared'
+            ? 'Cleared.'
+            : 'Live — every auditor\'s entries as they stand right now, combined. Submitting is not needed for a count to appear here.'}
           {compile && ' Location-wise, exactly as entered: one line per batch, place and auditor (Counted By). A batch\'s Stock and Difference are on its first line. Batches nobody counted are on the Material-wise Variance.'}
         </p>
       )}
@@ -492,6 +495,97 @@ function WarehouseReports({ auditId, store }) {
           </table>
         </div>
       )}
+      </>)}
+    </div>
+  );
+}
+
+// ── All entries, active AND void ────────────────────────────────────────────
+// Straight from the working record: one line per entry, every auditor, every
+// void with who withdrew it, when and why — the list to reconcile against each
+// auditor's own figures line by line.
+const dt = (t) => (t ? new Date(t).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '');
+
+function AllEntries({ auditId, store }) {
+  const [rows, setRows] = useState(null);
+  const [err, setErr] = useState('');
+  const [status, setStatus] = useState('all');
+  const [who, setWho] = useState('');
+  const [dlErr, setDlErr] = useState('');
+  useEffect(() => {
+    setRows(null); setErr('');
+    api.get(`/reports/all-entries/${auditId}`).then((d) => setRows(d.rows)).catch((e) => setErr(e.message));
+  }, [auditId]);
+  if (err) return <p className="text-sm text-orange-700">{err}</p>;
+  if (!rows) return <Spinner />;
+  const people = [...new Set(rows.map((r) => r.counted_by).filter(Boolean))];
+  const shown = rows.filter((r) => (status === 'all' || (status === 'void' ? r.status === 'VOID' : r.status === 'Active'))
+    && (!who || r.counted_by === who));
+  const voids = rows.filter((r) => r.status === 'VOID').length;
+  return (
+    <div>
+      <p className="mb-3 text-sm text-slate-600">
+        Every entry every auditor made in this audit — {rows.length} in all, {rows.length - voids} active,{' '}
+        <span className="text-red-700 font-semibold">{voids} void</span>. Voided entries are kept here with who voided
+        them, when and why; they are not counted in any total.
+      </p>
+      <div className="flex flex-wrap gap-2 mb-3 items-center">
+        {[['all', 'All'], ['active', 'Active'], ['void', 'Void']].map(([k, l]) => (
+          <button key={k} className={status === k ? 'chip-on' : 'chip-off'} onClick={() => setStatus(k)}>{l}</button>
+        ))}
+        <select className="field py-1.5 w-48" value={who} onChange={(e) => setWho(e.target.value)}>
+          <option value="">All auditors</option>
+          {people.map((p) => <option key={p} value={p}>{p}</option>)}
+        </select>
+        <button className="btn-primary ml-auto" onClick={async () => {
+          setDlErr('');
+          try {
+            await downloadReport(`/reports/all-entries/${auditId}?format=xlsx`,
+              `All_Entries_${(store?.store_name || auditId).replace(/\W+/g, '_')}.xlsx`);
+          } catch (e) { setDlErr(e.message); }
+        }}>⬇ Excel</button>
+      </div>
+      {dlErr && <p className="text-sm text-orange-700 mb-2">{dlErr}</p>}
+      <div className="card overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead className="bg-slate-50 text-left text-slate-500">
+            <tr>
+              <th className="px-3 py-3">#</th><th className="px-3 py-3">Material</th>
+              <th className="px-3 py-3">Material Description</th><th className="px-3 py-3">Batch</th>
+              <th className="px-3 py-3 text-right">Qty</th><th className="px-3 py-3">Location</th>
+              <th className="px-3 py-3">Counted By</th><th className="px-3 py-3">When</th>
+              <th className="px-3 py-3">Status</th><th className="px-3 py-3">Void details</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y">
+            {shown.map((r) => (
+              <tr key={r.id} className={r.status === 'VOID' ? 'bg-red-50/50 text-slate-500' : ''}>
+                <td className="px-3 py-2 text-xs text-slate-400">{r.id}</td>
+                <td className="px-3 py-2 font-medium">{r.material}</td>
+                <td className="px-3 py-2">{r.description || '—'}</td>
+                <td className="px-3 py-2">{r.batch}{r.is_new && <span className="ml-1 text-[10px] font-semibold text-teal-700">NEW</span>}</td>
+                <td className={`px-3 py-2 text-right tabular-nums ${r.status === 'VOID' ? 'line-through' : ''}`}>
+                  {qtyFmt(r.quantity)}{r.open_ml ? ` + ${r.open_ml} ml` : ''}{r.unit ? ` ${r.unit}` : ''}
+                </td>
+                <td className="px-3 py-2">{r.location || '—'}</td>
+                <td className="px-3 py-2">{r.counted_by}</td>
+                <td className="px-3 py-2 text-xs">{dt(r.counted_at)}</td>
+                <td className="px-3 py-2">
+                  {r.status === 'VOID'
+                    ? <span className="rounded bg-red-100 px-1.5 py-0.5 text-xs font-semibold text-red-700">VOID</span>
+                    : <span className="text-xs text-green-700">Active</span>}
+                </td>
+                <td className="px-3 py-2 text-xs">
+                  {r.status === 'VOID' ? `${r.void_reason || '—'} · by ${r.voided_by || '—'} · ${dt(r.voided_at)}` : ''}
+                </td>
+              </tr>
+            ))}
+            {shown.length === 0 && (
+              <tr><td colSpan={10} className="p-8 text-center text-slate-400">No entries.</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }

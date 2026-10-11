@@ -222,8 +222,11 @@ batch retired from the stock list after it was counted still appears there,
 greyed and closed to new entries, so the total always includes it.
 
 **Reports for a warehouse store.** Choosing a warehouse audit on Reports
-replaces the cafe's R1–R6 with two reports, each with an Excel download, both
-reading what was submitted (every auditor combined):
+replaces the cafe's R1–R6 with three reports, each with an Excel download.
+They are **live**: every auditor's entries as they stand right now, combined.
+Submitting is not needed for an entry to appear, and an auditor submitting
+does not freeze the reports or hide the others' entries (the cafe keeps its
+submission snapshots):
 
 - *Physical Compile Sheet* — exactly what was entered, **location-wise**: one
   line per material + batch + location (two auditors at the same batch and
@@ -237,6 +240,12 @@ reading what was submitted (every auditor combined):
   stock of all its batches against everything counted across them, so a batch
   nobody counted shows as shortage here. Remarks name new batches and
   materials not counted at all.
+- *All Entries (incl. void)* — every entry every auditor made, one line each,
+  **active and void**, with who counted it and when; void lines carry the
+  reason, who voided and when. Filter by status or auditor. Built for
+  matching against each auditor's phone; void entries are never in any total.
+  The Physical Compile and Stock-count Excel files carry it as an extra sheet
+  ("All Entries").
 
 **Repeated lines in the stock file.** The same Material + Batch on several
 lines (one line per rack or bin) is one batch: the lines are merged and their

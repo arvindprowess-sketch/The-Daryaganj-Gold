@@ -57,6 +57,13 @@ export async function auditSource(auditId) {
   // auditors: the reports read the union, so whoever has submitted so far is
   // exactly what the report shows, with no merge step anywhere.
   const active = rows.filter((r) => r.status === 'active');
+  // A WAREHOUSE store's reports are always LIVE: every auditor's entries as
+  // they stand, whether or not anyone has submitted — counters do not have to
+  // submit for their counts to be reported. Submissions are still recorded
+  // (and listed), they just do not decide what the reports read.
+  if (audit.inventory_mode === 'warehouse') {
+    return { mode: LIVE, audit, submissions: active, cleared: null, history: rows };
+  }
   if (active.length) {
     return { mode: SNAPSHOT, audit, submissions: active, cleared: null, history: rows };
   }

@@ -9,7 +9,8 @@ import { normalizeName, nameKey } from '../lib/itemName.js';
 import { toCsv } from '../lib/csvTemplate.js';
 import { logActivity } from '../lib/activityLog.js';
 import { buildWorkbook } from '../lib/exporters.js';
-import { batchReport, batchSheets, SUMMARY_HEADERS, summaryLines, locationLines } from '../lib/batchReport.js';
+import { batchReport, batchSheets, SUMMARY_HEADERS, summaryLines, locationLines,
+         allEntries, allEntriesSheet } from '../lib/batchReport.js';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Stock — the warehouse's batch-wise stock list. ADMIN ONLY.
@@ -631,7 +632,8 @@ router.get('/count', async (req, res) => {
     return res.send(toCsv(SUMMARY_HEADERS, summaryLines(report)));
   }
   if (req.query.format === 'xlsx') {
-    const buf = await buildWorkbook(batchSheets(report));
+    const buf = await buildWorkbook([...batchSheets(report),
+      allEntriesSheet(report.audit, await allEntries(auditId))]);
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename="${base}.xlsx"`);
     return res.send(buf);

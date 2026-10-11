@@ -6,8 +6,8 @@ import {
 } from '../lib/reports.js';
 import { buildWorkbook, buildPdf } from '../lib/exporters.js';
 import { buildAuditWorkbook } from '../lib/auditWorkbook.js';
-import { batchReport, batchSheets, compileRows, materialRows, compileSheet, materialSheet }
-  from '../lib/batchReport.js';
+import { batchReport, batchSheets, compileRows, materialRows, compileSheet, materialSheet,
+         allEntries, allEntriesSheet } from '../lib/batchReport.js';
 import { auditSource, clearedNotice, CLEARED } from '../lib/submissions.js';
 import { reportFields, reportColumns, fieldValue, bucketValue } from '../lib/columns.js';
 
@@ -121,9 +121,22 @@ router.get('/physical-compile/:auditId', async (req, res) => {
   if (!report) return;
   if (req.query.format === 'xlsx') {
     return sendXlsx(res, `Physical_Compile_${slug(report.audit.store_name)}_${ymd(report.audit.audit_date)}`,
-      [compileSheet(report), materialSheet(report)]);
+      [compileSheet(report), materialSheet(report),
+       allEntriesSheet(report.audit, await allEntries(req.params.auditId))]);
   }
   res.json({ audit: report.audit, source: report.source, rows: compileRows(report) });
+});
+
+// Every entry, active and void, every auditor — for reconciling line by line.
+router.get('/all-entries/:auditId', async (req, res) => {
+  const src = req.auditSource;
+  if (!src?.audit) return res.status(404).json({ error: 'Not found' });
+  const rows = await allEntries(req.params.auditId);
+  if (req.query.format === 'xlsx') {
+    return sendXlsx(res, `All_Entries_${slug(src.audit.store_name)}_${ymd(src.audit.audit_date)}`,
+      [allEntriesSheet(src.audit, rows)]);
+  }
+  res.json({ audit: src.audit, rows });
 });
 
 router.get('/material-variance/:auditId', async (req, res) => {

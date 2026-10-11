@@ -614,7 +614,9 @@ function BatchCount() {
           <h2 className="text-xl font-bold">Batch-wise count</h2>
           <p className="text-slate-500 text-sm">
             System quantity against physical quantity, batch by batch.
-            {data && ` Reading the ${data.source === 'submitted' ? 'submitted count' : data.source === 'cleared' ? 'cleared submission (nothing to show)' : 'live count (not yet submitted)'}.`}
+            {data && (data.source === 'live'
+              ? ' Live — every auditor\'s entries as they stand now; submitting is not needed.'
+              : ` Reading the ${data.source === 'submitted' ? 'submitted count' : 'cleared submission (nothing to show)'}.`)}
           </p>
         </div>
         <div className="flex gap-2 items-center">
