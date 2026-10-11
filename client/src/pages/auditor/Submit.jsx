@@ -3,6 +3,8 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { api } from '../../lib/api.js';
 import MobileHeader from '../../components/MobileHeader.jsx';
 import { Spinner } from '../../components/ui.jsx';
+import { flushQueue, pendingFor, rejectedFor } from '../../lib/queue.js';
+import { useInventoryMode } from '../../lib/mode.js';
 
 // M8 — Submit.
 //
@@ -19,13 +21,18 @@ export default function Submit() {
   const [uncounted, setUncounted] = useState(null);
   const [summary, setSummary] = useState(null);
   const [confirming, setConfirming] = useState(false);
-  const [done, setDone] = useState(false);
+  // The figures the SERVER confirmed are in the submission. Success is only
+  // ever shown from these, never from the request merely having been sent.
+  const [done, setDone] = useState(null);
+  const [live, setLive] = useState(null);
+  const warehouse = useInventoryMode() === 'warehouse';
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(() => {
     api.get(`/audits/${auditId}/uncounted`).then(setUncounted);
     api.get(`/audits/${auditId}/submit-summary`).then(setSummary);
+    api.get(`/audits/${auditId}/submission`).then((s) => setLive(s.live)).catch(() => {});
   }, [auditId]);
   useEffect(() => { load(); }, [load]);
 
@@ -41,15 +48,51 @@ export default function Submit() {
   async function submitAudit() {
     setErr(''); setBusy(true);
     try {
+      // Anything still queued on this phone would be missing from the
+      // submission without a word. Send it first; if it cannot go, stop.
+      await flushQueue();
+      const waiting = pendingFor(auditId);
+      if (waiting > 0) {
+        setErr(`${waiting} ${waiting === 1 ? 'entry is' : 'entries are'} still waiting to upload. `
+          + 'Nothing has been submitted. Reconnect and try again — your entries are kept on this phone.');
+        return;
+      }
+      const refused = rejectedFor(auditId).length;
+      if (refused > 0) {
+        setErr(`${refused} ${refused === 1 ? 'entry was' : 'entries were'} refused by the server (see the red banner). `
+          + 'Count them again, dismiss the banner, then submit. Nothing has been submitted.');
+        return;
+      }
+
       const r = await api.post(`/audits/${auditId}/submit`, {});
       if (r.summary) setSummary(r.summary);
-      setConfirming(false);
-      setDone(true);
+      if (!r.verified || r.verified.entries !== Number(r.submission?.entry_count)) {
+        setErr('The server did not confirm the submission. Nothing is lost — tap Submit again.');
+        return;
+      }
+      setDone(r.verified);
     } catch (e) {
-      setErr(e.isNetwork ? 'No connection — try again when back online.' : e.message);
-      setConfirming(false);
+      if (e.isNetwork) {
+        // The request may have landed with only the reply lost. Ask the server
+        // what it actually holds before saying anything either way.
+        const confirmed = await confirmFromServer();
+        if (confirmed) { setDone(confirmed); return; }
+        setErr('No connection — the submission was NOT confirmed. Your entries are safe; try again when back online.');
+      } else {
+        setErr(`Submission failed: ${e.message}. Your entries are safe; try again.`);
+      }
       load();
-    } finally { setBusy(false); }
+    } finally {
+      setBusy(false);
+      setConfirming(false);
+    }
+  }
+
+  async function confirmFromServer() {
+    try {
+      const s = await api.get(`/audits/${auditId}/submission`);
+      return s.state === 'submitted' && s.verified?.in_sync ? s.verified : null;
+    } catch { return null; }
   }
 
   if (!uncounted || !summary) return <Spinner label="Checking progress…" />;
@@ -60,12 +103,20 @@ export default function Submit() {
         <MobileHeader title="Submitted" back={`/a/audit/${auditId}`} />
         <div className="p-6 text-center">
           <div className="text-6xl mb-4">✅</div>
-          <h2 className="text-xl font-bold mb-2">Count submitted</h2>
-          <p className="text-slate-600 mb-6">
-            {summary.counted} counted item(s) submitted. The admin will review and close the audit.
+          <h2 className="text-xl font-bold mb-2">Count submitted and verified</h2>
+          <p className="text-slate-600 mb-4">
+            The server has saved and checked your submission. The admin will review and close the audit.
           </p>
+          <div className="card p-4 mb-6 text-left">
+            <Line label={warehouse ? 'articles' : 'items'} value={done.items} tone="text-green-700" />
+            <Line label="entries" value={done.entries} />
+            {warehouse && <Line label="batches" value={done.batches} />}
+            {warehouse && done.new_batches > 0 && (
+              <Line label="new batches created during counting" value={done.new_batches} tone="text-teal-700" />
+            )}
+          </div>
           <button className="btn-primary w-full" onClick={() => nav(`/a/audit/${auditId}`)}>
-            Back to super categories
+            {warehouse ? 'Back to stock' : 'Back to super categories'}
           </button>
         </div>
       </div>
@@ -132,6 +183,11 @@ export default function Submit() {
               <Line label="counted" value={summary.counted} tone="text-green-700" />
               <Line label="not counted" value={summary.uncounted} tone="text-amber-700" />
             </div>
+            {live && (
+              <p className="text-sm font-semibold text-slate-700 mb-2">
+                {live.entries} {live.entries === 1 ? 'entry' : 'entries'} will be submitted.
+              </p>
+            )}
             <p className="text-sm text-slate-600 mb-4">
               Only counted items will be submitted. Items not counted{' '}
               <strong>will not be sent as zero</strong>.

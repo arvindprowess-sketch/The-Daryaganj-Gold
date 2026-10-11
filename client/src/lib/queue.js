@@ -12,6 +12,25 @@ const QUEUE_KEY = 'audix_pending_entries';
 // Entries the server refused outright. Parked, never dropped — see below.
 const REJECT_KEY = 'audix_rejected_entries';
 
+// ── Client reference ────────────────────────────────────────────────────────
+// Stamped on every save. The server treats the same reference from the same
+// person as the same entry, so a save that is retried — after a lost reply,
+// from the queue, or by a second tap — can never be recorded twice.
+// crypto.randomUUID needs a secure context, which a phone on a LAN IP is not.
+export function newClientRef() {
+  try { if (crypto?.randomUUID) return crypto.randomUUID(); } catch { /* fall through */ }
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
+}
+
+// Entries still waiting to reach the server for one audit. Submitting while
+// any exist would leave them out of the submission without anyone noticing.
+export function pendingFor(auditId) {
+  return readQueue().filter((j) => String(j.auditId) === String(auditId)).length;
+}
+export function rejectedFor(auditId) {
+  return readRejects().filter((j) => String(j.auditId) === String(auditId));
+}
+
 // ── Drafts ──────────────────────────────────────────────────────────────────
 export function draftKey(auditId, itemId) {
   return `${DRAFT_PREFIX}${auditId}_${itemId}`;

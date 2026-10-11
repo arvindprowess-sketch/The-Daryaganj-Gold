@@ -7,7 +7,8 @@ import { readCsvUpload } from '../lib/csv.js';
 import { normalizeName, nameKey } from '../lib/itemName.js';
 import { toCsv } from '../lib/csvTemplate.js';
 import { logActivity } from '../lib/activityLog.js';
-import { auditSource, submissionIds, SNAPSHOT, CLEARED } from '../lib/submissions.js';
+import { buildWorkbook } from '../lib/exporters.js';
+import { batchReport, batchSheets, SUMMARY_HEADERS, summaryRow } from '../lib/batchReport.js';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Stock — the warehouse's batch-wise stock list. ADMIN ONLY.
@@ -60,7 +61,12 @@ function batchUnit(rowUnit, articleUnit) {
 
 const BATCH_COLUMNS = `b.id, b.item_id, b.batch_no, b.unit AS own_unit,
        COALESCE(NULLIF(btrim(b.unit), ''), i.unit) AS unit,
-       b.qty, to_char(b.expiry_date, 'YYYY-MM-DD') AS expiry_date, b.is_active`;
+       b.qty, to_char(b.expiry_date, 'YYYY-MM-DD') AS expiry_date, b.is_active,
+       b.origin, b.created_at, b.created_in_audit,
+       (SELECT name FROM users WHERE id = b.created_by) AS created_by_name,
+       (SELECT s.name || ' · ' || to_char(a.audit_date, 'YYYY-MM-DD')
+          FROM audits a JOIN stores s ON s.id = a.store_id
+         WHERE a.id = b.created_in_audit) AS created_in_audit_label`;
 
 // ── Stock list ──────────────────────────────────────────────────────────────
 // One row per article with its batches attached, so the screen can show
@@ -72,12 +78,17 @@ router.get('/', async (req, res) => {
   const params = [];
   if (active === 'active') conds.push('i.is_active');
   else if (active === 'inactive') conds.push('NOT i.is_active');
+  // Only articles that have a batch created by a counter.
+  if (req.query.origin === 'counted') {
+    conds.push(`EXISTS (SELECT 1 FROM item_batches nb WHERE nb.item_id = i.id AND nb.origin = 'counted')`);
+  }
   if (search) {
     params.push(`%${clean(search)}%`);
     // A batch number finds its article too: a counter reads it off the carton.
-    conds.push(`(i.name ILIKE $1 OR i.description ILIKE $1
+    const n = `$${params.length}`;
+    conds.push(`(i.name ILIKE ${n} OR i.description ILIKE ${n}
                  OR EXISTS (SELECT 1 FROM item_batches xb
-                             WHERE xb.item_id = i.id AND xb.batch_no ILIKE $1))`);
+                             WHERE xb.item_id = i.id AND xb.batch_no ILIKE ${n}))`);
   }
   const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
   const { rows: articles } = await query(
@@ -110,7 +121,8 @@ router.get('/', async (req, res) => {
     `SELECT (SELECT count(*)::int FROM items WHERE is_active) AS articles,
             (SELECT count(*)::int FROM item_batches b JOIN items i ON i.id = b.item_id
               WHERE b.is_active AND i.is_active) AS batches,
-            (SELECT count(*)::int FROM items WHERE NOT is_active) AS inactive`
+            (SELECT count(*)::int FROM items WHERE NOT is_active) AS inactive,
+            (SELECT count(*)::int FROM item_batches WHERE origin = 'counted') AS new_batches`
   );
   res.json({ articles: out, counts: totals[0] });
 });
@@ -367,9 +379,12 @@ router.post('/import', upload.single('file'), async (req, res) => {
     if (mode === 'replace') {
       // Deactivated, never deleted: a batch that was counted against must stay
       // readable in the count it belongs to.
+      // Batches a counter created are NOT the stock list's to retire: they
+      // exist because somebody found them on the shelf, and must stay
+      // available until the admin removes them deliberately.
       const { rowCount } = await c.query(
         `UPDATE item_batches SET is_active = FALSE, updated_at = now()
-          WHERE is_active AND NOT (id = ANY($1::int[]))`,
+          WHERE is_active AND origin = 'stock' AND NOT (id = ANY($1::int[]))`,
         [touchedBatchIds]
       );
       s.batches_deactivated = rowCount;
@@ -386,88 +401,29 @@ router.post('/import', upload.single('file'), async (req, res) => {
 });
 
 // ── Batch-wise count for one audit ──────────────────────────────────────────
-// Book quantity beside counted quantity, batch by batch. Reads the same
-// source as every other report: the submitted snapshot once there is one,
-// the live count while counting is still in progress.
+// Book quantity beside counted quantity, batch by batch, including every batch
+// a counter created during the audit. JSON for the screen, or the same rows as
+// CSV or an Excel workbook (summary sheet + one line per entry).
 router.get('/count', async (req, res) => {
   const auditId = String(req.query.audit_id || '');
   if (!/^\d+$/.test(auditId)) return res.status(400).json({ error: 'audit_id required' });
-  const src = await auditSource(auditId);
-  if (!src.audit) return res.status(404).json({ error: 'Audit not found' });
+  const report = await batchReport(auditId);
+  if (!report) return res.status(404).json({ error: 'Audit not found' });
 
-  const fromSnapshot = src.mode === SNAPSHOT;
-  const params = [auditId];
-  if (fromSnapshot) params.push(submissionIds(src));
-  const entries = src.mode === CLEARED
-    ? `SELECT NULL::int AS item_id, NULL::int AS batch_id, NULL::numeric AS qty,
-              NULL::int AS bottles, NULL::int AS open_ml WHERE $1::int IS NULL`
-    : fromSnapshot
-      // $1 is unused on this branch but still sent, so it is typed here.
-      ? `SELECT item_id, batch_id, qty, bottles, open_ml FROM submission_entries
-          WHERE submission_id = ANY($2::int[]) AND $1::int IS NOT NULL`
-      : `SELECT item_id, batch_id, qty, bottles, open_ml FROM count_entries
-          WHERE audit_id = $1 AND status = 'active'`;
-
-  // Every live batch, counted or not, plus anything counted against an
-  // article with no batch or a batch since retired — a count is never hidden
-  // because the stock list changed underneath it.
-  const { rows } = await query(
-    `WITH e AS (${entries}),
-     agg AS (
-       SELECT item_id, batch_id, count(*)::int AS entries,
-              sum(qty) AS qty, sum(bottles) AS bottles, sum(open_ml) AS open_ml
-         FROM e GROUP BY item_id, batch_id
-     ),
-     keys AS (
-       SELECT b.item_id, b.id AS batch_id FROM item_batches b
-         JOIN items i ON i.id = b.item_id
-        WHERE b.is_active AND i.is_active
-       UNION
-       SELECT item_id, batch_id FROM agg
-     )
-     SELECT i.id AS item_id, i.name AS article, i.description, i.is_liquor,
-            k.batch_id, b.batch_no, b.is_active AS batch_active,
-            COALESCE(NULLIF(btrim(b.unit), ''), i.unit) AS unit,
-            b.qty AS stock_qty,
-            COALESCE(a.entries, 0) AS entries,
-            a.qty AS counted_qty, a.bottles AS counted_bottles, a.open_ml AS counted_open_ml
-       FROM keys k
-       JOIN items i ON i.id = k.item_id
-       LEFT JOIN item_batches b ON b.id = k.batch_id
-       LEFT JOIN agg a ON a.item_id = k.item_id AND a.batch_id IS NOT DISTINCT FROM k.batch_id
-      ORDER BY lower(i.name), b.expiry_date NULLS LAST, lower(b.batch_no) NULLS FIRST`,
-    params
-  );
-
-  const out = rows.map((r) => {
-    const counted = r.entries > 0;
-    // Liquor counts sealed bottles against the batch's book quantity; open ml
-    // is shown on its own and never folded in.
-    const physical = counted ? Number(r.is_liquor ? r.counted_bottles || 0 : r.counted_qty || 0) : null;
-    const difference = counted && r.stock_qty != null
-      ? Number((physical - Number(r.stock_qty)).toFixed(3)) : null;
-    return { ...r, counted, physical_qty: physical, difference };
-  });
-
-  const source = src.mode === SNAPSHOT ? 'submitted' : src.mode === CLEARED ? 'cleared' : 'live';
+  const base = `batch_count_${report.audit.store_code || report.audit.store_name}_${auditId}`
+    .replace(/[^A-Za-z0-9_.-]+/g, '_');
   if (req.query.format === 'csv') {
-    const csv = toCsv(
-      ['Article', 'Description', 'Batch', 'Unit', 'System Qty', 'Physical Qty', 'Open ML', 'Difference', 'Status'],
-      out.map((r) => [
-        r.article, r.description || '', r.batch_no || '(no batch)', r.unit,
-        r.stock_qty ?? '', r.physical_qty ?? '', r.is_liquor ? (r.counted_open_ml ?? '') : '',
-        r.difference ?? '',
-        !r.counted ? 'Not counted' : r.stock_qty == null ? 'No system qty'
-          : r.difference === 0 ? 'Match' : r.difference > 0 ? 'Excess' : 'Short',
-      ])
-    );
-    const name = `batch_count_${src.audit.store_code || src.audit.store_name}_${auditId}.csv`
-      .replace(/[^A-Za-z0-9_.-]+/g, '_');
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-    res.setHeader('Content-Disposition', `attachment; filename="${name}"`);
-    return res.send(csv);
+    res.setHeader('Content-Disposition', `attachment; filename="${base}.csv"`);
+    return res.send(toCsv(SUMMARY_HEADERS, report.rows.map(summaryRow)));
   }
-  res.json({ audit: src.audit, source, rows: out });
+  if (req.query.format === 'xlsx') {
+    const buf = await buildWorkbook(batchSheets(report));
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="${base}.xlsx"`);
+    return res.send(buf);
+  }
+  res.json(report);
 });
 
 export default router;

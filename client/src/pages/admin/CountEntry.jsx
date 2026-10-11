@@ -264,7 +264,12 @@ export default function CountEntry() {
                                 <td className={`py-1 ${e.status === 'void' ? 'line-through' : 'font-medium'}`}>
                                   {i.is_liquor ? `${e.bottles ?? 0} btl · ${e.open_ml ?? 0} ml` : `${Number(e.qty)} ${e.entry_unit || i.unit}`}
                                 </td>
-                                {warehouse && <td className="py-1">{e.batch_no || '—'}</td>}
+                                {warehouse && (
+                                  <td className="py-1">
+                                    {e.batch_no || '—'}
+                                    {e.batch_origin === 'counted' && <span className="ml-1 text-[10px] font-semibold text-teal-700">NEW</span>}
+                                  </td>
+                                )}
                                 <td className={`py-1 ${e.status === 'void' ? 'line-through' : ''}`}>{e.location_text || '—'}</td>
                                 <td className="py-1">{e.counted_by_name}</td>
                                 <td className="py-1">{fmtDateTime(e.counted_at, '')}</td>

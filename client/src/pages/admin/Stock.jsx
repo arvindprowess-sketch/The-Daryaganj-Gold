@@ -46,6 +46,7 @@ export default function Stock() {
   const [search, setSearch] = useState('');
   const debounced = useDebounced(search, 300);
   const [active, setActive] = useState('active');
+  const [onlyNew, setOnlyNew] = useState(false);
   const [expanded, setExpanded] = useState({});
   const [articleForm, setArticleForm] = useState(null);   // {id?, name, description, unit}
   const [batchForm, setBatchForm] = useState(null);       // {itemId, id?, ...}
@@ -53,9 +54,10 @@ export default function Stock() {
 
   const load = useCallback(() => {
     const qs = new URLSearchParams({ active });
+    if (onlyNew) qs.set('origin', 'counted');
     if (debounced.trim()) qs.set('search', debounced.trim());
     return api.get(`/stock?${qs}`).then(setData);
-  }, [debounced, active]);
+  }, [debounced, active, onlyNew]);
   useEffect(() => { load(); }, [load]);
 
   async function saveArticle() {
@@ -141,6 +143,7 @@ export default function Stock() {
           <p className="text-slate-500 text-sm">
             {counts.articles} articles · {counts.batches} batches
             {counts.inactive ? ` · ${counts.inactive} inactive articles` : ''}
+            {counts.new_batches ? ` · ${counts.new_batches} created during counting` : ''}
           </p>
         </div>
         <div className="flex gap-2">
@@ -186,6 +189,9 @@ export default function Stock() {
         {[['active', 'Active'], ['inactive', 'Inactive'], ['all', 'All']].map(([k, label]) => (
           <button key={k} className={active === k ? 'chip-on' : 'chip-off'} onClick={() => setActive(k)}>{label}</button>
         ))}
+        <button className={onlyNew ? 'chip-on' : 'chip-off'} onClick={() => setOnlyNew(!onlyNew)}>
+          New batches from counting ({counts.new_batches || 0})
+        </button>
       </div>
 
       <div className="card overflow-x-auto mb-8">
@@ -240,7 +246,20 @@ export default function Stock() {
                             {a.batches.map((b) => (
                               batchForm?.id === b.id ? <Fragment key={b.id}>{batchFormRow(a.id)}</Fragment> : (
                                 <tr key={b.id} className={b.is_active ? '' : 'text-slate-400'}>
-                                  <td className="px-3 py-1.5 font-medium">{b.batch_no}</td>
+                                  <td className="px-3 py-1.5 font-medium">
+                                    {b.batch_no}
+                                    {b.origin === 'counted' && (
+                                      <span className="ml-1.5 rounded bg-teal-100 px-1 py-0.5 text-[10px] font-semibold text-teal-800"
+                                            title={`Created during counting${b.created_by_name ? ` by ${b.created_by_name}` : ''}${b.created_in_audit_label ? ` — ${b.created_in_audit_label}` : ''}`}>
+                                        NEW
+                                      </span>
+                                    )}
+                                    {b.origin === 'counted' && (
+                                      <div className="text-[11px] text-slate-500 font-normal">
+                                        by {b.created_by_name || 'a counter'}{b.created_in_audit_label ? ` · ${b.created_in_audit_label}` : ''}
+                                      </div>
+                                    )}
+                                  </td>
                                   <td className="px-3 py-1.5">{b.unit}</td>
                                   <td className="px-3 py-1.5 tabular-nums">{b.qty == null ? '—' : fmtQty(b.qty)}</td>
                                   <td className="px-3 py-1.5">{b.expiry_date || '—'}</td>
@@ -293,7 +312,8 @@ function StockImport({ onDone }) {
   async function run() {
     if (!file) return;
     if (mode === 'replace' && !window.confirm(
-      'Replace: every live batch that is NOT in this file will be deactivated. Continue?')) return;
+      'Replace: every stock-list batch that is NOT in this file will be deactivated. '
+      + 'Batches created during counting are kept. Continue?')) return;
     setBusy(true); setResult(null);
     const fd = new FormData();
     fd.append('file', file);
@@ -368,6 +388,7 @@ function BatchCount() {
     if (filter === 'counted') return r.counted;
     if (filter === 'notcounted') return !r.counted;
     if (filter === 'diff') return r.counted && r.difference !== 0;
+    if (filter === 'new') return r.is_new;
     return true;
   });
   const audit = audits.find((a) => String(a.id) === auditId);
@@ -388,15 +409,21 @@ function BatchCount() {
               <option key={a.id} value={a.id}>{a.store_name} — {fmtDate(a.audit_date)}</option>
             ))}
           </select>
+          <button className="btn-primary" disabled={!auditId}
+                  onClick={() => downloadReport(`/stock/count?audit_id=${auditId}&format=xlsx`,
+                                                `batch_count_${audit?.store_code || auditId}.xlsx`)}>
+            Download Excel
+          </button>
           <button className="btn-ghost" disabled={!auditId}
                   onClick={() => downloadReport(`/stock/count?audit_id=${auditId}&format=csv`,
                                                 `batch_count_${audit?.store_code || auditId}.csv`)}>
-            Download CSV
+            CSV
           </button>
         </div>
       </div>
       <div className="flex gap-2 mb-3">
-        {[['all', 'All'], ['counted', 'Counted'], ['notcounted', 'Not counted'], ['diff', 'With difference']].map(([k, label]) => (
+        {[['all', 'All'], ['counted', 'Counted'], ['notcounted', 'Not counted'], ['diff', 'With difference'],
+          ['new', `New batches (${(data?.rows || []).filter((r) => r.is_new).length})`]].map(([k, label]) => (
           <button key={k} className={filter === k ? 'chip-on' : 'chip-off'} onClick={() => setFilter(k)}>{label}</button>
         ))}
       </div>
@@ -411,6 +438,7 @@ function BatchCount() {
                 <th className="px-3 py-3">Batch</th><th className="px-3 py-3">Unit</th>
                 <th className="px-3 py-3 text-right">System</th><th className="px-3 py-3 text-right">Physical</th>
                 <th className="px-3 py-3 text-right">Difference</th>
+                <th className="px-3 py-3">Locations</th>
               </tr>
             </thead>
             <tbody className="divide-y">
@@ -421,6 +449,10 @@ function BatchCount() {
                   <td className="px-3 py-2">
                     {r.batch_no || <span className="text-amber-600">(no batch)</span>}
                     {r.batch_id && !r.batch_active && <span className="text-xs text-slate-400"> · inactive</span>}
+                    {r.is_new && (
+                      <span className="ml-1.5 rounded bg-teal-100 px-1 py-0.5 text-[10px] font-semibold text-teal-800"
+                            title={`Created during counting${r.batch_created_by ? ` by ${r.batch_created_by}` : ''}`}>NEW</span>
+                    )}
                   </td>
                   <td className="px-3 py-2 text-slate-500">{r.unit}</td>
                   <td className="px-3 py-2 text-right tabular-nums">{r.stock_qty == null ? '—' : fmtQty(r.stock_qty)}</td>
@@ -433,10 +465,13 @@ function BatchCount() {
                       : r.difference > 0 ? 'text-amber-600' : 'text-green-600'}`}>
                     {r.difference == null ? '—' : r.difference > 0 ? `+${fmtQty(r.difference)}` : fmtQty(r.difference)}
                   </td>
+                  <td className="px-3 py-2 text-xs text-slate-600">
+                    {r.locations.length ? r.locations.map((l) => `${l.name} ${fmtQty(l.qty)}`).join(' · ') : '—'}
+                  </td>
                 </tr>
               ))}
               {rows.length === 0 && (
-                <tr><td colSpan={7} className="p-8 text-center text-slate-400">Nothing to show.</td></tr>
+                <tr><td colSpan={8} className="p-8 text-center text-slate-400">Nothing to show.</td></tr>
               )}
             </tbody>
           </table>

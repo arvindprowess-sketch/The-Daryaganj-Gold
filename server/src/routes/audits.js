@@ -159,7 +159,16 @@ router.post('/:id/submit', async (req, res) => {
   // auditor keeps their working record and the reports get a frozen set of
   // numbers the admin can clear without destroying anyone's work.
   const result = await withTransaction(async (c) => {
+    // One submit at a time per auditor per audit. A double tap, or a retry
+    // fired while the first request is still running, waits here and then
+    // simply replaces the first with an identical snapshot — it can never
+    // interleave with it.
+    await c.query('SELECT pg_advisory_xact_lock($1::int, $2::int)', [req.params.id, req.user.id]);
     const submission = await createSubmission(c, req.params.id, req.user.id);
+    // Verified BEFORE commit. If the snapshot does not hold exactly the
+    // auditor's active entries, the whole submit rolls back and the phone is
+    // told it failed — "submitted" is never said about data that is not there.
+    const verified = await verifySubmission(c, req.params.id, req.user.id, submission);
     // The audit becomes `submitted` only when EVERY auditor mapped to the
     // store has one standing. One person finishing does not close the store.
     const progress = await refreshAuditStatus(c, req.params.id);
@@ -172,14 +181,47 @@ router.post('/:id/submit', async (req, res) => {
                 auditors_submitted: progress.submitted, auditors_total: progress.auditors },
       userId: req.user.id,
     }, c);
-    return { audit: rows[0], submission, progress };
+    return { audit: rows[0], submission, progress, verified };
   });
 
   // The numbers as they stood at submission, so the auditor's confirmation
   // screen reports what was actually sent.
   res.json({ ...result.audit, summary, submission: result.submission,
-             progress: result.progress });
+             progress: result.progress, verified: result.verified });
 });
+
+// ── Proof that a submission holds what was counted ──────────────────────────
+// Runs inside the submit transaction. The snapshot must contain exactly the
+// auditor's active entries — same number, same content (driftCountSql compares
+// item, location, quantities and batch) — or the submit is refused and rolled
+// back. Returns the figures the phone shows in its success message, read from
+// the snapshot itself rather than from what was meant to be copied.
+async function verifySubmission(c, auditId, userId, submission) {
+  const { rows } = await c.query(
+    `SELECT (SELECT count(*)::int FROM count_entries ce
+              WHERE ce.audit_id = $1 AND ce.counted_by = $2 AND ce.status = 'active') AS live,
+            (SELECT count(*)::int FROM submission_entries WHERE submission_id = $3) AS entries,
+            (SELECT count(DISTINCT item_id)::int FROM submission_entries WHERE submission_id = $3) AS items,
+            (SELECT count(DISTINCT batch_id)::int FROM submission_entries
+              WHERE submission_id = $3 AND batch_id IS NOT NULL) AS batches,
+            (SELECT count(DISTINCT se.batch_id)::int FROM submission_entries se
+               JOIN item_batches b ON b.id = se.batch_id
+              WHERE se.submission_id = $3 AND b.origin = 'counted') AS new_batches,
+            ${driftCountSql('a', 'sub')} AS drift
+       FROM audits a, audit_submissions sub
+      WHERE a.id = $1 AND sub.id = $3`,
+    [auditId, userId, submission.id]
+  );
+  const v = rows[0];
+  if (!v || v.entries !== v.live || v.drift !== 0 || v.entries !== Number(submission.entry_count)) {
+    const err = new Error('Submission could not be verified — nothing was submitted. Your entries are safe; try again.');
+    err.status = 500;
+    err.code = 'submit_unverified';
+    throw err;
+  }
+  return { submission_id: submission.id, entries: v.entries, items: v.items,
+           batches: v.batches, new_batches: v.new_batches };
+}
 
 // ── Submission state ────────────────────────────────────────────────────────
 // One endpoint both sides read, so the auditor and the admin can never be
@@ -213,9 +255,31 @@ router.get('/:id/submission', async (req, res) => {
     [req.params.id, isAdmin ? null : req.user.id]
   );
 
+  // When this auditor has a standing submission: is it exactly their current
+  // count? The phone reads this after a submit whose reply was lost, so it
+  // can tell the auditor what really happened instead of guessing.
+  let verified = null;
+  if (mine) {
+    const { rows: v } = await query(
+      `SELECT (SELECT count(*)::int FROM submission_entries WHERE submission_id = $2) AS entries,
+              (SELECT count(DISTINCT item_id)::int FROM submission_entries WHERE submission_id = $2) AS items,
+              (SELECT count(DISTINCT batch_id)::int FROM submission_entries
+                WHERE submission_id = $2 AND batch_id IS NOT NULL) AS batches,
+              (SELECT count(DISTINCT se.batch_id)::int FROM submission_entries se
+                 JOIN item_batches b ON b.id = se.batch_id
+                WHERE se.submission_id = $2 AND b.origin = 'counted') AS new_batches,
+              ${driftCountSql('a', 'sub')} AS drift
+         FROM audits a, audit_submissions sub
+        WHERE a.id = $1 AND sub.id = $2`,
+      [req.params.id, mine.id]
+    );
+    verified = { submission_id: mine.id, ...v[0], in_sync: v[0].drift === 0 };
+  }
+
   res.json({
     state,
     submission: mine,
+    verified,
     cleared: clearedNotice(myCleared),
     live: live[0],
     can_submit: live[0].entries > 0 && state !== 'submitted',

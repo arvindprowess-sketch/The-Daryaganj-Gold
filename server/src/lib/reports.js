@@ -325,7 +325,7 @@ export async function itemEntriesForAdmin(auditId, itemId = null) {
     `SELECT ce.id, ce.item_id, i.name, i.unit, i.is_liquor,
             ce.qty, ce.bottles, ce.open_ml, ce.location_text, ce.remarks, ce.photo_url,
             ce.status, ce.void_reason, ce.counted_at,
-            ce.batch_id, b.batch_no,
+            ce.batch_id, b.batch_no, b.origin AS batch_origin,
             COALESCE(NULLIF(btrim(b.unit), ''), i.unit) AS entry_unit,
             -- WHO counted it. With per-auditor sheets this is no longer a
             -- detail: it is how the admin tells two auditors' rows apart.

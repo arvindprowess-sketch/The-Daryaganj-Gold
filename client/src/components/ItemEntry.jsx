@@ -1,10 +1,10 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import BottomSheet from './BottomSheet.jsx';
 import PhotoInput from './PhotoInput.jsx';
 import { PhotoThumb, Spinner } from './ui.jsx';
 import { api, bustCache } from '../lib/api.js';
 import { useToast } from './Toast.jsx';
-import { saveDraft, loadDraft, clearDraft, queueEntry } from '../lib/queue.js';
+import { saveDraft, loadDraft, clearDraft, queueEntry, newClientRef } from '../lib/queue.js';
 import { fmtTime } from '../lib/datetime.js';
 import { subUnitFor, combine, preview } from '../lib/measuredUnit.js';
 import LocationSelect, { useStickyLocation } from './LocationSelect.jsx';
@@ -24,11 +24,20 @@ export const fmtQty = (n) => String(Number(Number(n).toFixed(3)));
 export default function ItemEntry({ auditId, item, batch = null, onClose, onSaved,
                                     uploadOnly = false, canVoid = true }) {
   const unit = batch?.unit || item.unit;
+  // A batch the counter is creating right now: it does not exist on the
+  // server until this entry is saved, and is created together with it.
+  const isNewBatch = !!batch?.isNew;
   // A KG or LTR item is entered as two boxes; the stored value is still one
   // number in the item's own unit.
   const sub = item.is_liquor ? null : subUnitFor(unit);
   // Drafts are kept per batch, so a half-typed count never lands on another.
-  const draftId = batch ? `${item.id}_b${batch.id}` : item.id;
+  const draftId = !batch ? item.id
+    : isNewBatch ? `${item.id}_n${String(batch.batch_no).trim().toLowerCase()}`
+      : `${item.id}_b${batch.id}`;
+  // The reference this save goes out under. It changes whenever the form
+  // changes, so pressing Save twice on the same figures is one entry, while
+  // correcting a figure and saving again is a new one.
+  const clientRef = useRef(newClientRef());
   const empty = { qty: '', major: '', minor: '', bottles: '', open_ml: '',
                   remarks: '', photo_url: null };
   const [form, setForm] = useState(() => loadDraft(auditId, draftId) || empty);
@@ -45,6 +54,7 @@ export default function ItemEntry({ auditId, item, batch = null, onClose, onSave
   const activeEntries = (entries || []).filter((e) => e.status === 'active');
 
   function loadEntries() {
+    if (isNewBatch) { setEntries([]); return Promise.resolve(); }
     const qs = batch ? `?batch_id=${batch.id}` : '';
     return api.get(`/audits/${auditId}/items/${item.id}/entries${qs}`).then(setEntries);
   }
@@ -53,14 +63,18 @@ export default function ItemEntry({ auditId, item, batch = null, onClose, onSave
   // Mirror every keystroke to localStorage (network safety net).
   function update(patch) {
     const next = { ...form, ...patch };
+    clientRef.current = newClientRef();
     setForm(next);
     saveDraft(auditId, draftId, next);
   }
 
   function buildPayload() {
-    const p = { item_id: item.id, location_id: locationId || null,
+    const p = { item_id: item.id, location_id: locationId || null, client_ref: clientRef.current,
                 remarks: form.remarks || null, photo_url: form.photo_url || null };
-    if (batch) p.batch_id = batch.id;
+    if (isNewBatch) {
+      p.new_batch_no = batch.batch_no;
+      p.new_batch_unit = batch.unit || null;
+    } else if (batch) p.batch_id = batch.id;
     if (item.is_liquor) {
       p.bottles = form.bottles === '' ? null : Number(form.bottles);
       p.open_ml = form.open_ml === '' ? null : Number(form.open_ml);
@@ -110,7 +124,9 @@ export default function ItemEntry({ auditId, item, batch = null, onClose, onSave
       const saved = await api.post(`/audits/${auditId}/entries`, payload);
       clearDraft(auditId, draftId);
       setForm(empty);
-      toast(`Saved — ${describe(payload)}`);
+      clientRef.current = newClientRef();
+      toast(saved?.duplicate ? `Already saved — ${describe(payload)}` : `Saved — ${describe(payload)}`);
+      if (saved?.batch_outcome === 'created') toast(`New batch "${batch.batch_no}" created`, undefined, 2600);
       if (saved?.photo_outcome === 'pending_review') {
         toast('Photo sent to admin for review (item already has a photo)', 'warn', 3400);
       }
@@ -189,14 +205,16 @@ export default function ItemEntry({ auditId, item, batch = null, onClose, onSave
       {batch && (
         <div className="mb-4 rounded-xl border border-teal-200 bg-teal-50 px-3 py-2.5 flex items-center justify-between gap-3">
           <div className="min-w-0">
-            <div className="text-xs uppercase tracking-wide text-teal-700">Batch</div>
+            <div className="text-xs uppercase tracking-wide text-teal-700">
+              {isNewBatch ? 'New batch — created when you save' : 'Batch'}
+            </div>
             <div className="font-bold truncate">{batch.batch_no}</div>
             {batch.expiry_date && <div className="text-xs text-slate-500">Expiry {batch.expiry_date}</div>}
           </div>
           <div className="text-right shrink-0">
             <div className="text-xs uppercase tracking-wide text-teal-700">System stock</div>
             <div className="font-bold tabular-nums">
-              {batch.stock_qty == null ? '—' : `${fmtQty(batch.stock_qty)} ${unit}`}
+              {batch.stock_qty == null ? (isNewBatch ? 'none (new)' : '—') : `${fmtQty(batch.stock_qty)} ${unit}`}
             </div>
           </div>
         </div>
@@ -278,7 +296,8 @@ export default function ItemEntry({ auditId, item, batch = null, onClose, onSave
                    placeholder="Type 0 if none found" />
           </label>
         )}
-        <LocationSelect value={locationId} onChange={setLocationId} />
+        <LocationSelect value={locationId}
+                        onChange={(v) => { clientRef.current = newClientRef(); setLocationId(v); }} />
         <label className="block">
           <span className="text-sm font-medium text-slate-600">Remarks</span>
           <input className="field mt-1" value={form.remarks}
