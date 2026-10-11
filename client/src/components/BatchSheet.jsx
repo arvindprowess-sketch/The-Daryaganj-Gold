@@ -68,7 +68,8 @@ export default function BatchSheet({ auditId, item, onClose, onSaved, uploadOnly
       <div className="mb-3">
         <div className="font-bold text-lg">{item.name}</div>
         {item.description && <div className="text-sm text-slate-600">{item.description}</div>}
-        <div className="text-sm text-slate-500">Unit: {item.unit}</div>
+        {item.barcode && <div className="text-xs text-slate-500">Barcode {item.barcode}</div>}
+        {item.unit && <div className="text-sm text-slate-500">Unit: {item.unit}</div>}
       </div>
 
       {error && <p className="text-sm text-red-600 mb-3">{error}</p>}

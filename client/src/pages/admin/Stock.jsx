@@ -83,7 +83,7 @@ export default function Stock() {
     if (!f.name.trim()) { toast('Article name is required', 'error'); return; }
     setBusy(true);
     try {
-      const payload = { name: f.name, description: f.description, unit: f.unit,
+      const payload = { name: f.name, description: f.description, unit: f.unit, barcode: f.barcode || '',
                         super_category_id: f.super_category_id || null,
                         category_id: f.category_id || null,
                         inventory_mode: 'warehouse' };
@@ -210,7 +210,7 @@ export default function Stock() {
             CSV template
           </button>
           <button className="btn-primary"
-                  onClick={() => setArticleForm({ name: '', description: '', unit: '', super_category_id: '', category_id: '' })}>+ Add article</button>
+                  onClick={() => setArticleForm({ name: '', description: '', unit: '', super_category_id: '', category_id: '' })}>+ Add material</button>
         </div>
       </div>
 
@@ -219,12 +219,17 @@ export default function Stock() {
       {articleForm && (
         <div className="card p-4 mb-4 grid gap-3 md:grid-cols-4 items-end">
           <label className="block">
-            <span className="text-sm font-medium text-slate-600">Article *</span>
+            <span className="text-sm font-medium text-slate-600">Material *</span>
             <input className="field mt-1" value={articleForm.name} autoFocus
                    onChange={(e) => setArticleForm({ ...articleForm, name: e.target.value })} />
           </label>
-          <label className="block md:col-span-2">
-            <span className="text-sm font-medium text-slate-600">Description</span>
+          <label className="block">
+            <span className="text-sm font-medium text-slate-600">Barcode</span>
+            <input className="field mt-1" value={articleForm.barcode || ''} placeholder="optional"
+                   onChange={(e) => setArticleForm({ ...articleForm, barcode: e.target.value })} />
+          </label>
+          <label className="block">
+            <span className="text-sm font-medium text-slate-600">Material Description</span>
             <input className="field mt-1" value={articleForm.description}
                    onChange={(e) => setArticleForm({ ...articleForm, description: e.target.value })} />
           </label>
@@ -245,7 +250,7 @@ export default function Stock() {
           </label>
           <label className="block md:col-span-2">
             <span className="text-sm font-medium text-slate-600">
-              Category <button type="button" className="text-brand text-xs ml-1" onClick={newCategory}>+ new</button>
+              Brand <button type="button" className="text-brand text-xs ml-1" onClick={newCategory}>+ new</button>
             </span>
             <select className="field mt-1" value={articleForm.category_id || ''}
                     disabled={!articleForm.super_category_id}
@@ -266,7 +271,7 @@ export default function Stock() {
                        onChange={(e) => setArticleForm({ ...articleForm, batch_no: e.target.value })} />
               </label>
               <label className="block">
-                <span className="text-sm font-medium text-slate-600">Quantity</span>
+                <span className="text-sm font-medium text-slate-600">Stock</span>
                 <input className="field mt-1" inputMode="decimal" value={articleForm.qty || ''}
                        onChange={(e) => setArticleForm({ ...articleForm, qty: e.target.value.replace(/[^0-9.]/g, '') })} />
               </label>
@@ -279,7 +284,7 @@ export default function Stock() {
           )}
           <div className="md:col-span-4 flex gap-2">
             <button className="btn-primary" disabled={busy} onClick={saveArticle}>
-              {articleForm.id ? 'Save article' : 'Add article'}
+              {articleForm.id ? 'Save material' : 'Add material'}
             </button>
             <button className="btn-ghost" onClick={() => setArticleForm(null)}>Cancel</button>
           </div>
@@ -287,7 +292,7 @@ export default function Stock() {
       )}
 
       <div className="flex flex-wrap gap-2 items-center mb-3">
-        <input className="field py-2.5 md:max-w-sm" placeholder="Search article, description or batch…"
+        <input className="field py-2.5 md:max-w-sm" placeholder="Search material, description, barcode or batch…"
                value={search} onChange={(e) => setSearch(e.target.value)} />
         {[['active', 'Active'], ['inactive', 'Inactive'], ['all', 'All']].map(([k, label]) => (
           <button key={k} className={active === k ? 'chip-on' : 'chip-off'} onClick={() => setActive(k)}>{label}</button>
@@ -316,11 +321,11 @@ export default function Stock() {
         <table className="w-full text-sm">
           <thead className="bg-slate-50 text-left text-slate-500">
             <tr>
-              <th className="px-3 py-3">Category</th>
-              <th className="px-3 py-3">Article</th>
-              <th className="px-3 py-3">Description</th>
+              <th className="px-3 py-3">Super category · Brand</th>
+              <th className="px-3 py-3">Material</th>
+              <th className="px-3 py-3">Material Description</th>
               <th className="px-3 py-3">Batches</th>
-              <th className="px-3 py-3">Quantity</th>
+              <th className="px-3 py-3">Stock</th>
               <th className="px-3 py-3"></th>
             </tr>
           </thead>
@@ -338,7 +343,9 @@ export default function Stock() {
                     </td>
                     <td className="px-3 py-2">
                       <div className="font-medium">{a.name}</div>
-                      <div className="text-xs text-slate-400">{a.unit}{a.is_active ? '' : ' · inactive'}</div>
+                      <div className="text-xs text-slate-400">
+                        {a.barcode ? `${a.barcode} · ` : ''}{a.unit}{a.is_active ? '' : ' · inactive'}
+                      </div>
                     </td>
                     <td className="px-3 py-2 text-slate-600">{a.description || <span className="text-slate-300">—</span>}</td>
                     <td className="px-3 py-2">
@@ -354,6 +361,7 @@ export default function Stock() {
                       <button className="text-slate-500 font-medium ml-3"
                               onClick={() => setArticleForm({ id: a.id, name: a.name,
                                                               description: a.description || '', unit: a.unit || '',
+                                                              barcode: a.barcode || '',
                                                               super_category_id: a.super_category_id ? String(a.super_category_id) : '',
                                                               category_id: a.category_id ? String(a.category_id) : '' })}>Edit</button>
                     </td>
@@ -446,9 +454,10 @@ function BatchRows({ articles }) {
       <table className="w-full text-sm">
         <thead className="bg-slate-50 text-left text-slate-500">
           <tr>
-            <th className="px-3 py-3">Category</th><th className="px-3 py-3">Article</th>
-            <th className="px-3 py-3">Description</th><th className="px-3 py-3">Batch</th>
-            <th className="px-3 py-3">Unit</th><th className="px-3 py-3 text-right">Quantity</th>
+            <th className="px-3 py-3">Super category · Brand</th><th className="px-3 py-3">Material</th>
+            <th className="px-3 py-3">Barcode</th>
+            <th className="px-3 py-3">Material Description</th><th className="px-3 py-3">Batch</th>
+            <th className="px-3 py-3">Unit</th><th className="px-3 py-3 text-right">Stock</th>
             <th className="px-3 py-3">Expiry</th>
           </tr>
         </thead>
@@ -460,6 +469,7 @@ function BatchRows({ articles }) {
                 {a.category_name && <span className="text-xs text-slate-400"> › {a.category_name}</span>}
               </td>
               <td className="px-3 py-2 font-medium">{a.name}</td>
+              <td className="px-3 py-2 text-slate-500 tabular-nums">{a.barcode || '—'}</td>
               <td className="px-3 py-2 text-slate-600">{a.description || '—'}</td>
               <td className="px-3 py-2">
                 {b ? b.batch_no : <span className="text-slate-400 text-xs">no batch yet</span>}
@@ -474,7 +484,7 @@ function BatchRows({ articles }) {
             </tr>
           ))}
           {rows.length === 0 && (
-            <tr><td colSpan={7} className="p-8 text-center text-slate-400">No articles match.</td></tr>
+            <tr><td colSpan={8} className="p-8 text-center text-slate-400">No articles match.</td></tr>
           )}
         </tbody>
       </table>
@@ -526,8 +536,8 @@ function StockImport({ onDone }) {
   return (
     <div className="card p-4 mb-4 space-y-3">
       <div className="flex flex-wrap items-center gap-3">
-        <span className="font-semibold">Import stock CSV</span>
-        <input type="file" accept=".csv,text/csv" onChange={(e) => setFile(e.target.files?.[0] || null)} />
+        <span className="font-semibold">Import stock (Excel / CSV)</span>
+        <input type="file" accept=".xlsx,.csv,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" onChange={(e) => setFile(e.target.files?.[0] || null)} />
         <label className="flex items-center gap-1 text-sm">
           <input type="radio" checked={mode === 'upsert'} onChange={() => setMode('upsert')} /> Add &amp; update
         </label>
@@ -537,7 +547,8 @@ function StockImport({ onDone }) {
         <button className="btn-primary" disabled={!file || busy} onClick={run}>{busy ? 'Importing…' : 'Import'}</button>
       </div>
       <p className="text-xs text-slate-500">
-        One row per batch: <code>super_category, category, article, description, batch, unit, quantity, expiry</code>.
+        Excel (.xlsx) or CSV, one row per batch: <code>Super category, Brand, Material, Material Description, Batch, Stock</code>
+        (optional: Unit, Barcode, Expiry). The <strong>Material</strong> identifies the item — every batch row of it carries the same Material.
         A super category or category that does not exist yet is created.
         Unit is free text, kept exactly as written; a batch whose unit differs from its article keeps its own.
       </p>
