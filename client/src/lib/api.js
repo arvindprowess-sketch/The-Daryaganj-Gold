@@ -85,13 +85,31 @@ async function refreshAccessToken() {
   return refreshInFlight;
 }
 
+// A request that has not answered in this long is treated as a lost
+// connection. Without a limit a dead network left "Saving…" spinning for ever
+// and the auditor could not tell whether anything had been saved. Uploads
+// (photos, stock files) get longer.
+const TIMEOUT_MS = 25000;
+const UPLOAD_TIMEOUT_MS = 90000;
+
+async function fetchWithTimeout(url, init, ms) {
+  const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  const timer = ctrl ? setTimeout(() => ctrl.abort(), ms) : null;
+  try {
+    return await fetch(url, ctrl ? { ...init, signal: ctrl.signal } : init);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 // Performs a request, refreshing once on an expired-token 401 and retrying.
 async function request(path, init = {}, { retry = true } = {}) {
   let res;
   try {
-    res = await fetch(`/api${path}`, init);
+    res = await fetchWithTimeout(`/api${path}`, init,
+      init.body instanceof FormData ? UPLOAD_TIMEOUT_MS : TIMEOUT_MS);
   } catch (e) {
-    throw new NetworkError(e); // never an auth problem
+    throw new NetworkError(e); // never an auth problem — includes a timeout
   }
 
   if (res.status === 401 && retry && getRefreshToken()) {

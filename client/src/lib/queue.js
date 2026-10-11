@@ -43,7 +43,28 @@ export function loadDraft(auditId, itemId) {
   catch { return null; }
 }
 export function clearDraft(auditId, itemId) {
-  localStorage.removeItem(draftKey(auditId, itemId));
+  try { localStorage.removeItem(draftKey(auditId, itemId)); } catch { /* private mode */ }
+}
+
+// ── Storage that cannot silently fail ───────────────────────────────────────
+// The browser gives a site a few MB. A write that does not fit THROWS — and a
+// queued count that throws on the way into storage is a count that is gone,
+// with nothing on screen to say so. So a write first tries as is; if storage
+// is full it makes room by dropping drafts (half-typed forms — the least
+// valuable thing stored here, never a queued or refused entry) and tries once
+// more; and if it still cannot, it says so to the caller instead of throwing.
+function safeSet(key, value) {
+  try { localStorage.setItem(key, value); return true; } catch { /* full, or blocked */ }
+  try {
+    for (let i = localStorage.length - 1; i >= 0; i--) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith(DRAFT_PREFIX)) localStorage.removeItem(k);
+    }
+    localStorage.setItem(key, value);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // ── Pending queue ────────────────────────────────────────────────────────────
@@ -52,8 +73,9 @@ function readQueue() {
   try { return JSON.parse(localStorage.getItem(QUEUE_KEY) || '[]'); } catch { return []; }
 }
 function writeQueue(q) {
-  localStorage.setItem(QUEUE_KEY, JSON.stringify(q));
-  listeners.forEach((fn) => fn(q.length));
+  const ok = safeSet(QUEUE_KEY, JSON.stringify(q));
+  if (ok) listeners.forEach((fn) => fn(q.length));
+  return ok;
 }
 export function pendingCount() { return readQueue().length; }
 export function onPendingChange(fn) { listeners.add(fn); return () => listeners.delete(fn); }
@@ -61,11 +83,18 @@ export function onPendingChange(fn) { listeners.add(fn); return () => listeners.
 // The job records WHO counted it. The retry may run in a different session —
 // after a logout, or on a shared phone — and an entry must never be filed
 // under whoever happens to be signed in when the network returns.
+//
+// Returns TRUE only when the entry is really stored on this phone. FALSE means
+// it could not be kept (storage full or blocked) — the caller must tell the
+// auditor it is NOT saved anywhere and keep the form as it is.
 export function queueEntry(auditId, payload, userId) {
   const q = readQueue();
+  // The same save tapped twice while offline is one queued entry: the server
+  // would treat the second as a duplicate anyway (same client_ref).
+  if (payload?.client_ref && q.some((j) => j.payload?.client_ref === payload.client_ref)) return true;
   q.push({ id: `${Date.now()}_${Math.random().toString(36).slice(2)}`,
            auditId, payload, userId: userId ?? null, queuedAt: Date.now() });
-  writeQueue(q);
+  return writeQueue(q);
 }
 
 // ── Rejected entries ────────────────────────────────────────────────────────
@@ -76,8 +105,10 @@ function readRejects() {
   try { return JSON.parse(localStorage.getItem(REJECT_KEY) || '[]'); } catch { return []; }
 }
 function writeRejects(list) {
-  localStorage.setItem(REJECT_KEY, JSON.stringify(list));
+  const ok = safeSet(REJECT_KEY, JSON.stringify(list));
+  if (!ok) return false;
   rejectListeners.forEach((fn) => fn(list.length));
+  return true;
 }
 const rejectListeners = new Set();
 export function rejectedEntries() { return readRejects(); }
@@ -123,10 +154,13 @@ export async function flushQueue() {
         // A real refusal (bad data, audit closed, item gone). It cannot be
         // retried — but it is still somebody's count, so it is parked with the
         // reason instead of vanishing.
+        // Parked FIRST, removed from the queue only once parking has worked —
+        // the other order loses the entry if storage is full in between.
+        const parked = writeRejects([...readRejects(),
+          { ...job, error: err.message || `Refused (${err.status})`, status: err.status }]);
+        if (!parked) break;
         q = readQueue().filter((j) => j.id !== job.id);
         writeQueue(q);
-        writeRejects([...readRejects(),
-          { ...job, error: err.message || `Refused (${err.status})`, status: err.status }]);
       }
     }
   } finally {

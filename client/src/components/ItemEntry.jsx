@@ -54,6 +54,10 @@ export default function ItemEntry({ auditId, item, batch = null, onClose, onSave
   const [entries, setEntries] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  // What happened to a save the server did not confirm:
+  //   'queued'  — kept on this phone, will be sent when the network returns
+  //   'unsaved' — could not even be kept on the phone; the form still has it
+  const [netState, setNetState] = useState(null);
   const [dupPrompt, setDupPrompt] = useState(false);
   const toast = useToast();
   const { user } = useAuth();
@@ -123,7 +127,7 @@ export default function ItemEntry({ auditId, item, batch = null, onClose, onSave
   }
 
   async function doSave() {
-    setError('');
+    setError(''); setNetState(null);
     const v = validate();
     if (v) { setError(v); return; }
     setBusy(true);
@@ -143,16 +147,33 @@ export default function ItemEntry({ auditId, item, batch = null, onClose, onSave
       await onSaved?.();
       onClose();
     } catch (err) {
-      if (err.isNetwork) {
-        // Offline — queue and keep the form intact. NEVER clear on failure.
-        // Stamped with who counted it, so the retry cannot file it under
-        // another auditor if the session changes before it goes.
-        queueEntry(auditId, payload, user?.id);
-        setError('No connection — entry queued and will retry automatically.');
-        toast('Queued — will sync when back online', 'warn');
-        await onSaved?.();
+      // No network, a timeout, or the gateway in front of the server failing
+      // (502/503/504) all mean the same thing to the auditor: the server did
+      // not take it. Never "saved", never silent.
+      const unreachable = err.isNetwork || [502, 503, 504].includes(err.status);
+      if (unreachable) {
+        // Kept on this phone and sent automatically later — the form stays as
+        // it is. Stamped with who counted it, so the retry cannot file it
+        // under another auditor if the session changes before it goes. The
+        // client_ref makes a later retry of the same save one entry, not two.
+        const kept = queueEntry(auditId, payload, user?.id);
+        if (kept) {
+          setNetState('queued');
+          toast('Network issue — NOT saved on the server yet. Kept on this phone.', 'error', 5000);
+          onSaved?.()?.catch?.(() => {});
+        } else {
+          setNetState('unsaved');
+          toast('NOT SAVED — no network and no space on this phone', 'error', 6000);
+        }
+      } else if (err.code === 'voided_duplicate') {
+        // This exact save was recorded and then voided. A fresh reference
+        // makes the next SAVE a new entry.
+        clientRef.current = newClientRef();
+        setError(err.message);
+      } else if (err.status >= 500) {
+        setError(`Server error — the entry was NOT saved. Try again. (${err.message})`);
       } else {
-        setError(err.message || 'Could not save');
+        setError(`Not saved: ${err.message || 'the server refused this entry'}`);
       }
     } finally {
       setBusy(false);
@@ -176,6 +197,9 @@ export default function ItemEntry({ auditId, item, batch = null, onClose, onSave
     if (!reason || !reason.trim()) return;
     try {
       await api.post(`/entries/${entry.id}/void`, { reason: reason.trim() });
+      // Whatever is typed next is a NEW entry, never a repeat of one that was
+      // just withdrawn.
+      clientRef.current = newClientRef();
       await loadEntries();
       toast('Entry voided');
       await onSaved?.();
@@ -321,6 +345,19 @@ export default function ItemEntry({ auditId, item, batch = null, onClose, onSave
         <PhotoInput value={form.photo_url} uploadOnly={uploadOnly} itemName={item.name}
                     onUploaded={(url) => update({ photo_url: url })} />
 
+        {netState === 'queued' && (
+          <div className="rounded-xl border-2 border-red-400 bg-red-50 px-3 py-2 text-sm text-red-800">
+            <div className="font-bold">⚠ Network issue — this entry is NOT saved on the server yet.</div>
+            It is kept on this phone and will be sent automatically when the network returns
+            (see the banner at the bottom). Do not clear the browser data or switch phones until it has gone.
+          </div>
+        )}
+        {netState === 'unsaved' && (
+          <div className="rounded-xl border-2 border-red-500 bg-red-100 px-3 py-2 text-sm text-red-900">
+            <div className="font-bold">⛔ NOT SAVED — no network, and this phone has no space left to keep it.</div>
+            The figures are still in the form. Write them down, or tap SAVE again once the network is back.
+          </div>
+        )}
         {error && <p className="text-sm text-red-600">{error}</p>}
 
         {/* Location is mandatory. Disabled here, and rejected server-side —

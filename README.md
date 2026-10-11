@@ -210,6 +210,17 @@ read from the current batch quantities, so re-importing changes them. A batch
 retired by a Replace import keeps its counted quantity on every report and
 stops contributing book stock (R4 and the batch reports agree).
 
+**Who counted it.** The Physical Compile Sheet, the Batch Summary sheet and
+the Stock page's batch-wise count carry a *Counted By* column. Each
+auditor's count is its own line: two auditors at the same batch and place
+are two lines, each with its name.
+
+**Totals on the phone.** A counted material shows its total counted (all its
+batches and places, the auditor's own entries) with the number of entries
+underneath, and its batch sheet opens with "Total counted (all batches)". A
+batch retired from the stock list after it was counted still appears there,
+greyed and closed to new entries, so the total always includes it.
+
 **Reports for a warehouse store.** Choosing a warehouse audit on Reports
 replaces the cafe's R1–R6 with two reports, each with an Excel download, both
 reading what was submitted (every auditor combined):
@@ -507,6 +518,29 @@ Cold stores and basements drop signal. To avoid losing typed data
 This only prevents data loss; the app is otherwise online-only.
 
 ---
+
+### A save the server did not confirm is never shown as saved
+
+- **No network, a timeout (25 s; 90 s for uploads) or a gateway error
+  (502/503/504):** the entry is kept on the phone and a red box says
+  *"Network issue — this entry is NOT saved on the server yet"*; the bottom
+  banner counts what is waiting. It is sent automatically when the network
+  returns, and its `client_ref` makes it one entry on the server however many
+  times it is retried or tapped.
+- **Phone storage full:** room is made by dropping half-typed drafts (never a
+  queued or refused entry). If it still cannot be kept, the screen says
+  *"NOT SAVED"* and the figures stay in the form — nothing is lost silently.
+- **Logging out with entries still waiting:** the confirmation says how many
+  are not on the server yet, that they try to send first, and that any left
+  stay on *this* phone and go after the next sign-in here.
+- Nothing on the server deletes entries on login or logout, and a refused
+  queued entry is parked before it leaves the queue.
+- **Void, then save again:** voiding gives the form a fresh reference, so the
+  next SAVE is always a new entry. If a save that had landed (reply lost) is
+  sent again after it was voided, the server refuses it as
+  `voided_duplicate` instead of answering "already saved" — the phone says so
+  and the next SAVE records it as new; a stale queued copy is parked as
+  refused, never silently dropped and never brought back to life.
 
 ## Sessions and logout
 

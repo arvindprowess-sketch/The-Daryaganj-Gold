@@ -6,6 +6,8 @@ import { Spinner, VoidMark } from '../../components/ui.jsx';
 import BatchSheet from '../../components/BatchSheet.jsx';
 import VirtualList from '../../components/VirtualList.jsx';
 import useDebounced, { normalizeName } from '../../lib/useDebounced.js';
+import { liquorBadge } from '../../lib/liquor.js';
+import { fmtQty } from '../../components/ItemEntry.jsx';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Warehouse — the articles of one SUPER CATEGORY, the warehouse counterpart of
@@ -90,11 +92,21 @@ export default function StockCount() {
       <VoidMark count={i.void_count} />
       <div className="text-right shrink-0">
         {i.counted ? (
-          <div className="flex items-center gap-1 justify-end">
-            <span className="text-green-600 text-lg">✓</span>
-            <span className="text-sm font-semibold">
+          <div>
+            {/* The material's total counted so far (all its batches and
+                places, this auditor's own entries), not just how many
+                entries make it up. */}
+            <div className="flex items-center gap-1 justify-end">
+              <span className="text-green-600 text-lg">✓</span>
+              <span className="font-bold tabular-nums">
+                {i.is_liquor
+                  ? liquorBadge(i.total_bottles, i.total_open_ml)
+                  : `${fmtQty(i.total_qty ?? 0)}${i.unit ? ` ${i.unit}` : ''}`}
+              </span>
+            </div>
+            <div className="text-[11px] text-slate-400">
               {i.entry_count} {i.entry_count === 1 ? 'entry' : 'entries'}
-            </span>
+            </div>
           </div>
         ) : (
           <span className="inline-block h-3 w-3 rounded-full bg-slate-300" />
