@@ -44,7 +44,7 @@ export default function BatchSheet({ auditId, item, onClose, onSaved, uploadOnly
     if (batchNo.length > 64) { setCreateError('Batch number is too long (64 characters at most).'); return; }
     // Typed a batch that is already listed: count that one rather than make a
     // second copy of it.
-    const existing = (batches || []).find((b) => b.batch_no.trim().toLowerCase() === batchNo.toLowerCase());
+    const existing = (batches || []).find((b) => !b.no_batch && b.batch_no.trim().toLowerCase() === batchNo.toLowerCase());
     if (existing) { setCreating(null); setActive(existing); return; }
     const unit = String(creating.unit || '').trim() || item.unit;
     setCreating(null);
@@ -106,11 +106,12 @@ export default function BatchSheet({ auditId, item, onClose, onSaved, uploadOnly
             </div>
           )}
           <div className="text-xs uppercase tracking-wide text-slate-400 mb-1">
-            {batches.length} {batches.length === 1 ? 'batch' : 'batches'} — tap one to count it
+            {(() => { const n = batches.filter((b) => !b.no_batch).length; return `${n} ${n === 1 ? 'batch' : 'batches'}`; })()} — tap one to count it
           </div>
           <div className="divide-y rounded-xl border">
             {batches.map((b) => (
-              <button key={b.id} onClick={() => b.is_active !== false && setActive(b)}
+              <button key={b.id ?? 'no-batch'}
+                      onClick={() => (b.no_batch || b.is_active !== false) && setActive(b)}
                       disabled={b.is_active === false}
                       className={`w-full flex items-center gap-3 px-3 py-3 text-left active:bg-slate-50
                                   ${b.is_active === false ? 'opacity-60' : ''}`}>
@@ -126,6 +127,8 @@ export default function BatchSheet({ auditId, item, onClose, onSaved, uploadOnly
                     {/* Retired from the stock list after it was counted:
                         its count still stands, nothing more goes onto it. */}
                     {b.is_active === false && <span className="text-amber-700"> · no longer on the stock list</span>}
+                    {/* Counted before the stock list gave this material batches. */}
+                    {b.no_batch && <span className="text-amber-700"> · counted without a batch</span>}
                   </div>
                 </div>
                 <div className="text-right shrink-0 tabular-nums">

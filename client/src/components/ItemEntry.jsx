@@ -66,7 +66,7 @@ export default function ItemEntry({ auditId, item, batch = null, onClose, onSave
 
   function loadEntries() {
     if (isNewBatch) { setEntries([]); return Promise.resolve(); }
-    const qs = batch ? `?batch_id=${batch.id}` : '';
+    const qs = batch?.no_batch ? '?batch_id=none' : batch ? `?batch_id=${batch.id}` : '';
     return api.get(`/audits/${auditId}/items/${item.id}/entries${qs}`).then(setEntries);
   }
   useEffect(() => { loadEntries(); /* eslint-disable-next-line */ }, [auditId, item.id, batch?.id]);
@@ -86,7 +86,7 @@ export default function ItemEntry({ auditId, item, batch = null, onClose, onSave
     if (isNewBatch) {
       p.new_batch_no = batch.batch_no;
       p.new_batch_unit = batch.unit || null;
-    } else if (batch) p.batch_id = batch.id;
+    } else if (batch && !batch.no_batch) p.batch_id = batch.id;
     if (item.is_liquor) {
       p.bottles = form.bottles === '' ? null : Number(form.bottles);
       p.open_ml = form.open_ml === '' ? null : Number(form.open_ml);
