@@ -83,7 +83,9 @@ export async function batchReport(auditId, source = null) {
      )
      SELECT k.item_id, i.name AS article, i.description, i.is_liquor,
             k.batch_id, ${BATCH_INFO},
-            b.qty AS stock_qty, b.expiry_date
+            -- A batch retired from the stock list has no book stock any more;
+            -- its count still shows. The same rule R4 applies (live batches).
+            CASE WHEN b.is_active THEN b.qty END AS stock_qty, b.expiry_date
        FROM keys k
        JOIN items i ON i.id = k.item_id
        LEFT JOIN super_categories sc ON sc.id = i.super_category_id
@@ -342,7 +344,7 @@ export function locationLines(report, { includeUncounted = false } = {}) {
       const notes = [
         first ? b.remarks : (b.is_new ? 'NEW BATCH' : null),
         first && places.length > 1 ? `batch total ${b.physical_qty} across ${places.length} locations` : null,
-        first && b.stock_qty == null && b.batch_id != null && !b.is_new ? 'No system stock' : null,
+        first && b.stock_qty == null && b.batch_id != null && !b.is_new && b.batch_active ? 'No system stock' : null,
         b.is_liquor && p.open_ml ? `+ ${p.open_ml} ml open` : null,
       ].filter(Boolean);
       out.push({

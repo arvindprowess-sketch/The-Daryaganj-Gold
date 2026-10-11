@@ -202,6 +202,14 @@ three lines, never "G2 · F2 · C3" in one cell). The batch's Stock, Difference
 and Status are on its first line. Only the Material-wise Variance, which is
 one line per material by definition, lists its places in one cell.
 
+**Re-importing stock never moves a physical count.** Physical quantities are
+the auditors' entries (and the submitted copies of them); a stock import —
+Add & update or Replace — only changes batches' book quantities. What does
+follow the stock list is the *system* side: Stock and Difference are always
+read from the current batch quantities, so re-importing changes them. A batch
+retired by a Replace import keeps its counted quantity on every report and
+stops contributing book stock (R4 and the batch reports agree).
+
 **Reports for a warehouse store.** Choosing a warehouse audit on Reports
 replaces the cafe's R1–R6 with two reports, each with an Excel download, both
 reading what was submitted (every auditor combined):
