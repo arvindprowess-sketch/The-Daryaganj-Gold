@@ -114,10 +114,11 @@ router.get('/audits/:auditId/items/:itemId/batches', async (req, res) => {
   if (!/^\d+$/.test(String(req.params.itemId))) return res.status(400).json({ error: 'Invalid item' });
 
   const { rows } = await query(
-    `SELECT b.id, b.item_id, b.batch_no, b.origin,
+    `SELECT b.id, b.item_id, b.batch_no, b.origin, b.is_active,
             to_char(b.expiry_date, 'YYYY-MM-DD') AS expiry_date,
             COALESCE(NULLIF(btrim(b.unit), ''), i.unit) AS unit,
-            b.qty AS stock_qty,
+            -- A retired batch has no book stock any more (same rule as the reports).
+            CASE WHEN b.is_active THEN b.qty END AS stock_qty,
             COALESCE(agg.entry_count, 0)::int AS entry_count,
             agg.total_qty, agg.total_bottles, agg.total_open_ml,
             COALESCE(agg.void_count, 0)::int AS void_count
@@ -133,9 +134,16 @@ router.get('/audits/:auditId/items/:itemId/batches', async (req, res) => {
           WHERE ce.batch_id = b.id AND ce.audit_id = $1
             AND ($3::int IS NULL OR ce.counted_by = $3)
        ) agg ON TRUE
-      WHERE b.item_id = $2 AND b.is_active
+      -- Live batches, plus any batch retired since that already has a count
+      -- in this audit (by this auditor, or anyone for an admin), so the
+      -- material's total on this sheet always includes everything counted.
+      WHERE b.item_id = $2
+        AND (b.is_active OR EXISTS (
+              SELECT 1 FROM count_entries x
+               WHERE x.batch_id = b.id AND x.audit_id = $1 AND x.status = 'active'
+                 AND ($3::int IS NULL OR x.counted_by = $3)))
       -- Batches created during counting come last, under the stock list's own.
-      ORDER BY (b.origin = 'counted'), b.expiry_date NULLS LAST, lower(b.batch_no)`,
+      ORDER BY b.is_active DESC, (b.origin = 'counted'), b.expiry_date NULLS LAST, lower(b.batch_no)`,
     [req.params.auditId, req.params.itemId,
      req.user.role === 'admin' ? null : req.user.id]
   );

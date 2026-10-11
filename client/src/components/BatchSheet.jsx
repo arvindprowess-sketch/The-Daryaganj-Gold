@@ -85,13 +85,32 @@ export default function BatchSheet({ auditId, item, onClose, onSaved, uploadOnly
 
       {batches && batches.length > 0 && (
         <>
+          {/* The material's total counted so far, across all its batches.
+              Kept per unit: batches held in different units are not added. */}
+          {batches.some((b) => b.counted) && (
+            <div className="mb-3 rounded-xl bg-green-50 border border-green-200 px-3 py-2 flex justify-between items-center">
+              <span className="text-sm text-green-800">Total counted (all batches)</span>
+              <span className="font-bold tabular-nums text-green-800">
+                {item.is_liquor
+                  ? liquorBadge(batches.reduce((t, b) => t + Number(b.total_bottles || 0), 0),
+                                batches.reduce((t, b) => t + Number(b.total_open_ml || 0), 0))
+                  : Object.entries(batches.filter((b) => b.counted).reduce((m, b) => {
+                    const u = b.unit || '';
+                    m[u] = Number(((m[u] || 0) + Number(b.total_qty || 0)).toFixed(3));
+                    return m;
+                  }, {})).map(([u, q]) => `${fmtQty(q)}${u ? ` ${u}` : ''}`).join(' · ')}
+              </span>
+            </div>
+          )}
           <div className="text-xs uppercase tracking-wide text-slate-400 mb-1">
             {batches.length} {batches.length === 1 ? 'batch' : 'batches'} — tap one to count it
           </div>
           <div className="divide-y rounded-xl border">
             {batches.map((b) => (
-              <button key={b.id} onClick={() => setActive(b)}
-                      className="w-full flex items-center gap-3 px-3 py-3 text-left active:bg-slate-50">
+              <button key={b.id} onClick={() => b.is_active !== false && setActive(b)}
+                      disabled={b.is_active === false}
+                      className={`w-full flex items-center gap-3 px-3 py-3 text-left active:bg-slate-50
+                                  ${b.is_active === false ? 'opacity-60' : ''}`}>
                 <div className="flex-1 min-w-0">
                   <div className="font-bold truncate">
                     {b.batch_no}
@@ -101,6 +120,9 @@ export default function BatchSheet({ auditId, item, onClose, onSaved, uploadOnly
                   </div>
                   <div className="text-xs text-slate-500">
                     {b.unit}{b.expiry_date ? ` · Exp ${b.expiry_date}` : ''}
+                    {/* Retired from the stock list after it was counted:
+                        its count still stands, nothing more goes onto it. */}
+                    {b.is_active === false && <span className="text-amber-700"> · no longer on the stock list</span>}
                   </div>
                 </div>
                 <div className="text-right shrink-0 tabular-nums">

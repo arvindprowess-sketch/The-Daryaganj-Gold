@@ -210,6 +210,17 @@ read from the current batch quantities, so re-importing changes them. A batch
 retired by a Replace import keeps its counted quantity on every report and
 stops contributing book stock (R4 and the batch reports agree).
 
+**Who counted it.** The Physical Compile Sheet, the Batch Summary sheet and
+the Stock page's batch-wise count carry a *Counted By* column. Each
+auditor's count is its own line: two auditors at the same batch and place
+are two lines, each with its name.
+
+**Totals on the phone.** A counted material shows its total counted (all its
+batches and places, the auditor's own entries) with the number of entries
+underneath, and its batch sheet opens with "Total counted (all batches)". A
+batch retired from the stock list after it was counted still appears there,
+greyed and closed to new entries, so the total always includes it.
+
 **Reports for a warehouse store.** Choosing a warehouse audit on Reports
 replaces the cafe's R1–R6 with two reports, each with an Excel download, both
 reading what was submitted (every auditor combined):

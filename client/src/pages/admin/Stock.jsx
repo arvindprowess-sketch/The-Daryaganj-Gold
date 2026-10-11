@@ -629,6 +629,7 @@ function BatchCount() {
                 <th className="px-3 py-3 text-right">System</th><th className="px-3 py-3 text-right">Physical</th>
                 <th className="px-3 py-3 text-right">Difference</th>
                 <th className="px-3 py-3">Location</th>
+                <th className="px-3 py-3">Counted By</th>
                 <th className="px-3 py-3">Remarks</th>
               </tr>
             </thead>
@@ -656,6 +657,7 @@ function BatchCount() {
                     {r.difference == null ? (r.first_of_batch ? '—' : '') : r.difference > 0 ? `+${fmtQty(r.difference)}` : fmtQty(r.difference)}
                   </td>
                   <td className="px-3 py-2 text-sm">{r.location || '—'}</td>
+                  <td className="px-3 py-2 text-xs">{r.counted_by || '—'}</td>
                   <td className={`px-3 py-2 text-xs ${r.is_new ? 'font-semibold text-teal-800' : 'text-slate-500'}`}>{r.remarks || ''}</td>
                 </tr>
                 {/* The material as a whole, after its last line: every batch
@@ -680,7 +682,7 @@ function BatchCount() {
                           {t.mixed_units || t.difference == null ? '—'
                             : t.difference > 0 ? `+${fmtQty(t.difference)}` : fmtQty(t.difference)}
                         </td>
-                        <td></td>
+                        <td></td><td></td>
                         <td className="px-3 py-2 text-xs font-normal text-slate-600">
                           {t.batches} batches merged{t.new_batches ? ` · incl. ${t.new_batches} new` : ''}
                           {t.mixed_units ? ' · different units, not totalled' : ''}
@@ -691,7 +693,7 @@ function BatchCount() {
                 </Fragment>
               ))}
               {rows.length === 0 && (
-                <tr><td colSpan={9} className="p-8 text-center text-slate-400">Nothing to show.</td></tr>
+                <tr><td colSpan={10} className="p-8 text-center text-slate-400">Nothing to show.</td></tr>
               )}
             </tbody>
           </table>

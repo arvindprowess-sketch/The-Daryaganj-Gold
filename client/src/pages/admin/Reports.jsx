@@ -426,7 +426,7 @@ function WarehouseReports({ auditId, store }) {
           {data.source === 'submitted'
             ? 'Submitted count — every auditor who has submitted, combined.'
             : 'PROVISIONAL — nothing submitted yet; showing the live count.'}
-          {compile && ' Location-wise, exactly as entered. A batch counted in several places has one line per place; its Stock and Difference are on its first line. Batches nobody counted are on the Material-wise Variance.'}
+          {compile && ' Location-wise, exactly as entered: one line per batch, place and auditor (Counted By). A batch\'s Stock and Difference are on its first line. Batches nobody counted are on the Material-wise Variance.'}
         </p>
       )}
       <div className="flex flex-wrap gap-2 mb-3 items-center">
@@ -453,7 +453,9 @@ function WarehouseReports({ auditId, store }) {
                 {compile && <th className="px-3 py-3">Batch</th>}
                 <th className="px-3 py-3 text-right">Stock</th><th className="px-3 py-3 text-right">Physical Qty</th>
                 <th className="px-3 py-3 text-right">Difference</th>
-                <th className="px-3 py-3">Locations</th><th className="px-3 py-3">Remarks</th>
+                <th className="px-3 py-3">Locations</th>
+                {compile && <th className="px-3 py-3">Counted By</th>}
+                <th className="px-3 py-3">Remarks</th>
               </tr>
             </thead>
             <tbody className="divide-y">
@@ -468,11 +470,12 @@ function WarehouseReports({ auditId, store }) {
                   <td className="px-3 py-2 text-right tabular-nums">{qtyFmt(r.physical)}</td>
                   <td className={`px-3 py-2 text-right tabular-nums font-semibold ${diffCls(r.difference)}`}>{diffFmt(r.difference)}</td>
                   <td className="px-3 py-2 text-xs text-slate-600">{r.locations || '—'}</td>
+                  {compile && <td className="px-3 py-2 text-xs">{r.counted_by || '—'}</td>}
                   <td className={`px-3 py-2 text-xs ${/NEW BATCH/.test(r.remarks) ? 'font-semibold text-teal-800' : 'text-slate-500'}`}>{r.remarks}</td>
                 </tr>
               ))}
               {rows.length === 0 && (
-                <tr><td colSpan={compile ? 10 : 9} className="p-8 text-center text-slate-400">Nothing to show.</td></tr>
+                <tr><td colSpan={compile ? 11 : 9} className="p-8 text-center text-slate-400">Nothing to show.</td></tr>
               )}
             </tbody>
             {rows.length > 0 && (
@@ -482,7 +485,7 @@ function WarehouseReports({ auditId, store }) {
                   <td className="px-3 py-2 text-right tabular-nums">{qtyFmt(totals.stock)}</td>
                   <td className="px-3 py-2 text-right tabular-nums">{qtyFmt(totals.physical)}</td>
                   <td className={`px-3 py-2 text-right tabular-nums ${diffCls(totals.difference)}`}>{diffFmt(totals.difference)}</td>
-                  <td colSpan={2} className="px-3 py-2 text-xs font-normal text-slate-500">quantities added across lines</td>
+                  <td colSpan={compile ? 3 : 2} className="px-3 py-2 text-xs font-normal text-slate-500">quantities added across lines</td>
                 </tr>
               </tfoot>
             )}
