@@ -134,7 +134,8 @@ router.get('/audits/:auditId/items/:itemId/batches', async (req, res) => {
             AND ($3::int IS NULL OR ce.counted_by = $3)
        ) agg ON TRUE
       WHERE b.item_id = $2 AND b.is_active
-      ORDER BY b.expiry_date NULLS LAST, lower(b.batch_no)`,
+      -- Batches created during counting come last, under the stock list's own.
+      ORDER BY (b.origin = 'counted'), b.expiry_date NULLS LAST, lower(b.batch_no)`,
     [req.params.auditId, req.params.itemId,
      req.user.role === 'admin' ? null : req.user.id]
   );

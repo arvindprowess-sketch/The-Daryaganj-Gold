@@ -83,7 +83,7 @@ export default function Stock() {
     if (!f.name.trim()) { toast('Article name is required', 'error'); return; }
     setBusy(true);
     try {
-      const payload = { name: f.name, description: f.description, unit: f.unit, barcode: f.barcode || '',
+      const payload = { name: f.name, description: f.description, unit: f.unit,
                         super_category_id: f.super_category_id || null,
                         category_id: f.category_id || null,
                         inventory_mode: 'warehouse' };
@@ -223,12 +223,7 @@ export default function Stock() {
             <input className="field mt-1" value={articleForm.name} autoFocus
                    onChange={(e) => setArticleForm({ ...articleForm, name: e.target.value })} />
           </label>
-          <label className="block">
-            <span className="text-sm font-medium text-slate-600">Barcode</span>
-            <input className="field mt-1" value={articleForm.barcode || ''} placeholder="optional"
-                   onChange={(e) => setArticleForm({ ...articleForm, barcode: e.target.value })} />
-          </label>
-          <label className="block">
+          <label className="block md:col-span-2">
             <span className="text-sm font-medium text-slate-600">Material Description</span>
             <input className="field mt-1" value={articleForm.description}
                    onChange={(e) => setArticleForm({ ...articleForm, description: e.target.value })} />
@@ -292,7 +287,7 @@ export default function Stock() {
       )}
 
       <div className="flex flex-wrap gap-2 items-center mb-3">
-        <input className="field py-2.5 md:max-w-sm" placeholder="Search material, description, barcode or batch…"
+        <input className="field py-2.5 md:max-w-sm" placeholder="Search material, description or batch…"
                value={search} onChange={(e) => setSearch(e.target.value)} />
         {[['active', 'Active'], ['inactive', 'Inactive'], ['all', 'All']].map(([k, label]) => (
           <button key={k} className={active === k ? 'chip-on' : 'chip-off'} onClick={() => setActive(k)}>{label}</button>
@@ -344,7 +339,7 @@ export default function Stock() {
                     <td className="px-3 py-2">
                       <div className="font-medium">{a.name}</div>
                       <div className="text-xs text-slate-400">
-                        {a.barcode ? `${a.barcode} · ` : ''}{a.unit}{a.is_active ? '' : ' · inactive'}
+                        {a.unit}{a.is_active ? '' : ' · inactive'}
                       </div>
                     </td>
                     <td className="px-3 py-2 text-slate-600">{a.description || <span className="text-slate-300">—</span>}</td>
@@ -361,7 +356,6 @@ export default function Stock() {
                       <button className="text-slate-500 font-medium ml-3"
                               onClick={() => setArticleForm({ id: a.id, name: a.name,
                                                               description: a.description || '', unit: a.unit || '',
-                                                              barcode: a.barcode || '',
                                                               super_category_id: a.super_category_id ? String(a.super_category_id) : '',
                                                               category_id: a.category_id ? String(a.category_id) : '' })}>Edit</button>
                     </td>
@@ -455,7 +449,6 @@ function BatchRows({ articles }) {
         <thead className="bg-slate-50 text-left text-slate-500">
           <tr>
             <th className="px-3 py-3">Super category · Brand</th><th className="px-3 py-3">Material</th>
-            <th className="px-3 py-3">Barcode</th>
             <th className="px-3 py-3">Material Description</th><th className="px-3 py-3">Batch</th>
             <th className="px-3 py-3">Unit</th><th className="px-3 py-3 text-right">Stock</th>
             <th className="px-3 py-3">Expiry</th>
@@ -469,7 +462,6 @@ function BatchRows({ articles }) {
                 {a.category_name && <span className="text-xs text-slate-400"> › {a.category_name}</span>}
               </td>
               <td className="px-3 py-2 font-medium">{a.name}</td>
-              <td className="px-3 py-2 text-slate-500 tabular-nums">{a.barcode || '—'}</td>
               <td className="px-3 py-2 text-slate-600">{a.description || '—'}</td>
               <td className="px-3 py-2">
                 {b ? b.batch_no : <span className="text-slate-400 text-xs">no batch yet</span>}
@@ -484,7 +476,7 @@ function BatchRows({ articles }) {
             </tr>
           ))}
           {rows.length === 0 && (
-            <tr><td colSpan={8} className="p-8 text-center text-slate-400">No articles match.</td></tr>
+            <tr><td colSpan={7} className="p-8 text-center text-slate-400">No articles match.</td></tr>
           )}
         </tbody>
       </table>
@@ -548,7 +540,7 @@ function StockImport({ onDone }) {
       </div>
       <p className="text-xs text-slate-500">
         Excel (.xlsx) or CSV, one row per batch: <code>Super category, Brand, Material, Material Description, Batch, Stock</code>
-        (optional: Unit, Barcode, Expiry). The <strong>Material</strong> identifies the item — every batch row of it carries the same Material.
+        (optional: Unit, Expiry). The <strong>Material</strong> identifies the item — every batch row of it carries the same Material.
         A super category or category that does not exist yet is created.
         Unit is free text, kept exactly as written; a batch whose unit differs from its article keeps its own.
       </p>
@@ -627,16 +619,18 @@ function BatchCount() {
           <table className="w-full text-sm">
             <thead className="bg-slate-50 text-left text-slate-500">
               <tr>
-                <th className="px-3 py-3">Article</th><th className="px-3 py-3">Description</th>
+                <th className="px-3 py-3">Material</th><th className="px-3 py-3">Material Description</th>
                 <th className="px-3 py-3">Batch</th><th className="px-3 py-3">Unit</th>
                 <th className="px-3 py-3 text-right">System</th><th className="px-3 py-3 text-right">Physical</th>
                 <th className="px-3 py-3 text-right">Difference</th>
                 <th className="px-3 py-3">Locations</th>
+                <th className="px-3 py-3">Remarks</th>
               </tr>
             </thead>
             <tbody className="divide-y">
-              {rows.map((r) => (
-                <tr key={`${r.item_id}-${r.batch_id ?? 'none'}`}>
+              {rows.map((r, idx) => (
+                <Fragment key={`${r.item_id}-${r.batch_id ?? 'none'}`}>
+                <tr className={r.is_new ? 'bg-teal-50/40' : ''}>
                   <td className="px-3 py-2 font-medium">{r.article}</td>
                   <td className="px-3 py-2 text-slate-600">{r.description || '—'}</td>
                   <td className="px-3 py-2">
@@ -661,10 +655,42 @@ function BatchCount() {
                   <td className="px-3 py-2 text-xs text-slate-600">
                     {r.locations.length ? r.locations.map((l) => `${l.name} ${fmtQty(l.qty)}`).join(' · ') : '—'}
                   </td>
+                  <td className={`px-3 py-2 text-xs ${r.is_new ? 'font-semibold text-teal-800' : 'text-slate-500'}`}>{r.remarks || ''}</td>
                 </tr>
+                {/* The article as a whole, after its last batch: every batch
+                    merged — book stock against everything counted. Shown on
+                    the unfiltered list only, where all its batches are there. */}
+                {filter === 'all' && rows[idx + 1]?.item_id !== r.item_id
+                  && data.totals?.[r.item_id]?.batches > 1 && (() => {
+                    const t = data.totals[r.item_id];
+                    return (
+                      <tr className="bg-slate-100 font-semibold">
+                        <td className="px-3 py-2" colSpan={3}>{r.article} — total</td>
+                        <td className="px-3 py-2 text-slate-500">{t.mixed_units ? 'mixed' : t.unit}</td>
+                        <td className="px-3 py-2 text-right tabular-nums">
+                          {t.mixed_units || t.system_qty == null ? '—' : fmtQty(t.system_qty)}
+                        </td>
+                        <td className="px-3 py-2 text-right tabular-nums">
+                          {t.mixed_units || t.physical_qty == null ? '—' : fmtQty(t.physical_qty)}
+                        </td>
+                        <td className={`px-3 py-2 text-right tabular-nums ${
+                          t.mixed_units || t.difference == null ? 'text-slate-300' : t.difference < 0 ? 'text-red-600'
+                            : t.difference > 0 ? 'text-amber-600' : 'text-green-600'}`}>
+                          {t.mixed_units || t.difference == null ? '—'
+                            : t.difference > 0 ? `+${fmtQty(t.difference)}` : fmtQty(t.difference)}
+                        </td>
+                        <td></td>
+                        <td className="px-3 py-2 text-xs font-normal text-slate-600">
+                          {t.batches} batches merged{t.new_batches ? ` · incl. ${t.new_batches} new` : ''}
+                          {t.mixed_units ? ' · different units, not totalled' : ''}
+                        </td>
+                      </tr>
+                    );
+                  })()}
+                </Fragment>
               ))}
               {rows.length === 0 && (
-                <tr><td colSpan={8} className="p-8 text-center text-slate-400">Nothing to show.</td></tr>
+                <tr><td colSpan={9} className="p-8 text-center text-slate-400">Nothing to show.</td></tr>
               )}
             </tbody>
           </table>

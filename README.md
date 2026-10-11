@@ -171,16 +171,25 @@ The Stock list totals quantity **per unit** — different units are never added.
 **Stock import** (Stock → Import, **Excel .xlsx or CSV**): one row per batch,
 headed the way the client's own sheet is —
 `Super category, Brand, Material, Material Description, Batch, Stock`, with
-`Unit`, `Barcode` and `Expiry` optional (the older `article / description /
+`Unit` and `Expiry` optional (the older `article / description /
 quantity` names still work). **Material is the identity**: every batch row of
 it carries the same Material. Brand is the category level. A super category
 or brand not yet in the system is created. In an .xlsx a title line above the
-table is skipped, and a refused row is named by its Excel row number. A
-barcode belongs to one material.
+table is skipped, and a refused row is named by its Excel row number.
+
+**Variance for a warehouse store.** A material's system qty is the sum of its
+live batches' stock (an imported system-stock row still wins); its physical
+qty is everything counted across its batches, new ones included. R4 therefore
+reads, for a material with batches 60 / 30 / 12.5 counted 58 / 30 / not
+counted plus a new batch of 5: system 102.5, physical 93, variance −9.5 — and
+the batch-wise report shows the same figures on the material's TOTAL line
+under its batches. Batches a counter created sit at the bottom of their
+material everywhere (phone, Stock, reports) and are named in Remarks
+("NEW BATCH").
 
 **Searching on the phone** matches the material description (what counters
-type), the material and the barcode. Typing a whole barcode or material and
-pressing Enter opens that material's batches directly. *Add & update* creates
+type) and the material. Typing a whole material and pressing Enter opens its
+batches directly. *Add & update* creates
 and updates; *Replace* additionally deactivates every live batch not in the
 file. Any invalid row stops the whole import and is named. A blank quantity is
 "no figure", never zero.

@@ -51,7 +51,7 @@ export async function batchReport(auditId, source = null) {
   // Every individual entry — the detail sheet, and the location breakdown.
   const { rows: entries } = await query(
     `WITH e AS (${entrySql})
-     SELECT e.id, e.item_id, i.name AS article, i.barcode, i.description, i.is_liquor,
+     SELECT e.id, e.item_id, i.name AS article, i.description, i.is_liquor,
             e.batch_id, ${BATCH_INFO},
             e.qty, e.bottles, e.open_ml,
             COALESCE(l.name, e.location_text) AS location,
@@ -62,7 +62,8 @@ export async function batchReport(auditId, source = null) {
        LEFT JOIN users cb ON cb.id = b.created_by
        LEFT JOIN locations l ON l.id = e.location_id
        LEFT JOIN users u ON u.id = e.counted_by
-      ORDER BY lower(i.name), lower(b.batch_no) NULLS FIRST, e.counted_at`,
+      ORDER BY lower(i.name), (b.origin = 'counted') NULLS FIRST, lower(b.batch_no) NULLS FIRST,
+               e.counted_at`,
     params
   );
 
@@ -77,14 +78,17 @@ export async function batchReport(auditId, source = null) {
        UNION
        SELECT DISTINCT item_id, batch_id FROM e
      )
-     SELECT k.item_id, i.name AS article, i.barcode, i.description, i.is_liquor,
+     SELECT k.item_id, i.name AS article, i.description, i.is_liquor,
             k.batch_id, ${BATCH_INFO},
             b.qty AS stock_qty, b.expiry_date
        FROM keys k
        JOIN items i ON i.id = k.item_id
        LEFT JOIN item_batches b ON b.id = k.batch_id
        LEFT JOIN users cb ON cb.id = b.created_by
-      ORDER BY lower(i.name), b.expiry_date NULLS LAST, lower(b.batch_no) NULLS FIRST`,
+      -- Within an article: an entry with no batch first, then the stock
+      -- list's batches, then — at the bottom — batches a counter created.
+      ORDER BY lower(i.name), (b.origin = 'counted') NULLS FIRST,
+               b.expiry_date NULLS LAST, lower(b.batch_no) NULLS FIRST`,
     params
   );
 
@@ -115,6 +119,7 @@ export async function batchReport(auditId, source = null) {
     return {
       ...rest,
       is_new: r.batch_origin === 'counted',
+      remarks: remarksFor(r),
       counted, entries: list.length,
       physical_qty: physical, counted_open_ml: openMl, difference,
       locations: [...byLoc].map(([name, qty]) => ({ name, qty })),
@@ -124,34 +129,99 @@ export async function batchReport(auditId, source = null) {
   });
 
   const sourceLabel = src.mode === SNAPSHOT ? 'submitted' : src.mode === CLEARED ? 'cleared' : 'live';
-  return { audit: src.audit, source: sourceLabel, rows, entries };
+  return { audit: src.audit, source: sourceLabel, rows, entries, totals: articleTotals(rows) };
+}
+
+// What the Remarks column says about a batch row.
+function remarksFor(r) {
+  if (r.batch_id == null) return 'Counted without a batch';
+  if (r.batch_origin === 'counted') {
+    return `NEW BATCH — created during counting${r.batch_created_by ? ` by ${r.batch_created_by}` : ''}`;
+  }
+  if (!r.batch_active) return 'Batch no longer on the stock list';
+  return '';
+}
+
+// ── The article, merged ─────────────────────────────────────────────────────
+// Every batch of an article added together: book stock across its batches
+// against everything counted across them, new batches included. A batch with
+// book stock that nobody counted adds to the system side and nothing to the
+// physical side, so it shows up in the article's difference as the shortage
+// it is. Batches held in different units cannot be added into one number, so
+// such an article is marked rather than totalled.
+function articleTotals(rows) {
+  const by = new Map();
+  for (const r of rows) {
+    if (!by.has(r.item_id)) by.set(r.item_id, []);
+    by.get(r.item_id).push(r);
+  }
+  const out = new Map();
+  for (const [itemId, list] of by) {
+    const units = new Set(list.map((r) => String(r.unit || '').trim().toLowerCase()));
+    const withStock = list.filter((r) => r.stock_qty != null);
+    const counted = list.filter((r) => r.counted);
+    const system = withStock.length ? r3(withStock.reduce((t, r) => t + Number(r.stock_qty), 0)) : null;
+    const physical = counted.length ? r3(counted.reduce((t, r) => t + Number(r.physical_qty || 0), 0)) : null;
+    const physicalOrZero = physical ?? (system != null ? 0 : null);
+    out.set(itemId, {
+      item_id: itemId, batches: list.length, mixed_units: units.size > 1,
+      unit: list[0].unit, new_batches: list.filter((r) => r.is_new).length,
+      system_qty: system, physical_qty: physical,
+      difference: system != null && physicalOrZero != null ? r3(physicalOrZero - system) : null,
+    });
+  }
+  return out;
 }
 
 // ── Spreadsheet layout ──────────────────────────────────────────────────────
-const originLabel = (r) => (r.batch_id == null ? 'No batch'
-  : r.batch_origin === 'counted'
-    ? `New — created during counting${r.batch_created_by ? ` by ${r.batch_created_by}` : ''}`
-    : 'Stock list');
 
 const when = (t) => (t ? new Date(t).toISOString().replace('T', ' ').slice(0, 16) : '');
 const cell = (v) => (v == null ? null : v);
 
-export const SUMMARY_HEADERS = ['Article', 'Barcode', 'Description', 'Batch', 'Batch Origin', 'Unit',
-  'System Qty', 'Physical Qty', 'Open ML', 'Difference', 'Locations', 'Status'];
+export const SUMMARY_HEADERS = ['Material', 'Material Description', 'Batch', 'Unit',
+  'System Qty', 'Physical Qty', 'Open ML', 'Difference', 'Locations', 'Status', 'Remarks'];
 
 export function summaryRow(r) {
-  return [r.article, r.barcode || '', r.description || '', r.batch_no || '(no batch)', originLabel(r), r.unit,
+  return [r.article, r.description || '', r.batch_no || '(no batch)', r.unit,
     cell(r.stock_qty), cell(r.physical_qty), cell(r.counted_open_ml), cell(r.difference),
-    r.locations.map((l) => `${l.name} ${l.qty}`).join(' · '), r.status];
+    r.locations.map((l) => `${l.name} ${l.qty}`).join(' · '), r.status, r.remarks];
 }
 
-export const ENTRY_HEADERS = ['Article', 'Barcode', 'Description', 'Batch', 'Batch Origin', 'Quantity',
+// The line under an article's batches: the article as a whole.
+export function totalRow(r, t) {
+  const remarks = [
+    `${t.batches} batches merged`,
+    t.new_batches ? `incl. ${t.new_batches} NEW BATCH${t.new_batches === 1 ? '' : 'ES'}` : null,
+    t.mixed_units ? 'batches in different units — not totalled' : null,
+  ].filter(Boolean).join(' · ');
+  return [`${r.article} — TOTAL`, r.description || '', '', t.mixed_units ? 'mixed' : t.unit,
+    t.mixed_units ? null : cell(t.system_qty), t.mixed_units ? null : cell(t.physical_qty), null,
+    t.mixed_units ? null : cell(t.difference), '',
+    t.mixed_units || t.difference == null ? '' : t.difference === 0 ? 'Match' : t.difference > 0 ? 'Excess' : 'Short',
+    remarks];
+}
+
+// Batch rows with each multi-batch article's total line after its batches.
+export function summaryLines(report) {
+  const out = [];
+  report.rows.forEach((r, i) => {
+    out.push(summaryRow(r));
+    const next = report.rows[i + 1];
+    const t = report.totals.get(r.item_id);
+    if ((!next || next.item_id !== r.item_id) && t && t.batches > 1) out.push(totalRow(r, t));
+  });
+  return out;
+}
+
+export const ENTRY_HEADERS = ['Material', 'Material Description', 'Batch', 'Quantity',
   'Open ML', 'Location', 'Unit', 'Counted By', 'Counted At (UTC)', 'Remarks'];
 
 export function entryRow(e) {
-  return [e.article, e.barcode || '', e.description || '', e.batch_no || '(no batch)', originLabel(e),
+  const flag = e.batch_id == null ? 'No batch' : e.batch_origin === 'counted' ? 'NEW BATCH' : '';
+  return [e.article, e.description || '', e.batch_no || '(no batch)',
     cell(e.is_liquor ? e.bottles : e.qty), e.is_liquor ? cell(e.open_ml) : null,
-    e.location || '', e.unit, e.counted_by_name || '', when(e.counted_at), e.remarks || ''];
+    e.location || '', e.unit, e.counted_by_name || '', when(e.counted_at),
+    [flag, e.remarks].filter(Boolean).join(' · ')];
 }
 
 // The two sheets every warehouse workbook carries: one line per batch, and
@@ -171,7 +241,7 @@ export function batchSheets(report) {
       [`${provenance} · ${report.rows.length} batch rows · ${newBatches} created during counting`],
       [],
       SUMMARY_HEADERS,
-      ...report.rows.map(summaryRow),
+      ...summaryLines(report),
     ] },
     { name: 'Batch Entries', aoa: [
       [`Batch-wise entries · ${title}`],

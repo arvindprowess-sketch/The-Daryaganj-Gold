@@ -239,7 +239,9 @@ router.get('/variance/:auditId', async (req, res) => {
     `Total items: ${rows.length}`,
     // Provenance — stated whenever there are system figures to attribute.
     ...(withSystem ? [
-      `System stock source: ${src?.filename || 'entered manually'}`,
+      `System stock source: ${provenance.batch_based && !src
+        ? 'Stock list — each material\'s system qty is the sum of its batches'
+        : src?.filename || 'entered manually'}`,
       src ? `Imported: ${new Date(src.imported_at).toLocaleString()}${src.imported_by_name ? ' by ' + src.imported_by_name : ''}` : null,
       `Coverage: ${provenance.with_system} of ${provenance.master_total} master items`,
       totals.no_system_data > 0

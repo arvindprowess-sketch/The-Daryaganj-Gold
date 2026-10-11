@@ -9,7 +9,7 @@ import { normalizeName, nameKey } from '../lib/itemName.js';
 import { toCsv } from '../lib/csvTemplate.js';
 import { logActivity } from '../lib/activityLog.js';
 import { buildWorkbook } from '../lib/exporters.js';
-import { batchReport, batchSheets, SUMMARY_HEADERS, summaryRow } from '../lib/batchReport.js';
+import { batchReport, batchSheets, SUMMARY_HEADERS, summaryLines } from '../lib/batchReport.js';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Stock — the warehouse's batch-wise stock list. ADMIN ONLY.
@@ -93,13 +93,13 @@ router.get('/', async (req, res) => {
     params.push(`%${clean(search)}%`);
     // A batch number finds its article too: a counter reads it off the carton.
     const n = `$${params.length}`;
-    conds.push(`(i.name ILIKE ${n} OR i.barcode ILIKE ${n} OR i.description ILIKE ${n}
+    conds.push(`(i.name ILIKE ${n} OR i.description ILIKE ${n}
                  OR EXISTS (SELECT 1 FROM item_batches xb
                              WHERE xb.item_id = i.id AND xb.batch_no ILIKE ${n}))`);
   }
   const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
   const { rows: articles } = await query(
-    `SELECT i.id, i.name, i.barcode, i.description, i.unit, i.is_liquor, i.is_active,
+    `SELECT i.id, i.name, i.description, i.unit, i.is_liquor, i.is_active,
             i.super_category_id, i.category_id,
             sc.name AS super_category_name, c.name AS category_name
        FROM items i
@@ -114,7 +114,8 @@ router.get('/', async (req, res) => {
     `SELECT ${BATCH_COLUMNS}
        FROM item_batches b JOIN items i ON i.id = b.item_id
       WHERE b.item_id = ANY($1::int[])
-      ORDER BY b.is_active DESC, b.expiry_date NULLS LAST, lower(b.batch_no)`,
+      -- Batches a counter created sit at the bottom of their article.
+      ORDER BY b.is_active DESC, (b.origin = 'counted'), b.expiry_date NULLS LAST, lower(b.batch_no)`,
     [ids]
   ) : { rows: [] };
 
@@ -273,14 +274,14 @@ router.delete('/batches/:id', requireIntParams('id'), async (req, res) => {
 // A batch is matched on (article, batch number), both case-insensitively.
 router.get('/import/template', (_req, res) => {
   const csv = toCsv(
-    // The client's own column names first; Unit, Barcode and Expiry are optional.
+    // The client's own column names first; Unit and Expiry are optional.
     ['Super category', 'Brand', 'Material', 'Material Description', 'Batch', 'Stock',
-     'Unit', 'Barcode', 'Expiry'],
+     'Unit', 'Expiry'],
     [
-      ['FOOD', 'TATA', '100234', 'Tata Salt 1 kg', 'B2401', '60', 'PKT', '8901000000011', ''],
-      ['FOOD', 'TATA', '100234', 'Tata Salt 1 kg', 'B2407', '30', 'PKT', '8901000000011', '2027-03-31'],
-      ['FOOD', 'AASHIRVAAD', '100561', 'Aashirvaad Atta 10 kg', 'A-118', '12', 'BAG', '', ''],
-      ['NON FOOD', 'GENERIC', '200017', 'Paper cups 200 ml (50)', 'PC-09', '80', 'PKT', '', ''],
+      ['FOOD', 'TATA', '100234', 'Tata Salt 1 kg', 'B2401', '60', 'PKT', ''],
+      ['FOOD', 'TATA', '100234', 'Tata Salt 1 kg', 'B2407', '30', 'PKT', '2027-03-31'],
+      ['FOOD', 'AASHIRVAAD', '100561', 'Aashirvaad Atta 10 kg', 'A-118', '12', 'BAG', ''],
+      ['NON FOOD', 'GENERIC', '200017', 'Paper cups 200 ml (50)', 'PC-09', '80', 'PKT', ''],
     ]
   );
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
@@ -299,7 +300,6 @@ const ARTICLE = ['material', 'material code', 'material no', 'material_code', 'a
   'article_name', 'item_name', 'item', 'name'];
 const DESCRIPTION = ['material description', 'material_description', 'description',
   'article_description', 'desc'];
-const BARCODE = ['barcode', 'bar code', 'bar_code', 'ean', 'upc'];
 const SUPER = ['super_category', 'super category', 'super_category_name', 'super category name'];
 // The second level: the client's sheet calls it Brand.
 const CATEGORY = ['brand', 'category', 'category_name', 'category name'];
@@ -383,13 +383,6 @@ router.post('/import', upload.single('file'), async (req, res) => {
   const invalid = [];
   const valid = [];
   const seen = new Map();
-  // A barcode names ONE article: within the file, and against the articles
-  // already on the list.
-  const { rows: knownCodes } = await query(
-    `SELECT lower(btrim(barcode)) AS code, name FROM items
-      WHERE inventory_mode = 'warehouse' AND barcode IS NOT NULL AND btrim(barcode) <> ''`);
-  const codeOwner = new Map(knownCodes.map((r) => [r.code, nameKey(r.name)]));
-  const fileCodeOwner = new Map();
   records.forEach((rec, idx) => {
     // The line the admin will look for: the Excel row, or the CSV line (the
     // header is line 1).
@@ -398,17 +391,6 @@ router.post('/import', upload.single('file'), async (req, res) => {
     const batchNo = normalizeName(pick(rec, BATCH));
     if (!article) { invalid.push({ row: line, reason: 'Article is blank' }); return; }
     if (!batchNo) { invalid.push({ row: line, article, reason: 'Batch is blank' }); return; }
-    const barcode = clean(pick(rec, BARCODE));
-    if (barcode) {
-      const code = barcode.toLowerCase();
-      const owner = fileCodeOwner.get(code) ?? codeOwner.get(code);
-      if (owner && owner !== nameKey(article)) {
-        invalid.push({ row: line, article, batch: batchNo,
-                       reason: `Barcode ${barcode} already belongs to another material` });
-        return;
-      }
-      fileCodeOwner.set(code, nameKey(article));
-    }
     const superName = normalizeName(pick(rec, SUPER));
     const catName = normalizeName(pick(rec, CATEGORY));
     if (catName && !superName) {
@@ -426,7 +408,7 @@ router.post('/import', upload.single('file'), async (req, res) => {
       return;
     }
     seen.set(key, line);
-    valid.push({ line, article, batchNo, key, superName, catName, barcode,
+    valid.push({ line, article, batchNo, key, superName, catName,
                  description: clean(pick(rec, DESCRIPTION)), unit: clean(pick(rec, UNIT)),
                  qty: q.value, expiry: d.value });
   });
@@ -442,7 +424,7 @@ router.post('/import', upload.single('file'), async (req, res) => {
     const s = { rows: valid.length, articles_created: 0, articles_updated: 0,
                 batches_created: 0, batches_updated: 0, batches_deactivated: 0 };
     const { rows: items } = await c.query(
-      `SELECT id, name, unit, description, barcode, super_category_id, category_id
+      `SELECT id, name, unit, description, super_category_id, category_id
          FROM items WHERE inventory_mode = 'warehouse'`);
     const itemsByKey = new Map(items.map((i) => [nameKey(i.name), i]));
     const touchedBatchIds = [];
@@ -481,11 +463,10 @@ router.post('/import', upload.single('file'), async (req, res) => {
       const { superId, catId } = await resolveHierarchy(r.superName, r.catName);
       if (!item) {
         const { rows } = await c.query(
-          `INSERT INTO items (name, unit, description, super_category_id, category_id,
-                              inventory_mode, barcode)
-           VALUES ($1,$2,$3,$4,$5,'warehouse',$6)
-           RETURNING id, name, unit, description, barcode, super_category_id, category_id`,
-          [r.article, r.unit, r.description || null, superId, catId, r.barcode || null]
+          `INSERT INTO items (name, unit, description, super_category_id, category_id, inventory_mode)
+           VALUES ($1,$2,$3,$4,$5,'warehouse')
+           RETURNING id, name, unit, description, super_category_id, category_id`,
+          [r.article, r.unit, r.description || null, superId, catId]
         );
         item = rows[0];
         itemsByKey.set(nameKey(item.name), item);
@@ -493,7 +474,6 @@ router.post('/import', upload.single('file'), async (req, res) => {
         s.articles_created += 1;
       } else if (!describedItems.has(item.id)
                  && ((r.description && r.description !== item.description)
-                     || (r.barcode && r.barcode !== item.barcode)
                      || (superId && (superId !== item.super_category_id || catId !== item.category_id)))) {
         // For an existing article only the description and the category are
         // taken from the file — nothing is renamed or reactivated. A blank
@@ -501,11 +481,10 @@ router.post('/import', upload.single('file'), async (req, res) => {
         // decides; its other batch rows do not change it again.
         await c.query(
           `UPDATE items SET description = COALESCE($2, description),
-                  barcode = COALESCE($5, barcode),
                   super_category_id = COALESCE($3, super_category_id),
                   category_id = CASE WHEN $3::int IS NULL THEN category_id ELSE $4 END
             WHERE id = $1`,
-          [item.id, r.description || null, superId, catId, r.barcode || null]);
+          [item.id, r.description || null, superId, catId]);
         if (r.description) item.description = r.description;
         if (superId) { item.super_category_id = superId; item.category_id = catId; }
         describedItems.add(item.id);
@@ -578,7 +557,7 @@ router.get('/count', async (req, res) => {
   if (req.query.format === 'csv') {
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="${base}.csv"`);
-    return res.send(toCsv(SUMMARY_HEADERS, report.rows.map(summaryRow)));
+    return res.send(toCsv(SUMMARY_HEADERS, summaryLines(report)));
   }
   if (req.query.format === 'xlsx') {
     const buf = await buildWorkbook(batchSheets(report));
@@ -586,7 +565,8 @@ router.get('/count', async (req, res) => {
     res.setHeader('Content-Disposition', `attachment; filename="${base}.xlsx"`);
     return res.send(buf);
   }
-  res.json(report);
+  // Map → plain object for JSON.
+  res.json({ ...report, totals: Object.fromEntries(report.totals) });
 });
 
 export default router;

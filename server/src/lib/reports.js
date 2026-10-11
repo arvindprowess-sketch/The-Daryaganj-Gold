@@ -45,10 +45,10 @@ export async function auditItemAggregates(auditId, source = null) {
   // and location land in the same location column and are summed, with no
   // merge step and nothing for the admin to click.
   const entrySource = fromSnapshot
-    ? `SELECT e.qty, e.bottles, e.open_ml, e.photo_url, e.location_id
+    ? `SELECT e.qty, e.bottles, e.open_ml, e.photo_url, e.location_id, e.batch_id
          FROM submission_entries e
         WHERE e.item_id = i.id AND e.submission_id = ANY($2::int[])`
-    : `SELECT e.qty, e.bottles, e.open_ml, e.photo_url, e.location_id
+    : `SELECT e.qty, e.bottles, e.open_ml, e.photo_url, e.location_id, e.batch_id
          FROM count_entries e
         WHERE e.item_id = i.id AND e.audit_id = $1 AND e.status = 'active'`;
   // A cleared submission has nothing to read. Routes stop before they get
@@ -74,8 +74,20 @@ export async function auditItemAggregates(auditId, source = null) {
             COALESCE(agg.entry_count, 0)::int AS entry_count,
             COALESCE(agg.active_zero, 0)::int AS active_zero,
             COALESCE(agg.with_photo, 0)::int  AS with_photo,
-            ss.qty AS system_qty, ss.bottles AS system_bottles, ss.open_ml AS system_open_ml,
-            (ss.item_id IS NOT NULL) AS has_system,
+            -- System figure. A cafe item takes it from the system stock
+            -- imported for this audit. A warehouse article's book stock lives
+            -- on its BATCHES, so its system figure is the sum of its live
+            -- batches (an imported row, if one exists, still wins). Liquor
+            -- compares sealed bottles, so the batch sum lands there instead.
+            COALESCE(ss.qty, CASE WHEN NOT i.is_liquor THEN bs.qty END) AS system_qty,
+            COALESCE(ss.bottles, CASE WHEN i.is_liquor THEN bs.qty END) AS system_bottles,
+            ss.open_ml AS system_open_ml,
+            (ss.item_id IS NOT NULL OR COALESCE(bs.n, 0) > 0) AS has_system,
+            (ss.item_id IS NULL AND COALESCE(bs.n, 0) > 0) AS system_from_batches,
+            -- Batches a counter CREATED that this report's entries were
+            -- counted against. Named in Remarks so a reader can see that part
+            -- of the physical figure is in a batch the stock list did not have.
+            nb.new_batches,
             (na.id IS NOT NULL) AS not_applicable
        FROM items i
        LEFT JOIN super_categories sc ON sc.id = i.super_category_id
@@ -105,6 +117,17 @@ export async function auditItemAggregates(auditId, source = null) {
            ) t
        ) locagg ON TRUE
        LEFT JOIN system_stock ss ON ss.item_id = i.id AND ss.audit_id = $1
+       LEFT JOIN LATERAL (
+         SELECT SUM(b.qty) AS qty, COUNT(b.qty) AS n
+           FROM item_batches b
+          WHERE b.item_id = i.id AND b.is_active AND i.inventory_mode = 'warehouse'
+       ) bs ON TRUE
+       LEFT JOIN LATERAL (
+         SELECT string_agg(DISTINCT b.batch_no, ', ' ORDER BY b.batch_no) AS new_batches
+           FROM ( ${entrySource} ) src
+           JOIN item_batches b ON b.id = src.batch_id
+          WHERE b.origin = 'counted' AND ${noRows ? 'FALSE' : 'TRUE'}
+       ) nb ON TRUE
        LEFT JOIN audit_na na ON na.item_id = i.id AND na.audit_id = $1
       WHERE i.is_active = TRUE AND i.inventory_mode = ${AUDIT_MODE()}
       ORDER BY sc.sort_order NULLS LAST, sc.name, c.name, i.name`,
@@ -194,8 +217,14 @@ export function standardRow(i) {
     bottle_unit_size: Number(i.bottle_unit_size ?? 1),
     by_location: i.by_location,
     ...measures,
-    // What Final Total Qty is expressed in.
-    remarks: measurementBasis(i.unit),
+    // What Final Total Qty is expressed in. `basis` is the bare value the
+    // summary block counts by; `remarks` is what the column prints, and also
+    // names any batch a counter created during this count.
+    basis: measurementBasis(i.unit),
+    remarks: i.new_batches
+      ? `${measurementBasis(i.unit)} · NEW BATCH: ${i.new_batches}`
+      : measurementBasis(i.unit),
+    new_batches: i.new_batches || null,
     physical_qty: i.physical_qty,
     // Liquor keeps sealed bottles and open ml SEPARATE — never combined.
     total_bottles: i.is_liquor ? Number(i.total_bottles) : null,
@@ -479,7 +508,15 @@ export async function systemStockSource(auditId) {
     [auditId]
   );
   const { rows: cov } = await query(
-    `SELECT (SELECT count(*)::int FROM system_stock WHERE audit_id = $1) AS with_system,
+    // A warehouse audit's system figures are its articles' batch stock, so
+    // coverage counts the articles that have one as well as imported rows.
+    `SELECT (SELECT count(*)::int FROM items i
+              WHERE i.is_active AND i.inventory_mode = ${AUDIT_MODE()}
+                AND (EXISTS (SELECT 1 FROM system_stock ss WHERE ss.audit_id = $1 AND ss.item_id = i.id)
+                     OR (i.inventory_mode = 'warehouse' AND EXISTS (
+                           SELECT 1 FROM item_batches b
+                            WHERE b.item_id = i.id AND b.is_active AND b.qty IS NOT NULL)))) AS with_system,
+            (${AUDIT_MODE()} = 'warehouse') AS batch_based,
             (SELECT count(*)::int FROM items
               WHERE is_active = TRUE AND inventory_mode = ${AUDIT_MODE()}) AS master_total`,
     [auditId]
@@ -736,7 +773,7 @@ export async function varianceReport(
 function buildSummary(rows, groups, audit, locations = []) {
   const byBasis = {};
   for (const b of BASES) byBasis[b] = 0;
-  for (const r of rows) byBasis[r.remarks] = (byBasis[r.remarks] || 0) + 1;
+  for (const r of rows) byBasis[r.basis] = (byBasis[r.basis] || 0) + 1;
 
   const categories = groups.flatMap((g) =>
     g.categories.map((c) => ({
