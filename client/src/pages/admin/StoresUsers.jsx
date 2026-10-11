@@ -194,8 +194,41 @@ function Users() {
   const [err, setErr] = useState('');
   const [active, setActive] = useState('active');
   const [confirmDel, setConfirmDel] = useState(null); // { user, impact }
+  const [editing, setEditing] = useState(null);       // { id, name, role, store_ids, password }
+  const [editErr, setEditErr] = useState('');
+  const [saving, setSaving] = useState(false);
   const toast = useToast();
   const { user: me } = useAuth();
+
+  // Edit an existing user — name, role, password reset and, above all, which
+  // stores they are assigned to. Assignments are REPLACED by what is chosen
+  // here, so moving an auditor to another store is one save.
+  function startEdit(u) {
+    setEditErr('');
+    setEditing({ id: u.id, username: u.username, name: u.name, role: u.role,
+                 store_ids: [...(u.store_ids || [])], password: '' });
+  }
+  function toggleEditStore(id) {
+    setEditing((e) => ({ ...e, store_ids: e.store_ids.includes(id)
+      ? e.store_ids.filter((x) => x !== id) : [...e.store_ids, id] }));
+  }
+  async function saveEdit() {
+    setEditErr('');
+    if (!editing.name.trim()) { setEditErr('Name is required.'); return; }
+    if (editing.password && editing.password.length < 8) {
+      setEditErr('A new password must be at least 8 characters.'); return;
+    }
+    setSaving(true);
+    try {
+      const payload = { name: editing.name.trim(), role: editing.role,
+                        store_ids: editing.role === 'auditor' ? editing.store_ids : [] };
+      if (editing.password) payload.password = editing.password;
+      await api.put(`/users/${editing.id}`, payload);
+      toast(`${editing.name.trim()} updated`);
+      setEditing(null);
+      await load();
+    } catch (e) { setEditErr(e.message); } finally { setSaving(false); }
+  }
 
   const load = useCallback(
     () => api.get(`/users?active=${active}`).then((r) => { setUsers(r.users); setCounts(r.counts); }),
@@ -306,6 +339,7 @@ function Users() {
                   <td className="px-4 py-2 text-slate-500">{u.entry_count}</td>
                   <td className="px-4 py-2"><button className="text-brand" onClick={() => toggleActive(u)}>{u.is_active ? 'Active' : 'Inactive'}</button></td>
                   <td className="px-4 py-2 text-right whitespace-nowrap">
+                    <button className="text-brand font-medium mr-3" onClick={() => startEdit(u)}>Edit</button>
                     {/* An admin can never delete the account they are signed in with. */}
                     {String(u.id) === String(me?.id)
                       ? <span className="text-slate-400 text-xs">your account</span>
@@ -322,6 +356,63 @@ function Users() {
           </table>
         </div>
       </div>
+
+      {editing && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50"
+             onClick={() => !saving && setEditing(null)}>
+          <div className="card w-full max-w-lg p-5 space-y-3" onClick={(e) => e.stopPropagation()}>
+            <h2 className="font-bold text-lg">Edit {editing.username}</h2>
+            <label className="block">
+              <span className="text-sm font-medium text-slate-600">Full name</span>
+              <input className="field mt-1" value={editing.name}
+                     onChange={(e) => setEditing({ ...editing, name: e.target.value })} />
+            </label>
+            <label className="block">
+              <span className="text-sm font-medium text-slate-600">Role</span>
+              {/* Your own role cannot be changed here — it would lock you out. */}
+              <select className="field mt-1" value={editing.role}
+                      disabled={String(editing.id) === String(me?.id)}
+                      onChange={(e) => setEditing({ ...editing, role: e.target.value })}>
+                <option value="auditor">Auditor</option><option value="admin">Admin</option>
+              </select>
+            </label>
+            {editing.role === 'auditor' && (
+              <div>
+                <div className="text-sm font-medium text-slate-600 mb-1">Assigned stores</div>
+                <div className="flex flex-wrap gap-2">
+                  {activeStores.map((st) => (
+                    <button key={st.id} className={editing.store_ids.includes(st.id) ? 'chip-on' : 'chip-off'}
+                            onClick={() => toggleEditStore(st.id)}>
+                      {st.code}{st.inventory_mode === 'warehouse' ? ' · WH' : ''}
+                    </button>
+                  ))}
+                  {/* A deactivated store stays listed while assigned, so it can be removed. */}
+                  {allStores.filter((st) => !st.is_active && editing.store_ids.includes(st.id)).map((st) => (
+                    <button key={st.id} className="chip-on opacity-60" onClick={() => toggleEditStore(st.id)}>
+                      {st.code} (inactive) ✕
+                    </button>
+                  ))}
+                </div>
+                <p className="text-xs text-slate-500 mt-1">
+                  Tap to add or remove. The auditor sees only the stores selected here. Counts already
+                  recorded in a store stay where they are.
+                </p>
+              </div>
+            )}
+            <label className="block">
+              <span className="text-sm font-medium text-slate-600">Reset password (optional)</span>
+              <PasswordField placeholder="Leave blank to keep the current password" value={editing.password}
+                             onChange={(e) => setEditing({ ...editing, password: e.target.value })} />
+              <span className="text-xs text-slate-500">They will be asked to change it at their next login.</span>
+            </label>
+            {editErr && <p className="text-red-600 text-sm">{editErr}</p>}
+            <div className="flex gap-2 justify-end">
+              <button className="btn-ghost" disabled={saving} onClick={() => setEditing(null)}>Cancel</button>
+              <button className="btn-primary" disabled={saving} onClick={saveEdit}>{saving ? 'Saving…' : 'Save'}</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <ConfirmDialog
         open={!!confirmDel}

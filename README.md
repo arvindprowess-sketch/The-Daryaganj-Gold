@@ -148,7 +148,8 @@ an audit shows only its store's side, and the Item Master import or *delete
 all* never touches the Stock list (nor the other way round). Super categories
 and categories are one shared, admin-managed list; a card appears on the phone
 only where that side has items, plus an **UNCATEGORISED** card for articles
-with none. A name is still unique across both lists.
+with none. A name is unique within its own list: a warehouse article may share
+a name with a cafe item (they are different items).
 
 | | Cafe store (default) | Warehouse store |
 | --- | --- | --- |

@@ -306,21 +306,12 @@ router.post('/import', upload.single('file'), async (req, res) => {
   const invalid = [];
   const valid = [];
   const seen = new Map();
-  // Names are unique across the whole system, so an article cannot take a
-  // name the cafe Item Master already uses.
-  const { rows: cafeRows } = await query("SELECT name FROM items WHERE inventory_mode = 'cafe'");
-  const cafeNames = new Set(cafeRows.map((r) => nameKey(r.name)));
   records.forEach((rec, idx) => {
     const line = idx + 2; // header is line 1
     const article = normalizeName(pick(rec, ARTICLE));
     const batchNo = normalizeName(pick(rec, BATCH));
     if (!article) { invalid.push({ row: line, reason: 'Article is blank' }); return; }
     if (!batchNo) { invalid.push({ row: line, article, reason: 'Batch is blank' }); return; }
-    if (cafeNames.has(nameKey(article))) {
-      invalid.push({ row: line, article, batch: batchNo,
-                     reason: 'This name is already a cafe item on the Item Master — use a different article name' });
-      return;
-    }
     const superName = normalizeName(pick(rec, SUPER));
     const catName = normalizeName(pick(rec, CATEGORY));
     if (catName && !superName) {
