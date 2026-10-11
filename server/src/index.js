@@ -184,7 +184,6 @@ async function warnAboutDemoData() {
 app.listen(config.port, () => {
   console.log(`Audix API listening on http://localhost:${config.port}`);
   console.log(`Storage driver: ${config.storageDriver}`);
-  console.log(`Inventory mode: ${config.inventoryMode}`);
   console.log(`Environment: ${config.nodeEnv}`);
   warnAboutDemoData();
 });

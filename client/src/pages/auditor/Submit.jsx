@@ -4,7 +4,7 @@ import { api } from '../../lib/api.js';
 import MobileHeader from '../../components/MobileHeader.jsx';
 import { Spinner } from '../../components/ui.jsx';
 import { flushQueue, pendingFor, rejectedFor } from '../../lib/queue.js';
-import { useInventoryMode } from '../../lib/mode.js';
+import { useAuditMode } from '../../lib/mode.js';
 
 // M8 — Submit.
 //
@@ -25,7 +25,7 @@ export default function Submit() {
   // ever shown from these, never from the request merely having been sent.
   const [done, setDone] = useState(null);
   const [live, setLive] = useState(null);
-  const warehouse = useInventoryMode() === 'warehouse';
+  const warehouse = useAuditMode(auditId) === 'warehouse';
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
 

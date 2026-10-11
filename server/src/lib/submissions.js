@@ -35,7 +35,7 @@ export const CLEARED = 'cleared';    // the admin cleared it; there is nothing t
 //   neither                       → the count is in progress, read it live
 export async function auditSource(auditId) {
   const { rows: auditRows } = await query(
-    `SELECT a.*, s.name AS store_name, s.code AS store_code
+    `SELECT a.*, s.name AS store_name, s.code AS store_code, s.inventory_mode
        FROM audits a JOIN stores s ON s.id = a.store_id WHERE a.id = $1`,
     [auditId]
   );

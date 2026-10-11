@@ -30,12 +30,6 @@ export const config = {
   jwtExpiresIn: process.env.JWT_EXPIRES_IN || '1h',
   jwtRefreshExpiresIn: process.env.JWT_REFRESH_EXPIRES_IN || '30d',
   bcryptRounds: parseInt(process.env.BCRYPT_ROUNDS || '10', 10),
-  // `cafe` (default) or `warehouse`. The warehouse deployment counts stock
-  // batch-wise and shows the counter each batch's book quantity; the cafe
-  // keeps the blind count. Anything unrecognised falls back to `cafe`, the
-  // stricter of the two.
-  inventoryMode: (process.env.INVENTORY_MODE || '').trim().toLowerCase() === 'warehouse'
-    ? 'warehouse' : 'cafe',
   storageDriver: process.env.STORAGE_DRIVER || 'local',
   uploadDir: process.env.UPLOAD_DIR || 'uploads',
   publicBaseUrl: process.env.PUBLIC_BASE_URL || 'http://localhost:4000',

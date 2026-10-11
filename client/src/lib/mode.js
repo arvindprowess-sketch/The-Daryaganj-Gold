@@ -2,37 +2,62 @@ import { useEffect, useState } from 'react';
 import { api } from './api.js';
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Which flavour of the app this deployment runs: `cafe` or `warehouse`.
+// Cafe or warehouse — decided by the STORE, never chosen by the user.
 //
-// Decided by INVENTORY_MODE on the server and read once per page load. The
-// last answer is remembered so a reload — or a phone with no signal — opens
-// on the right screens rather than flashing the cafe layout first.
+// Each store is marked Cafe or Warehouse by the admin (Stores & Users). An
+// audit opens in its store's layout automatically: a cafe by super category
+// with a blind count, a warehouse batch by batch. The admin console shows
+// Item Master while a cafe store exists and Stock while a warehouse one does.
 // ═══════════════════════════════════════════════════════════════════════════
-const KEY = 'audix_inventory_mode';
-let cache = null;
-let inFlight = null;
 
-function remembered() {
-  try { return localStorage.getItem(KEY); } catch { return null; }
+const STORES_CHANGED = 'audix:stores-changed';
+
+// Call after a store is added or its type changes, so the admin menu follows
+// without a reload.
+export function storesChanged() {
+  window.dispatchEvent(new Event(STORES_CHANGED));
 }
 
-export function useInventoryMode() {
-  const [mode, setMode] = useState(() => cache || remembered());
+// { has_cafe, has_warehouse } across active stores; null until known.
+export function useStoreKinds() {
+  const [kinds, setKinds] = useState(null);
   useEffect(() => {
-    if (cache) return;
-    inFlight = inFlight || api.get('/meta/app');
     let alive = true;
-    inFlight
-      .then((r) => {
-        cache = r?.inventory_mode === 'warehouse' ? 'warehouse' : 'cafe';
-        try { localStorage.setItem(KEY, cache); } catch { /* private mode */ }
-        if (alive) setMode(cache);
-      })
-      // Offline with nothing remembered: the cafe layout is the safe default.
-      .catch(() => { inFlight = null; if (alive) setMode((m) => m || 'cafe'); });
-    return () => { alive = false; };
+    const load = () => api.get('/meta/app')
+      .then((r) => { if (alive) setKinds(r); })
+      // Unknown (offline): the cafe layout, which is what every store was.
+      .catch(() => { if (alive) setKinds((k) => k || { has_cafe: true, has_warehouse: false }); });
+    load();
+    window.addEventListener(STORES_CHANGED, load);
+    return () => { alive = false; window.removeEventListener(STORES_CHANGED, load); };
   }, []);
+  return kinds;
+}
+
+// The layout one audit is counted in. Remembered per audit, so a phone that
+// loses signal mid-count reopens on the same screens.
+const KEY = (auditId) => `audix_audit_mode_${auditId}`;
+const memo = new Map();
+
+function remembered(auditId) {
+  if (memo.has(String(auditId))) return memo.get(String(auditId));
+  try { return localStorage.getItem(KEY(auditId)); } catch { return null; }
+}
+
+export function useAuditMode(auditId) {
+  const [mode, setMode] = useState(() => remembered(auditId));
+  useEffect(() => {
+    if (!auditId) return undefined;
+    let alive = true;
+    api.get(`/audits/${auditId}`)
+      .then((a) => {
+        const m = a?.inventory_mode === 'warehouse' ? 'warehouse' : 'cafe';
+        memo.set(String(auditId), m);
+        try { localStorage.setItem(KEY(auditId), m); } catch { /* private mode */ }
+        if (alive) setMode(m);
+      })
+      .catch(() => { if (alive) setMode((m) => m || 'cafe'); });
+    return () => { alive = false; };
+  }, [auditId]);
   return mode; // null until known
 }
-
-export const isWarehouse = (mode) => mode === 'warehouse';

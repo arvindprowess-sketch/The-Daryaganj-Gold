@@ -7,7 +7,6 @@ import {
 import { buildWorkbook, buildPdf } from '../lib/exporters.js';
 import { buildAuditWorkbook } from '../lib/auditWorkbook.js';
 import { batchReport, batchSheets } from '../lib/batchReport.js';
-import { config } from '../config.js';
 import { auditSource, clearedNotice, CLEARED } from '../lib/submissions.js';
 import { reportFields, reportColumns, fieldValue, bucketValue } from '../lib/columns.js';
 
@@ -290,7 +289,7 @@ router.get('/variance/:auditId', async (req, res) => {
     // Warehouse: the same workbook also carries the batch-wise sheets, so
     // every batch — including those created during counting — and every
     // entry with its location and unit is in the file the client receives.
-    if (config.inventoryMode === 'warehouse') {
+    if (req.auditSource?.audit?.inventory_mode === 'warehouse') {
       sheets.push(...batchSheets(await batchReport(req.params.auditId, req.auditSource)));
     }
     return sendXlsx(res, fname, sheets);

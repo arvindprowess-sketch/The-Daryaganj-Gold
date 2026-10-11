@@ -39,14 +39,24 @@ router.get('/', async (req, res) => {
   res.json(rows);
 });
 
+// Cafe (super categories, blind count) or warehouse (batch by batch, with
+// each batch's book quantity shown). Anything else is refused, never guessed.
+function readMode(v) {
+  if (v === undefined || v === null || v === '') return { value: null };
+  return ['cafe', 'warehouse'].includes(v) ? { value: v }
+    : { error: 'inventory_mode must be "cafe" or "warehouse"' };
+}
+
 router.post('/', requireRole('admin'), async (req, res) => {
   const { code, name, address, is_active = true } = req.body || {};
   if (!code || !name) return res.status(400).json({ error: 'code and name required' });
+  const mode = readMode(req.body?.inventory_mode);
+  if (mode.error) return res.status(400).json({ error: mode.error });
   try {
     const { rows } = await query(
-      `INSERT INTO stores (code, name, address, is_active)
-       VALUES ($1, $2, $3, $4) RETURNING *`,
-      [code, name, address || null, is_active]
+      `INSERT INTO stores (code, name, address, is_active, inventory_mode)
+       VALUES ($1, $2, $3, $4, COALESCE($5, 'cafe')) RETURNING *`,
+      [code, name, address || null, is_active, mode.value]
     );
     res.status(201).json(rows[0]);
   } catch (err) {
@@ -57,14 +67,17 @@ router.post('/', requireRole('admin'), async (req, res) => {
 
 router.put('/:id', requireRole('admin'), requireIntParams('id'), async (req, res) => {
   const { code, name, address, is_active } = req.body || {};
+  const mode = readMode(req.body?.inventory_mode);
+  if (mode.error) return res.status(400).json({ error: mode.error });
   const { rows } = await query(
     `UPDATE stores SET
        code = COALESCE($2, code),
        name = COALESCE($3, name),
        address = COALESCE($4, address),
-       is_active = COALESCE($5, is_active)
+       is_active = COALESCE($5, is_active),
+       inventory_mode = COALESCE($6, inventory_mode)
      WHERE id = $1 RETURNING *`,
-    [req.params.id, code, name, address, is_active]
+    [req.params.id, code, name, address, is_active, mode.value]
   );
   if (!rows[0]) return res.status(404).json({ error: 'Not found' });
   res.json(rows[0]);

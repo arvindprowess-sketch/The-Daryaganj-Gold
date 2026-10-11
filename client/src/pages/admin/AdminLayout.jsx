@@ -3,7 +3,7 @@ import { useAuth } from '../../lib/auth.jsx';
 import { useState, useEffect } from 'react';
 import ConfirmDialog from '../../components/ConfirmDialog.jsx';
 import { api } from '../../lib/api.js';
-import { useInventoryMode } from '../../lib/mode.js';
+import { useStoreKinds } from '../../lib/mode.js';
 
 const cafeNav = [
   ['', 'Dashboard', '📊'],
@@ -17,14 +17,20 @@ const cafeNav = [
   ['data', 'Data Management', '🗑️'],
 ];
 
-// The warehouse keeps its stock batch-wise, so Stock takes the Item Master's
-// place in the menu. Everything else is the same console.
-const warehouseNav = cafeNav.map((n) => (n[0] === 'items' ? ['stock', 'Stock', '📦'] : n));
+// Item Master serves the cafe stores, Stock (batch-wise) the warehouse ones.
+// The menu carries whichever the stores need — both when there are both.
+function navFor(kinds) {
+  const cafe = !kinds || kinds.has_cafe || !kinds.has_warehouse;
+  const warehouse = !!kinds?.has_warehouse;
+  return cafeNav.flatMap((n) => {
+    if (n[0] !== 'items') return [n];
+    return [...(cafe ? [n] : []), ...(warehouse ? [['stock', 'Stock', '🏭']] : [])];
+  });
+}
 
 export default function AdminLayout() {
   const { user, logout } = useAuth();
-  const mode = useInventoryMode();
-  const nav = mode === 'warehouse' ? warehouseNav : cafeNav;
+  const nav = navFor(useStoreKinds());
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
   const [confirm, setConfirm] = useState(false);
