@@ -520,6 +520,18 @@ function StockImport({ onDone }) {
       setFile(null);
       await onDone();
     } catch (e) {
+      // The connection dropped or timed out while a big file was importing.
+      // The import may well have finished on the server — importing again
+      // blindly is how the same file got imported twice at once.
+      if (e.isNetwork) {
+        setResult({
+          tone: 'warning',
+          title: 'No reply from the server — the import may still be running or may already be done.',
+          lines: ['Wait a minute, then refresh this page and check the stock list (article and batch counts at the top) before importing again.'],
+        });
+        await onDone().catch(() => {});
+        return;
+      }
       const invalid = e.body?.invalid || [];
       setResult({
         tone: 'error',

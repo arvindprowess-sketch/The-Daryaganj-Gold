@@ -149,6 +149,16 @@ app.use((err, _req, res, _next) => {
   // it carries its own explanation and does not belong in the error log.
   if (err.name !== 'CsvFormatError') console.error(err);
   if (res.headersSent) return;
+  // A database constraint message ("duplicate key value violates unique
+  // constraint …") means nothing to an admin. Say what happened in words; the
+  // raw text stays in the server log above.
+  if (err.code === '23505') {
+    return res.status(409).json({
+      code: 'already_exists',
+      error: 'That record already exists — it was probably just saved by another action at the same moment. '
+        + 'Refresh the page and check before trying again.',
+    });
+  }
   res.status(err.status || 500).json({
     error: err.message || 'Server error',
     ...(err.code ? { code: err.code } : {}),
