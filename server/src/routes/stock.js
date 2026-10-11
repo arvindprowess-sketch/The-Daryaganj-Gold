@@ -402,15 +402,32 @@ router.post('/import', upload.single('file'), async (req, res) => {
     const d = parseDate(pick(rec, EXPIRY));
     if (d.error) { invalid.push({ row: line, article, batch: batchNo, reason: d.error }); return; }
     const key = `${nameKey(article)}\u0000${nameKey(batchNo)}`;
-    if (seen.has(key)) {
-      invalid.push({ row: line, article, batch: batchNo,
-                     reason: `Duplicate of row ${seen.get(key)} — the same article and batch twice` });
+    const description = clean(pick(rec, DESCRIPTION));
+    const unit = clean(pick(rec, UNIT));
+    // The same material and batch on several lines is normal in a stock
+    // sheet — one line per rack or bin the batch sits in. They are ONE batch:
+    // the lines are merged and their Stock ADDED. Only a line that would make
+    // the merge meaningless — the same batch in a different unit — is refused.
+    const prev = seen.get(key);
+    if (prev) {
+      if (unit && prev.unit && unit.toLowerCase() !== prev.unit.toLowerCase()) {
+        invalid.push({ row: line, article, batch: batchNo,
+                       reason: `Same material and batch as row ${prev.line} but a different unit (${unit} vs ${prev.unit}) — the two cannot be added together` });
+        return;
+      }
+      if (q.value != null) prev.qty = prev.qty == null ? q.value : Number((prev.qty + q.value).toFixed(3));
+      prev.description = prev.description || description;
+      prev.unit = prev.unit || unit;
+      prev.superName = prev.superName || superName;
+      prev.catName = prev.catName || catName;
+      prev.expiry = prev.expiry || d.value;
+      prev.mergedLines.push(line);
       return;
     }
-    seen.set(key, line);
-    valid.push({ line, article, batchNo, key, superName, catName,
-                 description: clean(pick(rec, DESCRIPTION)), unit: clean(pick(rec, UNIT)),
-                 qty: q.value, expiry: d.value });
+    const row = { line, article, batchNo, key, superName, catName, description, unit,
+                  qty: q.value, expiry: d.value, mergedLines: [] };
+    seen.set(key, row);
+    valid.push(row);
   });
 
   if (invalid.length) {
@@ -421,7 +438,10 @@ router.post('/import', upload.single('file'), async (req, res) => {
   }
 
   const summary = await withTransaction(async (c) => {
-    const s = { rows: valid.length, articles_created: 0, articles_updated: 0,
+    const s = { rows: valid.length, lines: records.length,
+                merged_lines: valid.reduce((t, r) => t + r.mergedLines.length, 0),
+                merged_batches: valid.filter((r) => r.mergedLines.length).length,
+                articles_created: 0, articles_updated: 0,
                 batches_created: 0, batches_updated: 0, batches_deactivated: 0 };
     const { rows: items } = await c.query(
       `SELECT id, name, unit, description, super_category_id, category_id

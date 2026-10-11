@@ -238,6 +238,12 @@ reading what was submitted (every auditor combined):
   nobody counted shows as shortage here. Remarks name new batches and
   materials not counted at all.
 
+**Repeated lines in the stock file.** The same Material + Batch on several
+lines (one line per rack or bin) is one batch: the lines are merged and their
+Stock added (10 + 20 + 5 → 35). Importing the same file again sets 35 again —
+it never adds to what is already there. Only the same batch in a different
+unit is refused, since those cannot be added.
+
 **Searching on the phone** matches the material description (what counters
 type) and the material. Typing a whole material and pressing Enter opens its
 batches directly. *Add & update* creates
