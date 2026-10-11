@@ -133,6 +133,46 @@ The zero half is dropped rather than printed, so the badge stays on one line
 next to the item name on a 380px phone. Mobile item list and desktop count
 entry use the same helper.
 
+## Warehouse mode — batch-wise stock
+
+The same app runs a batch-managed warehouse. Set `INVENTORY_MODE=warehouse` on
+that deployment's server; the cafe leaves it unset (default `cafe`) and
+nothing about it changes.
+
+| | Cafe (default) | Warehouse |
+| --- | --- | --- |
+| Admin menu | Item Master | **Stock** — Article · Description · Batches · Quantity |
+| Auditor home | Super category cards → item list | Search article (name **or** description) → batches |
+| Entry recorded against | Item | **Batch** (required when the article has batches) |
+| Book quantity on the phone | Never (blind count) | Shown per batch, before counting |
+
+**Workflow on the phone:** search article → tap it → every batch is listed with
+its system stock and what you have counted → tap a batch → system stock is shown
+above the form → enter physical quantity and location → save. Saving returns to
+the batch list so the next batch is one tap away.
+
+**Units.** A batch inherits its article's unit unless it has its own (e.g.
+`KG` loose in one batch, `BAG (25 KG)` in another). The phone, the entry sheet
+and every report show the batch's unit; KG/LTR batches get the two-box entry.
+The Stock list totals quantity **per unit** — different units are never added.
+
+**Stock CSV** (Stock → Import): one row per batch,
+`article, description, batch, unit, quantity, expiry`. *Add & update* creates
+and updates; *Replace* additionally deactivates every live batch not in the
+file. Any invalid row stops the whole import and is named. A blank quantity is
+"no figure", never zero.
+
+**Batch-wise count** (bottom of Stock): system vs physical per batch for any
+audit, reading the submitted snapshot (or the live count before submission),
+with a CSV download. Counts made against an article with no batch appear as
+`(no batch)` rather than being hidden.
+
+**Blind count.** `stock_qty` reaches an auditor **only** in warehouse mode; in
+cafe mode the server drops it from the batch endpoint. Batches that have been
+counted are deactivated, never deleted. Schema: migration
+`013_batches.sql` (`items.description`, `item_batches`, `batch_id` on
+`count_entries` / `submission_entries`) — all nullable, so cafe data is untouched.
+
 ## Non-negotiable design rules (audit defensibility)
 
 These are enforced in code, not just the UI:

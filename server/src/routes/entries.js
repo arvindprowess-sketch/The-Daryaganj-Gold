@@ -3,6 +3,7 @@ import { query } from '../db.js';
 import { resolveLocation } from '../lib/locations.js';
 import { requireAuth, loadAuditForUser } from '../middleware/auth.js';
 import { forRole } from '../lib/blindCount.js';
+import { config } from '../config.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -17,18 +18,73 @@ router.get('/audits/:auditId/items/:itemId/entries', async (req, res) => {
   // never see a colleague's count of the same item — that is the point of the
   // per-auditor model, and it is enforced in the query rather than hidden in
   // the client. An admin sees every entry, which is how a total is verified.
+  // ?batch_id= narrows the sheet to one batch (warehouse). Without it every
+  // entry for the article comes back, which is what the cafe has always read.
+  const batchId = /^\d+$/.test(String(req.query.batch_id || '')) ? Number(req.query.batch_id) : null;
   const { rows } = await query(
-    `SELECT ce.*, u.name AS counted_by_name, vu.name AS voided_by_name
+    `SELECT ce.*, u.name AS counted_by_name, vu.name AS voided_by_name,
+            b.batch_no
        FROM count_entries ce
        JOIN users u ON u.id = ce.counted_by
        LEFT JOIN users vu ON vu.id = ce.voided_by
+       LEFT JOIN item_batches b ON b.id = ce.batch_id
       WHERE ce.audit_id = $1 AND ce.item_id = $2
         AND ($3::int IS NULL OR ce.counted_by = $3)
+        AND ($4::int IS NULL OR ce.batch_id = $4)
       ORDER BY ce.counted_at ASC`,
+    [req.params.auditId, req.params.itemId,
+     req.user.role === 'admin' ? null : req.user.id, batchId]
+  );
+  res.json(forRole(req.user.role, rows));
+});
+
+// ── Batches of one article (warehouse) ──────────────────────────────────────
+// Every active batch with what has been counted against it so far — the
+// auditor's OWN count, the same per-auditor rule as the entry sheet.
+//
+// `stock_qty` is the batch's book quantity. The warehouse counter is meant to
+// see it, so they can compare system and physical stock while counting. The
+// cafe runs a BLIND count, so outside warehouse mode it never reaches an
+// auditor: it is dropped here, not hidden in the client.
+router.get('/audits/:auditId/items/:itemId/batches', async (req, res) => {
+  const { audit, allowed } = await loadAuditForUser(req.user, req.params.auditId);
+  if (!audit) return res.status(404).json({ error: 'Not found' });
+  if (!allowed) return res.status(403).json({ error: 'Forbidden' });
+  if (!/^\d+$/.test(String(req.params.itemId))) return res.status(400).json({ error: 'Invalid item' });
+
+  const { rows } = await query(
+    `SELECT b.id, b.item_id, b.batch_no,
+            to_char(b.expiry_date, 'YYYY-MM-DD') AS expiry_date,
+            COALESCE(NULLIF(btrim(b.unit), ''), i.unit) AS unit,
+            b.qty AS stock_qty,
+            COALESCE(agg.entry_count, 0)::int AS entry_count,
+            agg.total_qty, agg.total_bottles, agg.total_open_ml,
+            COALESCE(agg.void_count, 0)::int AS void_count
+       FROM item_batches b
+       JOIN items i ON i.id = b.item_id
+       LEFT JOIN LATERAL (
+         SELECT COUNT(*) FILTER (WHERE ce.status = 'active') AS entry_count,
+                SUM(ce.qty)     FILTER (WHERE ce.status = 'active') AS total_qty,
+                SUM(ce.bottles) FILTER (WHERE ce.status = 'active') AS total_bottles,
+                SUM(ce.open_ml) FILTER (WHERE ce.status = 'active') AS total_open_ml,
+                COUNT(*) FILTER (WHERE ce.status = 'void') AS void_count
+           FROM count_entries ce
+          WHERE ce.batch_id = b.id AND ce.audit_id = $1
+            AND ($3::int IS NULL OR ce.counted_by = $3)
+       ) agg ON TRUE
+      WHERE b.item_id = $2 AND b.is_active
+      ORDER BY b.expiry_date NULLS LAST, lower(b.batch_no)`,
     [req.params.auditId, req.params.itemId,
      req.user.role === 'admin' ? null : req.user.id]
   );
-  res.json(forRole(req.user.role, rows));
+  const showStock = req.user.role === 'admin' || config.inventoryMode === 'warehouse';
+  const out = rows.map((r) => {
+    const counted = r.entry_count > 0;
+    const row = { ...r, counted };
+    if (!showStock) delete row.stock_qty;
+    return row;
+  });
+  res.json(forRole(req.user.role, out));
 });
 
 // ── Create entry (APPEND-ONLY). Never overwrites; always a new row. ──────────
@@ -51,6 +107,32 @@ router.post('/audits/:auditId/entries', async (req, res) => {
   const { rows: itemRows } = await query('SELECT * FROM items WHERE id = $1 AND is_active = TRUE', [itemId]);
   const item = itemRows[0];
   if (!item) return res.status(404).json({ error: 'Item not found' });
+
+  // ── Batch ──────────────────────────────────────────────────────────────
+  // A batch must belong to this article and still be live. In warehouse mode
+  // an article that HAS batches must be counted against one of them — an
+  // article-level figure could not be reconciled with any batch's book stock.
+  // The cafe never sends a batch and never has one required.
+  let batchId = null;
+  if (b.batch_id !== undefined && b.batch_id !== null && b.batch_id !== '') {
+    if (!/^\d+$/.test(String(b.batch_id))) return res.status(400).json({ error: 'Invalid batch' });
+    const { rows: br } = await query(
+      'SELECT id, item_id, batch_no, is_active FROM item_batches WHERE id = $1', [b.batch_id]
+    );
+    const batch = br[0];
+    if (!batch || String(batch.item_id) !== String(item.id)) {
+      return res.status(400).json({ error: 'That batch does not belong to this article' });
+    }
+    if (!batch.is_active) {
+      return res.status(400).json({ error: `Batch "${batch.batch_no}" is no longer in use` });
+    }
+    batchId = batch.id;
+  } else if (config.inventoryMode === 'warehouse') {
+    const { rows: has } = await query(
+      'SELECT 1 FROM item_batches WHERE item_id = $1 AND is_active LIMIT 1', [item.id]
+    );
+    if (has.length) return res.status(400).json({ error: 'Choose a batch for this article' });
+  }
 
   let qty = null, bottles = null, openMl = null;
   if (item.is_liquor) {
@@ -78,13 +160,13 @@ router.post('/audits/:auditId/entries', async (req, res) => {
   const { rows } = await query(
     `INSERT INTO count_entries
        (audit_id, item_id, qty, bottles, open_ml, location_id, location_text,
-        remarks, photo_url, counted_by)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
+        remarks, photo_url, counted_by, batch_id)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
     // location_text is written from the chosen location's name, so the audit
     // trail still records the words, and old rows stay readable alongside new
     // ones without a special case.
     [req.params.auditId, itemId, qty, bottles, openMl, loc.location.id, loc.location.name,
-     b.remarks || null, b.photo_url || null, req.user.id]
+     b.remarks || null, b.photo_url || null, req.user.id, batchId]
   );
   const entry = rows[0];
 

@@ -115,10 +115,15 @@ export function clearedNotice(cleared) {
 // So the comparison is on CONTENT: what each entry would contribute to a
 // report. Re-entering the same numbers after a void therefore counts as no
 // change, which is correct — the report already says that.
+//
+// The batch is part of the content: moving a count from one batch to another
+// changes what the batch-wise report says even though the article total does
+// not. It is NULL on every cafe entry, on both sides, so it changes nothing
+// there.
 const ENTRY_SIG = (t) =>
-  `format('%s:%s:%s:%s:%s', ${t}.item_id, coalesce(${t}.location_id, 0),
+  `format('%s:%s:%s:%s:%s:%s', ${t}.item_id, coalesce(${t}.location_id, 0),
           coalesce(${t}.qty::text, ''), coalesce(${t}.bottles::text, ''),
-          coalesce(${t}.open_ml::text, ''))`;
+          coalesce(${t}.open_ml::text, ''), coalesce(${t}.batch_id, 0))`;
 
 // Per auditor with a STANDING submission: how many entries the reports are
 // missing, and how many they are still carrying that the auditor has since
@@ -229,9 +234,10 @@ export async function createSubmission(client, auditId, userId) {
   await client.query(
     `INSERT INTO submission_entries
        (submission_id, item_id, qty, bottles, open_ml, location_id, location_text,
-        remarks, photo_url, counted_by, counted_at)
+        remarks, photo_url, counted_by, counted_at, batch_id)
      SELECT $3, ce.item_id, ce.qty, ce.bottles, ce.open_ml, ce.location_id,
-            ce.location_text, ce.remarks, ce.photo_url, ce.counted_by, ce.counted_at
+            ce.location_text, ce.remarks, ce.photo_url, ce.counted_by, ce.counted_at,
+            ce.batch_id
        FROM count_entries ce
       WHERE ce.audit_id = $1 AND ce.counted_by = $2 AND ce.status = 'active'`,
     [auditId, userId, submission.id]

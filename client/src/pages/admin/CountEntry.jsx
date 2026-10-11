@@ -3,6 +3,8 @@ import { useParams, Link } from 'react-router-dom';
 import { api, bustCache } from '../../lib/api.js';
 import { Spinner, PhotoThumb, VoidMark } from '../../components/ui.jsx';
 import ItemEntry from '../../components/ItemEntry.jsx';
+import BatchSheet from '../../components/BatchSheet.jsx';
+import { useInventoryMode } from '../../lib/mode.js';
 import { useToast } from '../../components/Toast.jsx';
 import useDebounced, { normalizeName } from '../../lib/useDebounced.js';
 import { liquorBadge } from '../../lib/liquor.js';
@@ -38,6 +40,10 @@ export default function CountEntry() {
   const [status, setStatus] = useState('all');
   const debouncedSearch = useDebounced(search, 250);
   const toast = useToast();
+  // Warehouse: an article with batches is counted against a batch, through the
+  // same batch sheet the phone uses, never as an article-level figure.
+  const warehouse = useInventoryMode() === 'warehouse';
+  const byBatch = (i) => warehouse && i.batch_count > 0;
 
   const load = useCallback(async () => {
     const [list, detail] = await Promise.all([
@@ -179,7 +185,12 @@ export default function CountEntry() {
                       )}
                     </td>
                     <td className="px-3 py-2">
-                      {i.is_liquor ? (
+                      {byBatch(i) ? (
+                        <button className="btn-ghost py-1.5 px-3 text-sm" disabled={closed}
+                                onClick={() => setActive(i)}>
+                          Count by batch ({i.batch_count})
+                        </button>
+                      ) : i.is_liquor ? (
                         <div className="flex gap-1">
                           <input className="field py-1.5 px-2 w-20" placeholder="btl" disabled={closed}
                                  value={r.bottles ?? ''} onChange={(e) => setRow(i.id, { bottles: e.target.value.replace(/[^0-9]/g, '') })}
@@ -215,7 +226,7 @@ export default function CountEntry() {
                     <td className="px-3 py-2">
                       {/* Defaults to the sticky location chosen above the grid;
                           a row can still override it. */}
-                      <select className="field py-1.5 px-2 w-40" disabled={closed}
+                      <select className="field py-1.5 px-2 w-40" disabled={closed || byBatch(i)}
                               value={r.location_id ?? locationId ?? ''}
                               onChange={(e) => setRow(i.id, { location_id: e.target.value })}>
                         <option value="">location…</option>
@@ -223,7 +234,7 @@ export default function CountEntry() {
                       </select>
                     </td>
                     <td className="px-3 py-2 whitespace-nowrap">
-                      <button className="btn-primary py-1.5 px-3 text-sm" disabled={closed || savingId === i.id}
+                      <button className="btn-primary py-1.5 px-3 text-sm" disabled={closed || savingId === i.id || byBatch(i)}
                               onClick={() => saveRow(i)}>{savingId === i.id ? '…' : 'Save'}</button>
                       <button className="text-brand font-medium ml-3" onClick={() => setActive(i)}>Details</button>
                     </td>
@@ -237,7 +248,9 @@ export default function CountEntry() {
                         <table className="w-full text-xs">
                           <thead className="text-slate-500 text-left">
                             <tr>
-                              <th className="py-1">Quantity</th><th className="py-1">Location</th>
+                              <th className="py-1">Quantity</th>
+                              {warehouse && <th className="py-1">Batch</th>}
+                              <th className="py-1">Location</th>
                               {/* Auditors now work from separate sheets, so who
                                   recorded a row is how the admin tells two
                                   counts of the same item apart. */}
@@ -249,8 +262,9 @@ export default function CountEntry() {
                             {detail.entries.map((e) => (
                               <tr key={e.id} className={e.status === 'void' ? 'text-slate-400' : ''}>
                                 <td className={`py-1 ${e.status === 'void' ? 'line-through' : 'font-medium'}`}>
-                                  {i.is_liquor ? `${e.bottles ?? 0} btl · ${e.open_ml ?? 0} ml` : `${Number(e.qty)} ${i.unit}`}
+                                  {i.is_liquor ? `${e.bottles ?? 0} btl · ${e.open_ml ?? 0} ml` : `${Number(e.qty)} ${e.entry_unit || i.unit}`}
                                 </td>
+                                {warehouse && <td className="py-1">{e.batch_no || '—'}</td>}
                                 <td className={`py-1 ${e.status === 'void' ? 'line-through' : ''}`}>{e.location_text || '—'}</td>
                                 <td className="py-1">{e.counted_by_name}</td>
                                 <td className="py-1">{fmtDateTime(e.counted_at, '')}</td>
@@ -272,7 +286,7 @@ export default function CountEntry() {
                                   ? liquorBadge(detail.total_bottles, detail.total_open_ml)
                                   : `${detail.total_qty} ${i.unit}`}
                               </td>
-                              <td colSpan={5} className="py-1.5 text-slate-400">voided entries excluded</td>
+                              <td colSpan={warehouse ? 6 : 5} className="py-1.5 text-slate-400">voided entries excluded</td>
                             </tr>
                           </tbody>
                         </table>
@@ -420,10 +434,13 @@ export default function CountEntry() {
         </table>
       </div>
 
-      {active && (
+      {active && (byBatch(active) ? (
+        <BatchSheet auditId={auditId} item={active} uploadOnly
+                    onClose={() => setActive(null)} onSaved={load} />
+      ) : (
         <ItemEntry auditId={auditId} item={active} uploadOnly
                    onClose={() => setActive(null)} onSaved={load} />
-      )}
+      ))}
     </div>
   );
 }
