@@ -178,6 +178,18 @@ router.post('/audits/:auditId/entries', async (req, res) => {
   }
   if (clientRef) {
     const existing = await findByClientRef(req.user.id, clientRef);
+    // The same save already landed — but if the auditor has since VOIDED it,
+    // answering "already saved" would be a lie: the entry on screen is gone
+    // and nothing new is recorded. Refuse plainly instead, so the phone can
+    // save it again as a new entry (it changes the reference to do so), and
+    // a stale queued retry is parked where the auditor can see it rather
+    // than silently resurrecting a count they withdrew.
+    if (existing && existing.status === 'void') {
+      return res.status(409).json({
+        code: 'voided_duplicate',
+        error: 'This entry was saved earlier and then voided, so it was not saved again. Tap SAVE again to record it as a new entry.',
+      });
+    }
     if (existing) {
       return res.status(200).json({ ...forRole(req.user.role, existing), duplicate: true });
     }

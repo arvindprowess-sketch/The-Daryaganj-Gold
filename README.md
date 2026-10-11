@@ -535,6 +535,12 @@ This only prevents data loss; the app is otherwise online-only.
   stay on *this* phone and go after the next sign-in here.
 - Nothing on the server deletes entries on login or logout, and a refused
   queued entry is parked before it leaves the queue.
+- **Void, then save again:** voiding gives the form a fresh reference, so the
+  next SAVE is always a new entry. If a save that had landed (reply lost) is
+  sent again after it was voided, the server refuses it as
+  `voided_duplicate` instead of answering "already saved" — the phone says so
+  and the next SAVE records it as new; a stale queued copy is parked as
+  refused, never silently dropped and never brought back to life.
 
 ## Sessions and logout
 

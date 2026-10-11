@@ -165,6 +165,11 @@ export default function ItemEntry({ auditId, item, batch = null, onClose, onSave
           setNetState('unsaved');
           toast('NOT SAVED — no network and no space on this phone', 'error', 6000);
         }
+      } else if (err.code === 'voided_duplicate') {
+        // This exact save was recorded and then voided. A fresh reference
+        // makes the next SAVE a new entry.
+        clientRef.current = newClientRef();
+        setError(err.message);
       } else if (err.status >= 500) {
         setError(`Server error — the entry was NOT saved. Try again. (${err.message})`);
       } else {
@@ -192,6 +197,9 @@ export default function ItemEntry({ auditId, item, batch = null, onClose, onSave
     if (!reason || !reason.trim()) return;
     try {
       await api.post(`/entries/${entry.id}/void`, { reason: reason.trim() });
+      // Whatever is typed next is a NEW entry, never a repeat of one that was
+      // just withdrawn.
+      clientRef.current = newClientRef();
       await loadEntries();
       toast('Entry voided');
       await onSaved?.();
