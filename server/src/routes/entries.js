@@ -31,10 +31,12 @@ async function findByClientRef(userId, clientRef) {
 // It is permanent: an ordinary batch of the article from now on, available to
 // every counter and every later audit. `origin = 'counted'` and who / which
 // audit created it are kept so the admin can find it.
-async function findOrCreateBatch(c, { item, batchNo, unit, userId, auditId }) {
-  const ownUnit = String(unit ?? '').trim();
-  const storedUnit = ownUnit && ownUnit.toLowerCase() !== String(item.unit || '').trim().toLowerCase()
-    ? ownUnit : null;
+async function findOrCreateBatch(c, { item, batchNo, userId, auditId }) {
+  // A batch found on the shelf is the same material, in the material's unit.
+  // The counter is no longer asked for a unit: the box was being filled with
+  // numbers ("5", "3") that split the material's total into "units". Any unit
+  // stored on an older counted batch is ignored when it is read back.
+  const storedUnit = null;
   const { rows: created } = await c.query(
     `INSERT INTO item_batches (item_id, batch_no, unit, origin, created_by, created_in_audit)
      VALUES ($1,$2,$3,'counted',$4,$5)
@@ -119,7 +121,7 @@ router.get('/audits/:auditId/items/:itemId/batches', async (req, res) => {
   const { rows } = await query(
     `SELECT b.id, b.item_id, b.batch_no, b.origin, b.is_active,
             to_char(b.expiry_date, 'YYYY-MM-DD') AS expiry_date,
-            COALESCE(NULLIF(btrim(b.unit), ''), i.unit) AS unit,
+            COALESCE(NULLIF(btrim(CASE WHEN b.origin = 'counted' THEN NULL ELSE b.unit END), ''), i.unit) AS unit,
             -- A retired batch has no book stock any more (same rule as the reports).
             CASE WHEN b.is_active THEN b.qty END AS stock_qty,
             COALESCE(agg.entry_count, 0)::int AS entry_count,
@@ -317,7 +319,7 @@ router.post('/audits/:auditId/entries', async (req, res) => {
     let batchOutcome = null;
     if (newBatchNo) {
       const r = await findOrCreateBatch(c, {
-        item, batchNo: newBatchNo, unit: b.new_batch_unit, userId: req.user.id,
+        item, batchNo: newBatchNo, userId: req.user.id,
         auditId: Number(req.params.auditId),
       });
       batchId = r.id;

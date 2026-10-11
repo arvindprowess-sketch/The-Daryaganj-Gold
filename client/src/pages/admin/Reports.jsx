@@ -429,7 +429,7 @@ function WarehouseReports({ auditId, store }) {
           {data.source === 'cleared'
             ? 'Cleared.'
             : 'Live — every auditor\'s entries as they stand right now, combined. Submitting is not needed for a count to appear here.'}
-          {compile && ' Location-wise, exactly as entered: one line per batch, place and auditor (Counted By). A batch\'s Stock and Difference are on its first line. Batches nobody counted are on the Material-wise Variance.'}
+          {compile && ' Location-wise, exactly as entered: one line per batch, place and auditor (Counted By). A batch\'s Stock and Difference are on its first line. Batches nobody counted are listed too, with Physical blank and "Not counted", so Stock, Physical and Difference add up to the Material-wise Variance.'}
         </p>
       )}
       <div className="flex flex-wrap gap-2 mb-3 items-center">

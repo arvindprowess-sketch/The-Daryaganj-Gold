@@ -47,7 +47,7 @@ export async function batchReport(auditId, source = null) {
     sc.name AS super_category, c.name AS brand,
     b.batch_no, b.is_active AS batch_active, b.origin AS batch_origin,
     b.created_in_audit, cb.name AS batch_created_by,
-    COALESCE(NULLIF(btrim(b.unit), ''), i.unit) AS unit`;
+    COALESCE(NULLIF(btrim(CASE WHEN b.origin = 'counted' THEN NULL ELSE b.unit END), ''), i.unit) AS unit`;
 
   // Every individual entry — the detail sheet, and the location breakdown.
   const { rows: entries } = await query(
@@ -117,7 +117,11 @@ export async function batchReport(auditId, source = null) {
     // on its own and never folded in.
     const physical = counted ? (r.is_liquor ? sum('bottles') : sum('qty')) : null;
     const openMl = counted && r.is_liquor ? sum('open_ml') : null;
-    const difference = counted && r.stock_qty != null ? r3(physical - Number(r.stock_qty)) : null;
+    // A counted batch with no book stock (a NEW batch, or one the stock file
+    // left blank) has stock 0: all it counted is excess. The Material-wise
+    // Variance counts it that way, so the Physical Compile has to as well,
+    // or the two Difference columns stop adding up to the same figure.
+    const difference = counted ? r3(physical - Number(r.stock_qty ?? 0)) : null;
     // "Kitchen 5 · Store 3" — where the quantity was found.
     // Keyed case- and space-insensitively, so "Kitchen" and "kitchen " are
     // one place; the first spelling seen is the one shown.
@@ -191,7 +195,9 @@ function articleTotals(rows) {
       ? r3(withStock.reduce((t, r) => t + Number(r.stock_qty), 0)) : null;
     const physical = counted.length && !mixed
       ? r3(counted.reduce((t, r) => t + Number(r.physical_qty || 0), 0)) : null;
-    const physicalOrZero = physical ?? (system != null && !counted.length ? 0 : null);
+    // No book stock is stock 0 — the same rule as the batch lines, so both
+    // sheets' Difference columns add up to the same figure.
+    const physicalOrZero = physical ?? (!counted.length ? 0 : null);
     // "90 BOX + 5 PCS" — the counts of a mixed-unit material, per unit.
     const perUnit = new Map();
     for (const r of counted) {
@@ -208,7 +214,8 @@ function articleTotals(rows) {
       physical_by_unit: mixed
         ? [...perUnit].map(([k, q]) => `${q}${named.get(k) ? ` ${named.get(k)}` : ''}`).join(' + ')
         : null,
-      difference: !mixed && system != null && physicalOrZero != null ? r3(physicalOrZero - system) : null,
+      difference: !mixed && physicalOrZero != null && (system != null || counted.length)
+        ? r3(physicalOrZero - (system ?? 0)) : null,
     });
   }
   return out;
@@ -391,9 +398,12 @@ export function locationLines(report, { includeUncounted = false } = {}) {
   return out;
 }
 
-// PHYSICAL COMPILE SHEET — exactly what was entered.
+// PHYSICAL COMPILE SHEET — exactly what was entered, line by line, plus one
+// line for every stock batch nobody counted (Physical blank, "Not counted").
+// Without those lines its Stock column held only the counted batches' stock
+// and never matched the Material-wise Variance, which has every batch.
 export function compileRows(report) {
-  return locationLines(report).map((l) => ({ ...l, locations: l.location }));
+  return locationLines(report, { includeUncounted: true }).map((l) => ({ ...l, locations: l.location }));
 }
 
 export const MATERIAL_HEADERS = ['Super category', 'Brand', 'Material', 'Material Description',
@@ -464,7 +474,7 @@ export function compileSheet(report) {
   const { line1, src } = titleOf(report);
   return { name: 'Physical Compile Sheet', aoa: [
     [`Physical Compile Sheet · ${line1}`],
-    [`${src} · location-wise, as entered · ${rows.length} lines · Stock and Difference on each batch's first line`],
+    [`${src} · location-wise, as entered · ${rows.length} lines · Stock and Difference on each batch's first line · batches not counted are listed with Physical blank`],
     [],
     COMPILE_HEADERS,
     ...rows.map((r) => [r.super_category, r.brand, r.material, r.description, r.batch,
@@ -499,7 +509,7 @@ export async function allEntries(auditId) {
   const { rows } = await query(
     `SELECT ce.id, sc.name AS super_category, c.name AS brand, i.name AS material,
             i.description, i.is_liquor, b.batch_no, b.origin AS batch_origin,
-            COALESCE(NULLIF(btrim(b.unit), ''), i.unit) AS unit,
+            COALESCE(NULLIF(btrim(CASE WHEN b.origin = 'counted' THEN NULL ELSE b.unit END), ''), i.unit) AS unit,
             ce.qty, ce.bottles, ce.open_ml,
             COALESCE(l.name, ce.location_text) AS location,
             u.name AS counted_by, ce.counted_at, ce.status, ce.void_reason,

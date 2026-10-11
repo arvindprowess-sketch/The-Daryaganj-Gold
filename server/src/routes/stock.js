@@ -62,7 +62,7 @@ function batchUnit(rowUnit, articleUnit) {
 }
 
 const BATCH_COLUMNS = `b.id, b.item_id, b.batch_no, b.unit AS own_unit,
-       COALESCE(NULLIF(btrim(b.unit), ''), i.unit) AS unit,
+       COALESCE(NULLIF(btrim(CASE WHEN b.origin = 'counted' THEN NULL ELSE b.unit END), ''), i.unit) AS unit,
        b.qty, to_char(b.expiry_date, 'YYYY-MM-DD') AS expiry_date, b.is_active,
        b.origin, b.created_at, b.created_in_audit,
        (SELECT name FROM users WHERE id = b.created_by) AS created_by_name,
